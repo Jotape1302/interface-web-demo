@@ -1,0 +1,11 @@
+[Unit]
+Description=Norvia - backup diário às 02:30
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# Se o servidor estava desligado às 02:30, roda assim que ligar.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

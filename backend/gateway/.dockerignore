@@ -1,0 +1,24 @@
+# Contexto de build do gateway: só package*.json, tsconfig.json e src/ entram na imagem.
+# Segredos e artefatos locais nunca vão para o daemon do Docker.
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+node_modules
+dist
+logs
+**/*.log
+data
+certs
+**/certs
+secrets
+**/secrets
+**/*.pem
+**/*.key
+**/*.crt
+**/*.pfx
+**/*.p12
+test
+coverage
+**/*.tsbuildinfo

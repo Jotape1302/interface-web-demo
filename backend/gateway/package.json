@@ -1,0 +1,7 @@
+{
+  "name": "norvia-integration", "version": "1.0.0", "private": true, "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "dev": "node --env-file-if-exists=.env --import tsx src/index.ts", "build": "tsc", "start": "node --env-file-if-exists=.env dist/index.js", "test": "tsx --test test/*.test.ts" },
+  "dependencies": { "mariadb": "^3.4.5" },
+  "devDependencies": { "@types/node": "^22.0.0", "tsx": "^4.20.0", "typescript": "^5.9.0" }
+}

@@ -1,0 +1,37 @@
+# Contexto de build da automação: só requirements.txt, app/ e scripts/ entram na imagem.
+# Segredos, dados de produção e notas fiscais nunca vão para o daemon do Docker
+# (no servidor, data/ e as pastas de notas chegam por volume, não pela imagem).
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+node_modules
+dist
+logs
+**/*.log
+data
+certs
+**/certs
+secrets
+**/secrets
+**/*.pem
+**/*.key
+**/*.crt
+**/*.pfx
+**/*.p12
+**/*.pass
+__pycache__
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+temp
+input_danfes
+processed
+failed
+pending_review
+archived

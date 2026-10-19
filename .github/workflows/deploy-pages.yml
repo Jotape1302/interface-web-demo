@@ -1,0 +1,61 @@
+# ==============================================================================
+# Publica o frontend em modo demonstração no GitHub Pages: export estático, dados
+# fictícios, sem gateway nem automações. BASE_PATH = /<nome do repositório>.
+# Requer Settings > Pages > Source = "GitHub Actions".
+# ==============================================================================
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["frontend/**", ".github/workflows/deploy-pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_PATH: /${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Instalar dependências
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Build demo
+        working-directory: frontend
+        run: npm run build:portfolio
+      - name: Montar site
+        # O export fica em dist/client/<BASE_PATH>/; o Pages serve a raiz em /<repo>/.
+        run: |
+          mkdir -p site
+          cp -r "frontend/dist/client${BASE_PATH}/." site/
+          cp frontend/dist/client/404.html site/404.html
+          touch site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

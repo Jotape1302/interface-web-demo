@@ -1,0 +1,31 @@
+{
+  "name": "norvia-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo corporativo Norvia: Frontend Next.js, API Gateway Node.js e Automações Independentes",
+  "scripts": {
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:mock": "npm --prefix frontend run dev:mock",
+    "dev:gateway": "npm --prefix backend/gateway run dev",
+    "dev:nfe": "cd backend/automations/automacoes-financeiro && .venv/bin/python -m app.main --serve --port 8000",
+    "dev:estoque": "cd backend/automations/contagem-estoque && .venv/bin/python -m app.main",
+    "dev:marketplace": "cd backend/automations/automacoes-marketplace && python -m app.main",
+    "dev:producao": "cd backend/automations/automacoes-producao && python -m app.main",
+    "test:frontend": "npm --prefix frontend test",
+    "test:gateway": "npm --prefix backend/gateway test",
+    "test:nfe": "cd backend/automations/automacoes-financeiro && (pytest tests/ -v 2>/dev/null || uv run --python 3.11 --with-requirements requirements-dev.txt pytest tests/ -v)",
+    "test:estoque": "cd backend/automations/contagem-estoque && python3 -m pytest tests/ -v",
+    "test:marketplace": "cd backend/automations/automacoes-marketplace && python -m pytest tests/ -v",
+    "test:producao": "cd backend/automations/automacoes-producao && python -m pytest tests/ -v",
+    "test": "npm run test:gateway && npm run test:frontend",
+    "test:all": "npm run test:gateway && npm run test:frontend && npm run test:nfe && npm run test:producao && npm run test:marketplace",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:portfolio": "npm --prefix frontend run build:portfolio",
+    "build:gateway": "npm --prefix backend/gateway run build",
+    "build": "npm run build:gateway && npm run build:frontend",
+    "audit:secrets": "gitleaks git --config .gitleaks.toml --redact --no-banner .",
+    "audit:npm": "npm --prefix backend/gateway audit --omit=dev --audit-level=high && npm --prefix frontend audit --omit=dev --audit-level=high",
+    "audit:python": "for m in automacoes-financeiro automacoes-marketplace automacoes-producao contagem-estoque; do (cd backend/automations/$m && uvx --python 3.11 pip-audit==2.10.1 -r requirements.txt --progress-spinner off) || exit 1; done",
+    "audit": "npm run audit:secrets && npm run audit:npm && npm run audit:python"
+  }
+}

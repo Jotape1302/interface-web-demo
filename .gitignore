@@ -1,0 +1,110 @@
+# ==============================================================================
+# .gitignore - NORVIA AUTOMAÇÕES
+# ==============================================================================
+
+# Dependências
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Saídas de compilação e builds
+dist/
+build/
+out/
+.next/
+.vinext/
+.wrangler/
+.wrangler-config/
+.vercel
+next-env.d.ts
+*.tsbuildinfo
+*.zip
+!frontend/public/downloads/*.zip
+artifacts/
+*.blend
+*.blend1
+
+
+# Variáveis de ambiente e segredos
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+
+# Infraestrutura local / VPS (Governança estritamente humana)
+docker-compose.yml
+docker-compose*.yml
+docker-compose.override.yml
+
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+certs/
+**/certs/
+secrets/
+**/secrets/
+**/data/*.json
+**/tiny_token_cache.json
+**/google_token.json
+**/credentials*.json
+**/input_danfes/
+**/processed/
+**/failed/
+**/pending_review/
+**/archived/
+
+# Logs e depuração
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+logs/
+*.log.*
+
+# Cobertura de testes
+coverage/
+.nyc_output/
+
+# Python / Ambientes virtuais e cache (para agentes e análise de dados)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+
+# Arquivos temporários e de editores/SO
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Backup: configuração com senha do banco
+scripts/backup/backup.env
+
+# Base de conhecimento RAG (Qwen 14B local): espelho somente leitura de
+# ../RAGs/knowledge (fonte da verdade), mantido pelo agente rag_curator
+knowledge/

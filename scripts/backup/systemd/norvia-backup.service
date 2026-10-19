@@ -1,0 +1,13 @@
+# Backup diário do MariaDB e dos caches das automações (scripts/backup/backup.sh).
+# Unidade de USUÁRIO (systemctl --user), como o Docker rootless do servidor.
+# Ajuste o caminho do repositório em ExecStart antes de instalar.
+[Unit]
+Description=Norvia - backup do MariaDB e dos caches das automações
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/norvia/interface-web/scripts/backup/backup.sh
+Nice=10
+IOSchedulingClass=idle

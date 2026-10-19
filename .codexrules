@@ -1,0 +1,81 @@
+# ==============================================================================
+# .codexrules - DIRETRIZES OPERACIONAIS GLOBAIS DO SISTEMA MULTIAGENTE NORVIA
+# ==============================================================================
+# Este documento define as leis fundamentais de governança, arquitetura técnica,
+# fronteiras de atuação e padrões de execução da malha de agentes deste repositório.
+# Todos os agentes (Codex, Claude, Antigravity, etc.) operam em total conformidade.
+# ==============================================================================
+
+[GOVERNANCA_E_COMUNICACAO]
+1. CANAL EXCLUSIVO DO USUÁRIO:
+   - O usuário humano SEMPRE se comunica única e exclusivamente com o Orquestrador Central (`orchestrator.md`).
+   - Nenhum agente especialista responde diretamente ao usuário sem passar pelo crivo, consolidação e síntese do Orquestrador.
+   - Toda solicitação recebida passa pela triagem de complexidade do Orquestrador (seção 3 de `orchestrator.md`): execução direta por padrão, loop de agentes só para demandas muito complexas ou a pedido do usuário.
+   - No loop de agentes, o fluxo é: o Orquestrador designa o mínimo de agentes necessário → o Orquestrador redige um Prompt de Delegação por agente designado, no formato de `agents/prompt_engineer.md` → despacha cada prompt ao subagente nativo do papel (`.claude/agents/<agente>.md`, que fixa o modelo) na ordem de precedência → consolida as entregas. Nesse modo nenhum agente é acionado sem o seu Prompt de Delegação.
+   - Na execução direta, o Orquestrador resolve sozinho no papel e nas fronteiras do agente dono, cumprindo as Regras de Ouro e a regra de fechamento (testes, documentação e base RAG proporcionais à mudança).
+
+2. SEPARAÇÃO ESTRITA DE RESPONSABILIDADES (12 AGENTES ESPECIALISTAS ATIVOS):
+   Cada agente possui um domínio de atuação rigorosamente delimitado e catalogado em `registry.json`:
+   * `orchestrator.md`: Triagem de complexidade, execução direta das demandas simples (no papel e nas fronteiras do agente dono) e, no loop de agentes, planejamento, sequenciamento de dependências, controle de estado e síntese de entregas.
+   * `agents/interface_uiux.md`: Design System Norvia, hierarquia visual, ergonomia de dashboards fiscais, padronização de logos de parceiros e acessibilidade WCAG. Proibido de implementar lógicas de backend ou alterar regras de negócio.
+   * `agents/frontend.md`: Aplicação web administrativa em `frontend/` (vinext/Vite com convenções de rota do App Router, React 19, TypeScript, Tailwind CSS v4, export estático e consumo de `contracts.ts`; o Canvas WebGL do mascote com React Three Fiber é handoff futuro, ainda não implementado). Proibido de criar DDL de banco de dados ou orquestrar pipelines de dados no servidor.
+   * `agents/gateway.md`: API Gateway central Node.js/TypeScript (servidor HTTP nativo, sem framework) em `backend/gateway/` (porta 3100), roteamento, autenticação de sessão, agregação `/api/overview` e health checks de terceiros (n8n, Tiny ERP, Banco Inter). Proibido de alterar lógicas internas de automações ou gerar componentes de UI.
+   * `agents/backend.md`: APIs de negócio (FastAPI/Node.js), persistência MariaDB com SQL puro (sem ORM), transações idempotentes, suítes de teste (`pytest` / `tsx --test`). Proibido de gerar interfaces gráficas ou manipular código de frontend.
+   * `agents/automation_engineer.md`: Motores autônomos em `backend/automations/<slug>/` (RPA Python, OCR de DANFEs, código de barras, envelopes SOAP SEFAZ mTLS A1 e conectores ERP). Proibido de alterar o roteamento central do Gateway ou componentes visuais de frontend.
+   * `agents/mascot_3d.md`: Automação 3D em Blender CLI (`bpy`/`bmesh`), rigging mecânico modular, materiais PBR (esmalte pérola, azul robótico, ouro champanhe), iluminação LED emissiva real, máscaras geométricas de superfície e exportação GLTF/Draco otimizada para WebGL. Proibido de alterar código de infraestrutura ou regras de banco de dados.
+   * `agents/devops.md`: Governança do monorepo, Dockerfiles, Docker rootless (volumes com ACL), snippets de compose para o usuário, CI de segurança, backup, gestão de portas e proteção de segredos. Proibido de alterar regras de negócio de automações ou regras visuais de UI.
+   * `agents/security_auditor.md`: Auditoria de segurança somente leitura (código, dependências, segredos no histórico git, infraestrutura), com severidade calibrada ao modelo de ameaça da intranet e handoff das correções ao agente dono. Proibido de alterar código, configuração ou histórico git e de ler arquivos protegidos pelo `.gitignore`.
+   * `agents/technical_writer.md`: Documentação fiel ao código (READMEs, `docs/`, `.env.example`, `registry.json`, `orchestrator.md`, `.codexrules`, `agents/`). Proibido de alterar código de produção, testes ou configuração executável e de documentar segredos reais.
+   * `agents/qa_engineer.md`: Verificação independente antes da consolidação (suítes afetadas, revisão de diff, contratos, RBAC e checklist das Regras de Ouro). Pode escrever testes; proibido de corrigir código de produção e de rodar qualquer coisa contra a VPS ou APIs externas reais.
+   * `agents/prompt_engineer.md`: Desenho e revisão dos prompts da malha (`orchestrator.md`, `agents/*.md`), dono do formato dos Prompts de Delegação (redigidos pelo Orquestrador em cada demanda) e, só quando encomendado, de prompts para funcionalidades com LLM (schema de saída, defesas contra prompt injection, modo mock, avaliação). Proibido de implementar código de produção, de introduzir chamadas a LLM sem encomenda e de afrouxar fronteiras de segurança dos agentes.
+   * `agents/rag_curator.md`: Base de conhecimento RAG exclusiva do projeto interface-web (fonte da verdade em `../RAGs/knowledge/`, repositório privado `norvia-ti/RAGs`, espelho gitignorado em `knowledge/`) e banco vetorial Chroma (`interface_web_knowledge`): reindexação, avaliação de recuperação e sincronização do espelho. Proibido de editar o espelho à mão, de documentar segredos, de misturar outros projetos na coleção e de alterar código de produção.
+
+3. PADRÃO DE RESPOSTAS E COMUNICAÇÃO:
+   - Comunicação estritamente técnica, direta, estruturada e orientada a resultados ("sem enrolação").
+   - Elimine saudações prolixas, apologias, preâmbulos desnecessários e encerramentos genéricos.
+   - Respostas devem utilizar blocos sintáticos padronizados, listas tipadas, tabelas e links explícitos para arquivos e funções.
+   - Todas as decisões técnicas devem explicitar a justificativa arquitetural e o impacto de negócio.
+
+4. GOVERNANÇA DO DOCKER-COMPOSE (EXCLUSIVA HUMANA):
+   - O arquivo `docker-compose.yml` (e quaisquer variantes `docker-compose*.yml`) é de governança ESTRITAMENTE HUMANA.
+   - Nenhum agente de IA tem permissão para modificar, salvar ou comitar alterações no `docker-compose.yml`.
+   - Ajustes necessários em containers, portas, volumes ou variáveis de ambiente devem ser fornecidos como texto explicativo/snippet para execução manual pelo usuário.
+
+
+[LEIS_ARQUITETURAIS_E_FRONTEIRAS_INVIOLAVEIS]
+1. REGRA DE OURO DA SEGREGAÇÃO MOCK VS. LIVE:
+   - O ambiente de desenvolvimento local roda ESTREITAMENTE em modo Mock/Demo seguro (dados de `lib/demo.ts` no frontend, fallback em memória no gateway). É terminantemente proibido disparar chamadas externas destrutivas ou faturáveis (SEFAZ, Banco Inter, Tiny ERP) a partir da máquina local.
+   - O ambiente de produção na VPS opera com credenciais vivas, certificados digitais e dados reais.
+   - O Gateway e os serviços devem manter essa segregação isolada via variáveis de ambiente (`ENVIRONMENT=development|production` e flags `MOCK_MODE=true|false`).
+
+2. REGRA DE OURO DA ESTEIRA DE DANFES (VARREDURA DIRETA SEFAZ):
+   - A esteira de DANFEs roda por varredura direta na SEFAZ (NSU), NÃO por pasta do Google Drive — esse fluxo antigo foi substituído (ver `backend/automations/automacoes-financeiro/app/sefaz_scan.py`).
+   - Uma DANFE só é considerada lançada **se e somente se o processamento for concluído com 100% de sucesso** no ERP (Tiny) e no banco de dados.
+   - Caso ocorra QUALQUER falha de validação, erro de OCR, rejeição SEFAZ (inclusive bloqueio por rate limit, `cStat 656`) ou inconsistência contábil, a nota permanece em revisão pendente, com registro do erro.
+
+3. REGRA DE OURO DO MASCOTE 3D (MÁSCARAS GEOMÉTRICAS):
+   - É terminantemente PROIBIDO tentar apagar ou pintar logos antigos editando pixels diretamente em atlas de texturas UVs ou no mapa de normais (`texture_pbr_20250901_normal`). Isso destrói o espaço tangente Mikktspace e gera facetamento poligonal feio.
+   - A substituição de logos no peitoral e orelhas deve ser realizada via MÁSCARAS GEOMÉTRICAS (backing plates conformadas à curvatura da superfície, com offset de ~0.5mm e material Azul Marinho Royal `Mat_Robot_Navy`), sobre as quais são aplicados os novos monogramas 3D oficiais da Norvia.
+
+4. REGRA DE RESILIÊNCIA NO GATEWAY:
+   - O Gateway protege os upstreams (SEFAZ, Tiny ERP, Banco Inter e automações Python) com um Circuit Breaker próprio (`backend/gateway/src/circuit-breaker.ts`, estados CLOSED/OPEN/HALF_OPEN), sem biblioteca externa. Qualquer falha de conector deve degradar com mensagem clara no `/api/overview` (`connected: false`), nunca travar o painel nem lançar exceção não tratada. Novas dependências externas de resiliência só com alinhamento prévio.
+
+5. REGRA DE PADRONIZAÇÃO VISUAL E ERGONOMIA NA INTERFACE:
+   - Padronização de logos de parceiros (MariaDB, n8n, Tiny ERP, Banco Inter, Google Drive): cantos arredondados suaves, proporções equilibradas e fundo padronizado (evitando conflitos de fundo preto/branco e artefatos de borda).
+   - Tela de login com identidade visual alinhada ao painel, logotipo oficial visível e textboxes limpas (`placeholder="Username/E-mail"`), sem credenciais padrão pré-preenchidas.
+   - Histórico de execuções: telas de controle de automação (esteira de tokens, processador NFe) DEVEM exibir a tabela/painel com o histórico das últimas execuções em tempo real.
+
+6. ISOLAMENTO DAS PASTAS DE AUTOMAÇÃO (`backend/automations/<slug>/`):
+   - Cada automação em `backend/automations/<slug>/` DEVE ser autocontida, possuindo manifesto de dependências exclusivo (`requirements.txt`), documentação, testes automatizados e endpoint padrão `/health`.
+   - Nenhuma automação importa código diretamente de outra automação; a interoperabilidade ocorre via Gateway ou chamadas HTTP REST.
+
+
+[CONFIDENCIALIDADE_E_RESTRICAO_DE_ARQUIVOS]
+1. RESTRIÇÃO INVIOLÁVEL AO .GITIGNORE:
+   - Nenhum agente tem permissão para ler, expor, commitar ou modificar arquivos protegidos ou cobertos pelo `.gitignore`:
+     * Arquivos de orquestração de containers locais (`docker-compose.yml`, `docker-compose*.yml`).
+     * Arquivos de variáveis de ambiente e segredos (`.env`, `.env.*`, `.env.local`, certificados `*.pem`, `*.pfx`, `*.key`, `*.cert`).
+     * Dependências e artefatos de build (`node_modules/`, `dist/`, `.next/`, `.vinext/`, `.wrangler/`, `*.tsbuildinfo`).
+     * Caches e logs (`*.log`, `__pycache__/`, `.pytest_cache/`, `.venv/`).
+   - Consultar apenas arquivos rastreados publicamente e modelos de configuração (como `.env.example`).
+   - Exceção única: `artifacts/norvia-mascot/` (ignorado por ser binário grande, não por sigilo) pode ser lido e escrito pelo `agents/mascot_3d.md`, sem nunca ser commitado.

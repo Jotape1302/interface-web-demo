@@ -1,0 +1,6 @@
+fastapi>=0.120.0
+starlette>=1.0.0  # allow_private_network no CORS (e já sem os DoS CVE-2025-54121/62727)
+uvicorn>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+pywin32>=306; sys_platform == "win32"

@@ -1,0 +1,41 @@
+========================================================
+IMPRESSAO DE ETIQUETAS - NORVIA PRODUCAO
+========================================================
+O tablet (sistema de OP) manda os dados da etiqueta para este PC,
+que imprime na Elgin L42-DT ligada na USB.
+
+1. Instale o Python 3.10+ (https://www.python.org/downloads/)
+   marcando "Add Python to PATH".
+2. Instale o driver da Elgin L42-DT e ligue a impressora na USB.
+3. (So se o tablet for chamar direto pela rede local, sem
+   Cloudflare) rode UMA vez "liberar_firewall.bat" com o botao
+   direito -> "Executar como administrador".
+4. De dois cliques em "iniciar.bat" e deixe a janela aberta.
+   Na primeira vez ele cria o arquivo .env e PARA com erro:
+   abra o .env, preencha CHAVE_API= com a chave definida (minimo
+   32 caracteres, a mesma do sistema de OP) e rode de novo.
+5. Cloudflare Tunnel: instale o cloudflared neste PC e aponte o
+   hostname publico para http://localhost:8003
+6. O sistema de OP chama https://SEU-HOSTNAME/etiquetas/imprimir
+   sempre com o header  X-Api-Key: <a chave do .env>
+7. Para iniciar com o Windows: Win+R -> shell:startup e coloque
+   um atalho do iniciar.bat nessa pasta.
+
+Trocar a chave: altere CHAVE_API= no .env (32+ caracteres),
+reinicie o iniciar.bat e atualize no sistema de OP.
+
+Se a impressora nao for encontrada, abra o arquivo .env e preencha
+IMPRESSORA= com o nome exato dela (Configuracoes -> Impressoras).
+Se os acentos sairem errados: REMOVER_ACENTOS=true no .env.
+
+Linguagem: a Elgin L42-DT vem em PPLB/EPL, entao o padrao e
+LINGUAGEM=epl. Se um dia trocar por Zebra ou ativar o PPLZ na Elgin,
+use LINGUAGEM=zpl. Etiqueta clara demais/escura demais: ajuste
+DENSIDADE= (0 a 15, padrao 10). Etiqueta desalinhando: GAP_DOTS=
+(espaco entre etiquetas em pontos, padrao 24).
+
+Limites (no .env): no maximo LIMITE_REQUISICOES_MINUTO pedidos e
+LIMITE_COPIAS_MINUTO etiquetas por minuto (cada pedido: 1 a 1000).
+Passou do limite: o sistema de OP recebe erro 429 e tenta depois.
+Se usar SO o Cloudflare (sem rede local), coloque HOST=127.0.0.1
+no .env.

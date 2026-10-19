@@ -1,0 +1,30 @@
+# Versões EXATAS (CE-7, 2026-10-07): o detector foi calibrado e validado (tests/fotos_reais)
+# com estas versões. Atualizar OpenCV/numpy pode mudar a contagem: antes, rode
+# `python scripts/avaliar.py` e os testes, e só então suba o número aqui.
+
+# Configuração (mesmo padrão da automacao-nfe)
+pydantic==2.13.5
+pydantic-settings==2.15.0
+
+# Telegram (long polling)
+python-telegram-bot==22.8
+
+# Visão computacional (headless: o servidor não tem interface gráfica)
+opencv-python-headless==5.0.0.93
+numpy==2.4.6
+
+# Código de barras da prateleira (Code 128, EAN, QR...). Precisa da libzbar0 no sistema
+# (Dockerfile); sem ela, app/codigo.py lê só QR e EAN/UPC pelo OpenCV.
+pyzbar==0.1.9
+
+# API interna (gateway → lançamento no Tiny) e leitura do token na api_tokens
+# (mesmos pisos de segurança da automacoes-marketplace; não mexem na contagem)
+fastapi>=0.120.0
+starlette>=0.49.1  # CVE-2024-47874, CVE-2025-54121, CVE-2025-62727
+uvicorn>=0.28.0
+requests>=2.32.4  # CVE-2024-47081
+pymysql>=1.1.1  # CVE-2024-36039
+
+# Testes
+pytest>=8.0.0
+httpx>=0.27.0

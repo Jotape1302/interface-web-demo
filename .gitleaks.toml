@@ -1,0 +1,37 @@
+# ==============================================================================
+# .gitleaks.toml - varredura de segredos (CI: .github/workflows/security.yml;
+# local: .pre-commit-config.yaml). Regras padrão do gitleaks + allowlist SÓ de
+# fixtures de teste e exemplos conhecidos. Não adicione segredo real aqui: se um
+# segredo vazou, troque-o (revogue) e reescreva o histórico — não o "libere".
+# ==============================================================================
+title = "Norvia interface-web"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixtures de teste e exemplos públicos"
+# Valores literais (regex sobre o segredo encontrado).
+regexes = [
+  # JWT de exemplo do jwt.io (qualquer alg; payload {"sub":"1234567890","name":"John Doe",...}).
+  '''eyJ[A-Za-z0-9_-]+\.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ(\.[A-Za-z0-9_-]*)?''',
+  # ID do workflow n8n de renovação de tokens e a variante digitada errado (I/l) que o código
+  # normaliza: identificador, não credencial (também no .env.example).
+  '''^8AtrRCYPs[Il]yFv6s6$''',
+  # Referência a variável de ambiente (apiKey: env.N8N_API_KEY), não um valor.
+  '''^(process\.)?env\.[A-Z0-9_]+$''',
+  # Senha do admin nos testes de integração do gateway.
+  '''test-admin-password''',
+  # Tokens falsos dos testes (tok_test, tok_abc…, test-token, test_token…).
+  '''^tok_[A-Za-z0-9_-]{0,40}$''',
+  '''^test[-_][A-Za-z0-9_-]{0,40}$''',
+  # Placeholders dos .env.example ("seu_..._aqui", "norvia_pass").
+  '''^seu_[a-z0-9_]+$''',
+  '''^norvia_pass$''',
+]
+# Lockfiles (hashes de integridade) e fixtures de teste. Os .env.example NÃO entram aqui de
+# propósito: é onde um segredo real costuma ser colado por engano.
+paths = [
+  '''(^|/)tests?/fixtures/''',
+  '''(^|/)package-lock\.json$''',
+]

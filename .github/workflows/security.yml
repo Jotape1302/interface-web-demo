@@ -1,0 +1,107 @@
+# ==============================================================================
+# Segurança: segredos no histórico (gitleaks), dependências vulneráveis de produção
+# (npm audit) e das automações Python (pip-audit). Só lê o repositório: não publica,
+# não abre PR, não precisa de segredo. Detalhes em docs/seguranca-deploy.md.
+# ==============================================================================
+name: security
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Toda segunda às 06:00 BRT (09:00 UTC): pega CVEs novas mesmo sem commit.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: gitleaks (histórico completo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Binário fixado por versão + SHA256 do release oficial (gitleaks_<v>_checksums.txt).
+      # A gitleaks-action exige licença paga para repositórios de organização.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Instalar gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+      - name: Varredura
+        # --redact: o segredo encontrado não aparece no log do Actions.
+        run: ./gitleaks git --config .gitleaks.toml --redact --no-banner --verbose .
+
+  npm-audit:
+    name: npm audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ !matrix.blocking }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: backend/gateway
+            blocking: true
+          # O frontend publicado é export estático (NGINX, sem Node): ferramenta de build fica
+          # em devDependencies e sai do --omit=dev. O vinext foi para lá em 2026-10-08 por
+          # GHSA-vfj7-8cjw-p6xm (braces, faixa "*", sem versão corrigida), que chega por
+          # vinext > vite-plugin-commonjs > vite-plugin-dynamic-import > fast-glob > micromatch,
+          # código que só roda no `vinext build`/`dev` com globs do próprio repositório.
+          # Revisar quando sair braces corrigido: https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
+          # Com o frontend limpo, high/critical em dependência de produção volta a bloquear.
+          - dir: frontend
+            blocking: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: npm audit (só dependências de produção, high/critical)
+        working-directory: ${{ matrix.dir }}
+        # Lê o package-lock.json; não instala nada nem roda scripts de pacote.
+        run: npm audit --omit=dev --audit-level=high
+
+  pip-audit:
+    name: pip-audit (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - automacoes-financeiro
+          - automacoes-marketplace
+          - automacoes-producao
+          - contagem-estoque
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Mesma versão das imagens Docker (python:3.11.17-slim-bookworm).
+          python-version: "3.11"
+      - name: Instalar pip-audit
+        run: python -m pip install --disable-pip-version-check "pip-audit==2.10.1"
+      - name: pip-audit
+        working-directory: backend/automations/${{ matrix.module }}
+        # Os requirements usam ">=": o pip-audit resolve as versões que um build novo
+        # instalaria hoje e confere na base de vulnerabilidades (PyPI/OSV).
+        run: pip-audit -r requirements.txt --progress-spinner off --desc on

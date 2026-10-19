@@ -1,0 +1,209 @@
+{
+  "orchestrator": {
+    "file": "orchestrator.md",
+    "role": "Ponto único de contato, triagem de complexidade das demandas, execução direta das simples e, nas muito complexas, designação do mínimo de agentes, redação dos Prompts de Delegação, despacho aos subagentes nativos e consolidação das entregas.",
+    "skills": [
+      "triagem_de_demandas",
+      "triagem_de_complexidade",
+      "decomposicao_de_tarefas",
+      "roteamento_multidisciplinar",
+      "despacho_de_prompts",
+      "planejamento_de_execucao",
+      "gestao_de_dependencias",
+      "sintese_de_entregas"
+    ],
+    "status": "active"
+  },
+  "interface_uiux": {
+    "file": "agents/interface_uiux.md",
+    "role": "Design System Norvia (tokens de globals.css, tema claro/escuro), arquitetura de informação, ergonomia de dashboards fiscais e financeiros, padronização de logos de parceiros e acessibilidade WCAG.",
+    "skills": [
+      "design_system_norvia",
+      "dashboard_ergonomics",
+      "ui_ux_patterns",
+      "telemetry_visualization",
+      "async_state_design",
+      "partner_logo_standardization",
+      "wcag_accessibility",
+      "responsive_layouts"
+    ],
+    "status": "active"
+  },
+  "frontend": {
+    "file": "agents/frontend.md",
+    "role": "Aplicação web em frontend/ com Vite/vinext (convenções de rota estilo App Router, export estático), React Context para estado global, SSE + polling para tempo real, modo demo e consumo tipado dos contratos do gateway.",
+    "skills": [
+      "react_19",
+      "typescript",
+      "vite_vinext_app_router_conventions",
+      "tailwind_css_v4",
+      "base_ui_shadcn_components",
+      "react_context_state",
+      "sse_realtime_e_polling",
+      "contracts_mirroring",
+      "demo_mode_fixtures",
+      "design_responsivo",
+      "ui_ux_acessibilidade"
+    ],
+    "status": "active"
+  },
+  "gateway": {
+    "file": "agents/gateway.md",
+    "role": "API Gateway central Node.js 22+/TypeScript sem framework (porta 3100): roteamento HTTP nativo, sessões com hash, RBAC por área, chave interna para as automações, circuit breaker, SSE, alertas, agregação /api/overview e saúde do sistema.",
+    "skills": [
+      "api_gateway_http_nativo",
+      "auth_sessao_opaca_hash",
+      "rbac_areas_permissoes",
+      "automation_internal_key",
+      "circuit_breaker",
+      "n8n_integration",
+      "tiny_erp_v3_health",
+      "banco_inter_health",
+      "sefaz_status_aggregation",
+      "cors_config",
+      "contracts_management",
+      "overview_aggregation",
+      "sse_events",
+      "notifications_e_alertas",
+      "system_health_monitor"
+    ],
+    "status": "active"
+  },
+  "backend": {
+    "file": "agents/backend.md",
+    "role": "Persistência MariaDB com SQL puro (schemas em database/init e migrações em database/migrations), serviços de dados do gateway, APIs FastAPI/Node.js de apoio, transações idempotentes e infraestrutura de testes.",
+    "skills": [
+      "fastapi",
+      "python",
+      "node_typescript",
+      "mariadb_pymysql_raw_sql",
+      "sql_migrations",
+      "pydantic_v2",
+      "idempotent_transactions",
+      "auth_sessao_opaca_scrypt",
+      "testes_unitarios_e_integracao_pytest",
+      "node_test_runner"
+    ],
+    "status": "active"
+  },
+  "automation_engineer": {
+    "file": "agents/automation_engineer.md",
+    "role": "Motores autônomos em backend/automations/<slug>/: SEFAZ A1/NSU, OCR e código de barras, Banco Inter mTLS, Mercado Livre/Mercado Pago, conector Tiny ERP v3, conciliações com baixa segura, etiquetas EPL/ZPL e bot de contagem de estoque.",
+    "skills": [
+      "python_rpa",
+      "ocr_computer_vision",
+      "barcode_reading",
+      "sefaz_soap_a1",
+      "banco_inter_mtls",
+      "mercado_livre_mercado_pago",
+      "tiny_erp_connector",
+      "conciliacao_e_baixa_idempotente",
+      "thermal_label_epl_zpl",
+      "batch_processing",
+      "internal_api_security",
+      "fault_tolerance"
+    ],
+    "status": "active"
+  },
+  "mascot_3d": {
+    "file": "agents/mascot_3d.md",
+    "role": "Modelagem 3D, automação Blender Python (bpy) fora do git (artifacts/norvia-mascot/), rigging mecânico rígido, materiais PBR, LED emissivo, máscaras geométricas e especificação do pipeline WebGL/Three.js (integração no frontend ainda futura).",
+    "skills": [
+      "blender_python_bpy",
+      "hard_surface_rigging",
+      "pbr_shading_principled",
+      "emissive_led_materials",
+      "geometric_mask_plates",
+      "gltf_glb_draco_optimization",
+      "threejs_react_three_fiber",
+      "mascot_animation_states"
+    ],
+    "status": "active"
+  },
+  "devops": {
+    "file": "agents/devops.md",
+    "role": "Governança do monorepo, Dockerfiles e Docker rootless (volumes com ACL), snippets de compose para o usuário, CI de segurança, backup, deploy orientado (VPS e rsync do frontend) e segurança de segredos.",
+    "skills": [
+      "monorepo_management",
+      "docker_rootless",
+      "compose_snippets_humanos",
+      "bash_scripting",
+      "security_ci_gitleaks_audit",
+      "backup_systemd_age",
+      "secrets_management",
+      "deploy_runbooks"
+    ],
+    "status": "active"
+  },
+  "security_auditor": {
+    "file": "agents/security_auditor.md",
+    "role": "Auditoria de segurança somente leitura (AppSec/DevSecOps) de todo o monorepo, com severidade calibrada ao modelo de ameaça da intranet e handoff das correções ao agente dono.",
+    "skills": [
+      "secure_code_review",
+      "auth_session_authorization_review",
+      "injection_xxe_path_traversal",
+      "ssrf_cors_csrf",
+      "secrets_history_scanning",
+      "dependency_vulnerability_audit",
+      "infra_docker_rootless_hardening",
+      "threat_modeling_intranet"
+    ],
+    "status": "active"
+  },
+  "technical_writer": {
+    "file": "agents/technical_writer.md",
+    "role": "Documentação fiel ao código: READMEs, docs/, .env.example e arquivos de governança multiagente (registry.json, orchestrator.md, .codexrules, agents/), com números e rotas conferidos.",
+    "skills": [
+      "documentacao_tecnica_pt_br",
+      "verificacao_doc_vs_codigo",
+      "env_example_sync",
+      "governanca_multiagente",
+      "markdown_estruturado"
+    ],
+    "status": "active"
+  },
+  "qa_engineer": {
+    "file": "agents/qa_engineer.md",
+    "role": "Verificação independente antes da consolidação: execução das suítes afetadas, revisão de diff (contratos, RBAC, testes ausentes) e checklist das Regras de Ouro, sem corrigir código de produção.",
+    "skills": [
+      "execucao_suites_monorepo",
+      "revisao_de_regressao",
+      "contract_drift_detection",
+      "escrita_de_testes",
+      "checklist_regras_de_ouro",
+      "ambiente_local_mock"
+    ],
+    "status": "active"
+  },
+  "prompt_engineer": {
+    "file": "agents/prompt_engineer.md",
+    "role": "Desenho, revisão e validação dos prompts da malha multiagente (orchestrator.md e agents/), dono do formato dos Prompts de Delegação que o Orquestrador redige nas demandas classificadas como loop de agentes e, quando encomendado, especificação de prompts para funcionalidades com LLM: schema de saída, defesas contra prompt injection, modo mock e casos de avaliação.",
+    "skills": [
+      "prompt_design",
+      "prompts_de_delegacao",
+      "revisao_de_agentes",
+      "coerencia_entre_prompts",
+      "cenarios_de_validacao",
+      "llm_structured_output",
+      "prompt_injection_defense",
+      "llm_evaluation_sets",
+      "governanca_multiagente"
+    ],
+    "status": "active"
+  },
+  "rag_curator": {
+    "file": "agents/rag_curator.md",
+    "role": "Curadoria da base de conhecimento RAG exclusiva do projeto interface-web (Markdown em RAGs/knowledge, fonte da verdade, com espelho em interface-web/knowledge) e do banco vetorial Chroma (coleção interface_web_knowledge): detecção de documentos desatualizados pelo git log, reindexação, avaliação de recuperação e sincronização do espelho.",
+    "skills": [
+      "rag_knowledge_base",
+      "doc_vs_codigo",
+      "chunking_markdown",
+      "chroma_bge_m3",
+      "avaliacao_de_recuperacao",
+      "escopo_do_projeto",
+      "sincronizacao_de_espelho",
+      "qualidade_dos_vetores"
+    ],
+    "status": "active"
+  }
+}

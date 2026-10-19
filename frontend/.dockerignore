@@ -1,0 +1,26 @@
+# Contexto de build do frontend (imagem só de desenvolvimento).
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+node_modules
+dist
+out
+.next
+.vinext
+.wrangler
+logs
+**/*.log
+data
+certs
+**/certs
+secrets
+**/secrets
+**/*.pem
+**/*.key
+**/*.crt
+**/*.pfx
+**/*.p12
+**/*.tsbuildinfo
+coverage
