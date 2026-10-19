@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { NorviaLogo } from '@/components/ui/norvia-logo';
 import { DEMO_LOGIN_PROFILES } from '@/lib/demo-permissions';
+import { isDemoLoginAllowed } from '@/lib/session-guard';
 
 export default function LoginPage() {
   const { user, login, loginDemo, isDemoMode, register, isLoading } = useAuth();
@@ -43,13 +44,10 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      // Estritamente por hostname: em localhost/127.0.0.1 o Modo Demonstração deve
-      // SEMPRE aparecer, independentemente de NEXT_PUBLIC_DATA_MODE (ex.: `npm run dev`
-      // sem a variável setada). Na VPS (acessada por domínio/IP de rede) nunca aparece.
-      const isLocalHost =
-        window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1';
-      setIsLocalDemo(isLocalHost);
+      // Mesma regra do login demo (session-guard.ts): build demo (ex.: GitHub Pages) ou
+      // localhost/127.0.0.1, mesmo sem NEXT_PUBLIC_DATA_MODE. Na VPS (build live, acessada
+      // por domínio/IP de rede) nunca aparece.
+      setIsLocalDemo(isDemoLoginAllowed(process.env.NEXT_PUBLIC_DATA_MODE, window.location.hostname));
     }
   }, []);
 
@@ -118,7 +116,7 @@ export default function LoginPage() {
 
         {/* Card Principal */}
         <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
-          {/* Card de Acesso Rápido - Exibido ESTRITAMENTE em desenvolvimento local */}
+          {/* Card de Acesso Rápido - build demo ou desenvolvimento local */}
           {isLocalDemo && (
             <>
               <div className="mb-5 rounded-md border border-[var(--info-border)] bg-[var(--info-bg)] p-3.5 text-left">
