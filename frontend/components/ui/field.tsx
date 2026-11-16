@@ -76,6 +76,7 @@ function Field({
 }: React.ComponentProps<'div'> & VariantProps<typeof fieldVariants>) {
   return (
     <div
+      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
       role="group"
       data-slot="field"
       data-orientation={orientation}

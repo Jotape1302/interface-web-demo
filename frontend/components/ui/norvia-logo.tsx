@@ -33,6 +33,7 @@ export function NorviaLogo({
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/norvia-logo.svg`}
       width={size}

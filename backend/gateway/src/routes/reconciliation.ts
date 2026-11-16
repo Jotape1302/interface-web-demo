@@ -1,7 +1,8 @@
-import { actorHeaders, automationFetch, relayedError } from "../automation-http.js";
+import { actorHeaders, automationFetch, callAutomation, createAutomationUrlResolver, financeiroCandidateUrls, relayedError } from "../automation-http.js";
+import type { AutomationJob } from "../contracts.js";
 import type { Config } from "../config.js";
 import type { AuditService } from "../audit.js";
-import { parseJsonBody, sendError, type RequestContext, type Session } from "../http.js";
+import { asJsonObject, parseJsonBody, sendError, type RequestContext, type Session } from "../http.js";
 import {
   parseBaixaHistoricoQuery,
   type BaixaRequestItem,
@@ -17,45 +18,11 @@ export function createReconciliationRoutes(deps: {
   jobPollIntervalMs?: number;
 }) {
   const { config, audit } = deps;
-  const candidateUrls = Array.from(
-    new Set(
-      [
-        deps.pythonApiUrl,
-        process.env.PYTHON_API_URL,
-        "http://127.0.0.1:8000",
-        "http://automacao-nfe:8000",
-      ]
-        .filter((u): u is string => typeof u === "string" && u.trim().length > 0)
-        .map((u) => u.trim().replace(/\/$/, "")),
-    ),
+  const resolvePythonUrl = createAutomationUrlResolver(
+    financeiroCandidateUrls(deps.pythonApiUrl ?? process.env.PYTHON_API_URL),
   );
-  let activePythonUrl = candidateUrls[0] || "http://127.0.0.1:8000";
-
-  async function resolvePythonUrl(): Promise<string> {
-    try {
-      const res = await automationFetch(`${activePythonUrl}/api/v1/health`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (res.ok) return activePythonUrl;
-    } catch {
-      // url ativa falhou
-    }
-    for (const url of candidateUrls) {
-      if (url === activePythonUrl) continue;
-      try {
-        const res = await automationFetch(`${url}/api/v1/health`, {
-          signal: AbortSignal.timeout(2000),
-        });
-        if (res.ok) {
-          activePythonUrl = url;
-          return activePythonUrl;
-        }
-      } catch {
-        // continua tentando outros
-      }
-    }
-    return activePythonUrl;
-  }
+  const fetchFin = (url: string, init?: RequestInit): Promise<Response> =>
+    callAutomation("financeiro", () => automationFetch(url, init), { invalidate: resolvePythonUrl.invalidate });
 
   const pollIntervalMs = deps.jobPollIntervalMs ?? 3000;
   const JOB_WATCH_LIMIT_MS = 30 * 60 * 1000;
@@ -81,16 +48,16 @@ export function createReconciliationRoutes(deps: {
           })) ?? false);
     const startedAt = Date.now();
     const tick = async (): Promise<void> => {
-      let job: any = null;
+      let job: AutomationJob | null = null;
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/jobs/${encodeURIComponent(jobId)}`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/jobs/${encodeURIComponent(jobId)}`, {
           signal: AbortSignal.timeout(10000),
         });
         if (res.status === 404) {
           job = { status: "erro", erro: "Tarefa perdida: a API de conciliação foi reiniciada durante a baixa." };
         } else if (res.ok) {
-          job = await res.json();
+          job = (await res.json()) as AutomationJob;
         }
       } catch {
         // rede instável: tenta de novo no próximo ciclo
@@ -104,8 +71,9 @@ export function createReconciliationRoutes(deps: {
         job = { status: "erro", erro: "Tempo máximo de acompanhamento da baixa excedido." };
       }
 
-      const concluido = job.status === "concluido" && Array.isArray(job.resultado?.resultados);
-      const resultados: BaixaResultItem[] = concluido ? job.resultado.resultados : [];
+      const resultado = asJsonObject(job.resultado);
+      const concluido = job.status === "concluido" && Array.isArray(resultado.resultados);
+      const resultados = (concluido ? resultado.resultados : []) as BaixaResultItem[];
       const erroGeral = concluido ? null : (job.erro ?? "falha na tarefa de baixa");
       if (pendente) {
         await deps.history?.completeBatch({ loteId: jobId, resultados, erroGeral });
@@ -131,8 +99,8 @@ export function createReconciliationRoutes(deps: {
         acao: "baixa_conciliacao_executada",
         detalhes: {
           totalContas: total,
-          sucessos: job.resultado?.total_sucessos ?? 0,
-          falhas: job.resultado?.total_falhas ?? total,
+          sucessos: resultado.total_sucessos ?? 0,
+          falhas: resultado.total_falhas ?? total,
           ...(itens === null ? { retomada: true } : {}),
         },
         ip,
@@ -157,7 +125,7 @@ export function createReconciliationRoutes(deps: {
     if (path === "/api/reconciliation/status" && method === "GET") {
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/status`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/status`, {
           headers: actorHeaders(ctx),
           signal: AbortSignal.timeout(5000),
         });
@@ -184,7 +152,7 @@ export function createReconciliationRoutes(deps: {
     if (path === "/api/reconciliation/estado" && method === "GET") {
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/estado`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/estado`, {
           headers: actorHeaders(ctx),
           signal: AbortSignal.timeout(10000),
         });
@@ -236,7 +204,7 @@ export function createReconciliationRoutes(deps: {
       try {
         const body = await parseJsonBody(ctx.request);
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/preview`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/preview`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...actorHeaders(ctx, { asUser: true }) },
           body: JSON.stringify(body),
@@ -254,7 +222,7 @@ export function createReconciliationRoutes(deps: {
       try {
         const body = await parseJsonBody(ctx.request);
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/baixar`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/baixar`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...actorHeaders(ctx, { asUser: true }) },
           body: JSON.stringify(body),
@@ -263,13 +231,15 @@ export function createReconciliationRoutes(deps: {
           // ficariam fora do histórico — o gateway segue até o fim mesmo se o navegador/NGINX desistir.
           signal: AbortSignal.timeout(600000),
         });
-        const data = (await res.json().catch(() => null)) as any;
+        const data: unknown = await res.json().catch(() => null);
+        const resposta = asJsonObject(data);
         if (!res.ok && res.status < 500) {
           // 409 = conta já em baixa noutro pedido; 400/422 = pedido inválido. Nada foi baixado.
           return relay(res, data, res.status === 409 ? "Baixa recusada" : "Falha ao executar baixa");
         }
-        const itens: BaixaRequestItem[] = Array.isArray(body?.itens) ? body.itens : [];
-        const resultados: BaixaResultItem[] = Array.isArray(data?.resultados) ? data.resultados : [];
+        const pedido = asJsonObject(body);
+        const itens = (Array.isArray(pedido.itens) ? pedido.itens : []) as BaixaRequestItem[];
+        const resultados = (Array.isArray(resposta.resultados) ? resposta.resultados : []) as BaixaResultItem[];
 
         await deps.history?.recordBatch({
           usuarioId: ctx.session?.user?.id ?? null,
@@ -284,8 +254,8 @@ export function createReconciliationRoutes(deps: {
           acao: "baixa_conciliacao_executada",
           detalhes: {
             totalContas: itens.length,
-            sucessos: data?.total_sucessos || 0,
-            falhas: data?.total_falhas || 0,
+            sucessos: resposta.total_sucessos || 0,
+            falhas: resposta.total_falhas || 0,
           },
           ip: ctx.ip,
         });
@@ -303,16 +273,18 @@ export function createReconciliationRoutes(deps: {
       try {
         const body = await parseJsonBody(ctx.request);
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/jobs/${tipo}`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/jobs/${tipo}`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...actorHeaders(ctx, { asUser: true }) },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(15000),
         });
-        const data = (await res.json().catch(() => null)) as any;
-        if (res.ok && tipo === "baixar" && typeof data?.job_id === "string") {
-          const itens: BaixaRequestItem[] = Array.isArray(body?.itens) ? body.itens : [];
-          void watchBaixaJob(data.job_id, itens, ctx.session?.user ?? null, ctx.ip);
+        const data: unknown = await res.json().catch(() => null);
+        const tarefa = asJsonObject(data);
+        if (res.ok && tipo === "baixar" && typeof tarefa.job_id === "string") {
+          const pedido = asJsonObject(body);
+          const itens = (Array.isArray(pedido.itens) ? pedido.itens : []) as BaixaRequestItem[];
+          void watchBaixaJob(tarefa.job_id, itens, ctx.session?.user ?? null, ctx.ip);
         }
         if (res.status === 409 && tipo === "baixar") {
           // Outra tarefa já está baixando alguma destas contas: nada foi enviado ao Tiny.
@@ -328,7 +300,7 @@ export function createReconciliationRoutes(deps: {
     if (jobMatch && method === "GET") {
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/reconciliacao/jobs/${jobMatch[1]}`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/reconciliacao/jobs/${jobMatch[1]}`, {
           headers: actorHeaders(ctx),
           signal: AbortSignal.timeout(10000),
         });

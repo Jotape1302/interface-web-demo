@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.fuso import agora_sp_naive, hoje_sp
 from app.config import Settings, settings
 from app.json_store import erro_gravacao, save_json_state
 from app.tiny_categories import CATEGORY_BY_ID, TINY_CATEGORIES, TinyCategory
@@ -493,7 +494,7 @@ def sync_financial_dashboard(cfg: Optional[Settings] = None, client: Optional[Ti
     client = client or TinyClient()
 
     try:
-        today = date.today()
+        today = hoje_sp()
         lookback = max(1, cfg.FINANCIAL_DASHBOARD_LOOKBACK_MONTHS)
         data_inicial = _add_months(_month_start(today), -(lookback - 1)).isoformat()
         data_final = today.isoformat()
@@ -586,7 +587,7 @@ def sync_financial_dashboard(cfg: Optional[Settings] = None, client: Optional[Ti
 
 def next_sync_at(cfg: Optional[Settings] = None) -> str:
     cfg = cfg or settings
-    now = datetime.now()
+    now = agora_sp_naive()
     next_run = now.replace(hour=cfg.FINANCIAL_DASHBOARD_SYNC_HOUR, minute=0, second=0, microsecond=0)
     if next_run <= now:
         next_run += timedelta(days=1)
@@ -743,7 +744,7 @@ def build_dashboard_response(
     today: Optional[date] = None,
 ) -> Dict[str, Any]:
     """Deriva os KPIs do Dashboard Financeiro a partir do cache já sincronizado."""
-    today = today or date.today()
+    today = today or hoje_sp()
     bounds = _period_bounds(date_from, date_to)
     companies_data: Dict[str, Dict[str, Any]] = cache.get("companies", {})
     categories_meta = {c["id"]: c for c in cache.get("categories", [])}

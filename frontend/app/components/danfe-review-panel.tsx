@@ -30,7 +30,9 @@ import { downloadCsv } from "@/lib/csv-export";
 import {
   computeGroupPreview,
   resolveCompanyDisplayName,
+  parcelasDaNota,
   suggestPaymentMethodForNote,
+  suggestMeioPagamentoNfe,
 } from "@/lib/danfe-review-helpers";
 import { readApiError } from '@/lib/api-errors';
 import { useAuth } from "@/lib/auth-context";
@@ -75,7 +77,16 @@ const DANFE_DEFS: Record<string, ColumnFilterDef<DanfePendingReviewEntry>> = {
     tipo: "numero",
     accessor: (n) => n.nfe_data.valor_total,
   },
+  situacao: {
+    id: "situacao",
+    label: "Situação",
+    tipo: "lista",
+    // Notas que o Tiny recusou ao confirmar (fornecedor sem cadastro etc.) ficam pendentes com o erro.
+    accessor: (n) => (n.last_error ? "Recusada pelo Tiny" : "Sem erro"),
+  },
 };
+
+const SITUACAO_OPCOES = ["Recusada pelo Tiny", "Sem erro"];
 
 const STATUS_LABELS: Record<DanfeNotaStatus, { title: string; singular: string; plural: string; empty: string }> = {
   pending: {
@@ -129,6 +140,8 @@ export function DanfeReviewPanel({
   const [selections, setSelections] = useState<Record<string, Record<string, string>>>({});
   const [paymentMethods, setPaymentMethods] = useState<Record<string, string>>({});
   const [paymentMethodsNfe, setPaymentMethodsNfe] = useState<Record<string, string>>({});
+  // Notas em que o meio foi escolhido na mão: trocar a forma deixa de mexer nele.
+  const meioNfeManual = useRef<Set<string>>(new Set());
   const [parcelasPorNota, setParcelasPorNota] = useState<Record<string, number>>({});
   const [selectedChaves, setSelectedChaves] = useState<Record<string, boolean>>({});
   const [confirmingChave, setConfirmingChave] = useState<string | null>(null);
@@ -230,7 +243,7 @@ export function DanfeReviewPanel({
       const next = { ...prev };
       for (const entry of entries) {
         if (!(entry.chave in next)) {
-          next[entry.chave] = suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj);
+          next[entry.chave] = suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj, entry.forma_pagamento_sugerida);
         }
       }
       return next;
@@ -239,7 +252,8 @@ export function DanfeReviewPanel({
       const next = { ...prev };
       for (const entry of entries) {
         if (!(entry.chave in next)) {
-          next[entry.chave] = entry.nfe_data.meio_pagamento_nfe || "";
+          const forma = suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj, entry.forma_pagamento_sugerida);
+          next[entry.chave] = suggestMeioPagamentoNfe(forma, entry.nfe_data.meio_pagamento_nfe, entry.meio_pagamento_nfe_historico);
         }
       }
       return next;
@@ -299,6 +313,7 @@ export function DanfeReviewPanel({
   }, [apiBase, getAuthHeaders, mode, seedSelections, statusFilter]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     void loadCategories();
   }, [loadCategories]);
 
@@ -313,11 +328,16 @@ export function DanfeReviewPanel({
     }));
   }, []);
 
-  const handlePaymentMethodChange = useCallback((chave: string, formaPagamentoId: string) => {
-    setPaymentMethods((prev) => ({ ...prev, [chave]: formaPagamentoId }));
+  const handlePaymentMethodChange = useCallback((entry: DanfePendingReviewEntry, formaPagamentoId: string) => {
+    setPaymentMethods((prev) => ({ ...prev, [entry.chave]: formaPagamentoId }));
+    if (!meioNfeManual.current.has(entry.chave)) {
+      const meio = suggestMeioPagamentoNfe(formaPagamentoId, entry.nfe_data.meio_pagamento_nfe, entry.meio_pagamento_nfe_historico);
+      setPaymentMethodsNfe((prev) => ({ ...prev, [entry.chave]: meio }));
+    }
   }, []);
 
   const handlePaymentMethodNfeChange = useCallback((chave: string, code: string) => {
+    meioNfeManual.current.add(chave);
     setPaymentMethodsNfe((prev) => ({ ...prev, [chave]: code }));
   }, []);
 
@@ -383,8 +403,8 @@ export function DanfeReviewPanel({
         categoria_id: selections[entry.chave]?.[item.item_id] || item.categoria_sugerida_id,
       }));
 
-      const formaPagamento = paymentMethods[entry.chave] ?? suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj);
-      const meioPagamentoNfe = paymentMethodsNfe[entry.chave] ?? entry.nfe_data.meio_pagamento_nfe ?? "";
+      const formaPagamento = paymentMethods[entry.chave] ?? suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj, entry.forma_pagamento_sugerida);
+      const meioPagamentoNfe = paymentMethodsNfe[entry.chave] ?? suggestMeioPagamentoNfe(formaPagamento, entry.nfe_data.meio_pagamento_nfe, entry.meio_pagamento_nfe_historico);
 
       const res = await fetch(`${apiBase}/api/danfe/confirm-lancamento`, {
         method: "POST",
@@ -394,7 +414,7 @@ export function DanfeReviewPanel({
           itens,
           forma_pagamento: formaPagamento,
           meio_pagamento_nfe: meioPagamentoNfe || null,
-          parcelas: parcelasPorNota[entry.chave] ?? 1,
+          parcelas: parcelasPorNota[entry.chave] ?? parcelasDaNota(entry.nfe_data.parcelas_nfe),
         }),
       });
       if (!res.ok) {
@@ -504,6 +524,8 @@ export function DanfeReviewPanel({
   const selectedCount = visibleNotas.filter((entry) => selectedChaves[entry.chave] !== false).length;
   const allVisibleSelected = visibleNotas.length > 0 && selectedCount === visibleNotas.length;
 
+  const recusadas = useMemo(() => notas.filter((n) => n.last_error).length, [notas]);
+
   const empresasOpcoes = useMemo(
     () => obterValoresUnicos(notas, DANFE_DEFS.empresa.accessor),
     [notas],
@@ -530,7 +552,7 @@ export function DanfeReviewPanel({
   const handleExportCsv = () => {
     downloadCsv(
       `notas-${statusFilter}`,
-      ["Nº nota", "Emissão", "Chave de acesso", "Fornecedor", "CNPJ fornecedor", "Empresa", "CNPJ empresa", "Valor total", "Itens"],
+      ["Nº nota", "Emissão", "Chave de acesso", "Fornecedor", "CNPJ fornecedor", "Empresa", "CNPJ empresa", "Valor total", "Itens", "Erro do Tiny"],
       filteredNotas.map((n) => [
         n.nfe_data.numero_nota,
         n.nfe_data.data_emissao,
@@ -541,6 +563,7 @@ export function DanfeReviewPanel({
         n.nfe_data.destinatario_cnpj,
         n.nfe_data.valor_total,
         n.itens.length,
+        n.last_error ?? "",
       ]),
     );
   };
@@ -567,6 +590,11 @@ export function DanfeReviewPanel({
         </div>
         <span className="text-xs text-muted-foreground">
           {notas.length} {notas.length === 1 ? STATUS_LABELS[statusFilter].singular : STATUS_LABELS[statusFilter].plural}
+          {statusFilter === "pending" && recusadas > 0 && (
+            <span className="text-[var(--status-error-fg)] font-medium">
+              {" "}· {recusadas} {recusadas === 1 ? "recusada" : "recusadas"} pelo Tiny
+            </span>
+          )}
         </span>
       </div>
 
@@ -607,10 +635,18 @@ export function DanfeReviewPanel({
           value={colFilters.valor_total}
           onChange={(v) => updateColFilter("valor_total", v)}
         />
+        {statusFilter === "pending" && (
+          <ColumnFilterHeader
+            def={DANFE_DEFS.situacao}
+            value={colFilters.situacao}
+            options={SITUACAO_OPCOES}
+            onChange={(v) => updateColFilter("situacao", v)}
+          />
+        )}
       </div>
 
       {loadError && (
-        <div className="p-3 rounded-lg bg-[var(--status-error-bg)] border border-[var(--status-error-border)] text-[var(--status-error-fg)] text-xs">
+        <div className="p-3 rounded-none bg-[var(--status-error-bg)] border border-[var(--status-error-border)] text-[var(--status-error-fg)] text-xs">
           {loadError}
         </div>
       )}
@@ -650,9 +686,9 @@ export function DanfeReviewPanel({
               isRestoring={restoringChave === entry.chave}
               confirmingAll={confirmingAll}
               categorySelection={selections[entry.chave] ?? EMPTY_SELECTION}
-              paymentMethod={paymentMethods[entry.chave] ?? suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj)}
+              paymentMethod={paymentMethods[entry.chave] ?? suggestPaymentMethodForNote(entry.nfe_data.marcador_caixa, entry.nfe_data.destinatario_cnpj, entry.forma_pagamento_sugerida)}
               paymentMethodNfe={paymentMethodsNfe[entry.chave] ?? entry.nfe_data.meio_pagamento_nfe ?? ""}
-              parcelas={parcelasPorNota[entry.chave] ?? 1}
+              parcelas={parcelasPorNota[entry.chave] ?? parcelasDaNota(entry.nfe_data.parcelas_nfe)}
               categoryOptionsNode={categoryOptionsNode}
               categoryName={categoryName}
               result={lastResult[entry.chave]}

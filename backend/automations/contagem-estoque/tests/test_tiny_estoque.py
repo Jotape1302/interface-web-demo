@@ -195,3 +195,143 @@ def test_erro_de_validacao_do_tiny_fica_legivel():
         ajustar_contagem(cliente(Tiny400(saldo=0)), "ABC-10", 5, "abcdef123456", 1, CRIADO)
     assert "HTTP 400" in str(e.value)
     assert "Ocorreram erros de validação (precoUnitario: Este valor não deve ser vazio)" in str(e.value)
+
+
+# --- EST-01..05 ---------------------------------------------------------------------------------
+
+from decimal import Decimal  # noqa: E402
+import threading  # noqa: E402
+
+from app import tiny_estoque as te  # noqa: E402
+from app.tiny_estoque import HistoricoLancamentos, exigir_processo_unico  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _sem_espera_e_sem_historico_em_disco(monkeypatch, tmp_path):
+    monkeypatch.setattr(te, "_dormir", lambda s: None)
+    monkeypatch.setattr(api_mod, "_historico", HistoricoLancamentos(tmp_path))
+
+
+class Tiny5xxNoPost(TinyFalso):
+    """POST devolve 503; `entrou` diz se o Tiny processou a entrada antes de falhar."""
+
+    def __init__(self, saldo: float, entrou: bool) -> None:
+        super().__init__(saldo)
+        self.entrou = entrou
+
+    def request(self, metodo, url, **kw):
+        if metodo == "POST":
+            self.posts.append(kw["json"])
+            if self.entrou:
+                self.depositos[0]["saldo"] += kw["json"]["quantidade"]
+            return Resp(503, {"mensagem": "indisponível"})
+        return super().request(metodo, url, **kw)
+
+
+def test_5xx_na_entrada_rele_saldo_e_considera_lancada_se_entrou():
+    tiny = Tiny5xxNoPost(saldo=10, entrou=True)
+    res = ajustar_contagem(cliente(tiny), "ABC-10", 50, "abcdef123456", 1, CRIADO)
+    assert res["status"] == "lancado" and res["entrada"] == 40
+    assert len(tiny.posts) == 1, "POST não repetido"
+
+
+def test_5xx_na_entrada_e_falha_se_o_saldo_nao_mudou():
+    tiny = Tiny5xxNoPost(saldo=10, entrou=False)
+    with pytest.raises(TinyAPIError, match="envie de novo"):
+        ajustar_contagem(cliente(tiny), "ABC-10", 50, "abcdef123456", 1, CRIADO)
+    assert len(tiny.posts) == 1
+
+
+def test_4xx_na_entrada_nao_rele_saldo():
+    class Tiny400(TinyFalso):
+        def request(self, metodo, url, **kw):
+            if metodo == "POST":
+                return Resp(400, {"mensagem": "inválido"})
+            return super().request(metodo, url, **kw)
+
+    with pytest.raises(TinyAPIError, match="HTTP 400"):
+        ajustar_contagem(cliente(Tiny400(saldo=0)), "ABC-10", 5, "abcdef123456", 1, CRIADO)
+
+
+def test_get_repete_em_429_e_5xx_com_retry_after_e_post_nao(monkeypatch):
+    esperas = []
+
+    class TinyInstavel(TinyFalso):
+        def __init__(self):
+            super().__init__(saldo=3)
+            self.respostas = [Resp(429), Resp(503)]
+            self.respostas[0].headers = {"Retry-After": "900"}
+
+        def request(self, metodo, url, **kw):
+            if metodo == "GET" and url.endswith("/produtos") and self.respostas:
+                return self.respostas.pop(0)
+            return super().request(metodo, url, **kw)
+
+    monkeypatch.setattr(te, "_dormir", esperas.append)
+    res = consultar_produto(cliente(TinyInstavel()), "ABC-10")
+    assert res["saldo"] == 3
+    assert esperas[0] == 60.0 and 4 <= esperas[1] < 5
+
+
+def test_quantidade_e_preco_sem_perda():
+    assert te._numero_json(Decimal("40"), 4) == 40 and isinstance(te._numero_json(Decimal("40.000"), 4), int)
+    assert te._numero_json(Decimal("2.5"), 4) == 2.5
+    assert te._numero_json(Decimal("11.75"), 4) == 11.75
+    assert te._numero_json(Decimal("0.1"), 4) == 0.1
+    assert te._numero_json(Decimal("12.34567"), 4) == 12.3457
+    with pytest.raises(EstoqueTinyErro, match="precisão"):
+        te._numero_json(Decimal("12345678901234.5678"), 4)
+
+
+def test_mesmo_registro_nao_lanca_duas_vezes(tmp_path):
+    hist = HistoricoLancamentos(tmp_path)
+    tiny = TinyFalso(saldo=10)
+    c = cliente(tiny)
+    a = ajustar_contagem(c, "ABC-10", 50, "abcdef123456", 1, CRIADO, historico=hist)
+    # O saldo no Tiny voltou a cair depois: o mesmo registro ainda assim não lança de novo.
+    tiny.depositos[0]["saldo"] = 10
+    b = ajustar_contagem(c, "ABC-10", 50, "abcdef123456", 1, CRIADO, historico=hist)
+    assert a["status"] == "lancado" and b["repetido"] is True and b["entrada"] == 40
+    assert len(tiny.posts) == 1
+    # Outro registro lança normalmente.
+    ajustar_contagem(c, "ABC-10", 50, "fedcba654321", 2, CRIADO, historico=hist)
+    assert len(tiny.posts) == 2
+
+
+def test_duas_contagens_concorrentes_do_mesmo_sku_lancam_uma_vez(tmp_path):
+    hist = HistoricoLancamentos(tmp_path)
+
+    class TinyLento(TinyFalso):
+        def request(self, metodo, url, **kw):
+            if metodo == "GET" and url.endswith("/estoque/99"):
+                threading.Event().wait(0.05)  # abre a janela entre ler o saldo e lançar
+            return super().request(metodo, url, **kw)
+
+    tiny = TinyLento(saldo=10)
+    c = cliente(tiny)
+    resultados = []
+
+    def rodar(rid, numero):
+        resultados.append(ajustar_contagem(c, "ABC-10", 50, rid, numero, CRIADO, historico=hist))
+
+    ts = [threading.Thread(target=rodar, args=(rid, n)) for n, rid in enumerate(["aaaaaaaaaaaa", "bbbbbbbbbbbb"], 1)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(tiny.posts) == 1, "a segunda leu o saldo já com a entrada da primeira"
+    assert sorted(r["status"] for r in resultados) == ["lancado", "sem_entrada"]
+    assert tiny.depositos[0]["saldo"] == 50
+
+
+def test_recusa_subir_com_mais_de_um_worker():
+    exigir_processo_unico({})
+    exigir_processo_unico({"WEB_CONCURRENCY": "1"})
+    with pytest.raises(RuntimeError, match="1 processo"):
+        exigir_processo_unico({"WEB_CONCURRENCY": "4"})
+    with pytest.raises(RuntimeError):
+        exigir_processo_unico({"UVICORN_WORKERS": "2"})
+
+
+def test_data_da_auditoria_em_sao_paulo():
+    from app.auditoria import cabecalho
+
+    assert "27/10/2026" in cabecalho(1, "2026-10-28T01:30:00+00:00")  # 22:30 de 27/10 em SP

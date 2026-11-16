@@ -8,6 +8,7 @@ import {
   Building2,
   CalendarDays,
   CheckCircle2,
+  Cpu,
   CreditCard,
   History,
   Layers,
@@ -21,7 +22,7 @@ import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import type { ConfirmLancamentoResponse, DanfeNotaStatus, DanfePendingReviewEntry } from "@/lib/contracts";
-import { formatDateBR } from "@/lib/formatters";
+import { formatDateBR, formatDateTimeBR } from "@/lib/formatters";
 import {
   MAX_PARCELAS,
   PAYMENT_METHOD_NFE_OPTIONS,
@@ -31,6 +32,7 @@ import {
   formatChave,
   formatCurrency,
   resolveCompanyDisplayName,
+  origemSugestaoCategoria,
 } from "@/lib/danfe-review-helpers";
 
 interface NotaCardProps {
@@ -50,7 +52,8 @@ interface NotaCardProps {
   result?: ConfirmLancamentoResponse;
   onToggleSelected: (chave: string, checked: boolean) => void;
   onCategoryChange: (chave: string, itemId: string, categoriaId: string) => void;
-  onPaymentMethodChange: (chave: string, formaPagamentoId: string) => void;
+  /** Recebe a nota inteira: o meio da NFe acompanha a forma usando o XML e o histórico dela. */
+  onPaymentMethodChange: (entry: DanfePendingReviewEntry, formaPagamentoId: string) => void;
   onPaymentMethodNfeChange: (chave: string, code: string) => void;
   onParcelasChange: (chave: string, parcelas: number) => void;
   onArchive: (entry: DanfePendingReviewEntry) => void;
@@ -87,8 +90,13 @@ function NotaCardImpl({
   const groupPreview = isReadOnly
     ? []
     : computeGroupPreview(entry.itens, categorySelection, categoryName, entry.nfe_data.valor_total);
+  // Recusa do Tiny guardada na nota: aparece mesmo depois de recarregar (o `result` só existe
+  // logo após o clique). O resultado do envio atual, se houver, manda.
+  const erroSalvo = statusFilter === "pending" && !result ? entry.last_error : null;
   const cardStatusClasses =
-    statusFilter === "pending"
+    erroSalvo
+      ? "bg-card border-l-[3px] border-l-[var(--status-error-fg)]"
+      : statusFilter === "pending"
       ? "bg-card border-l-[3px] border-l-amber-500"
       : statusFilter === "confirmed"
         ? "bg-card border-l-[3px] border-l-emerald-600"
@@ -139,7 +147,7 @@ function NotaCardImpl({
                     size="sm"
                     aria-label={`Forma de pagamento para a nota ${entry.nfe_data.numero_nota}`}
                     value={paymentMethod}
-                    onChange={(e) => onPaymentMethodChange(entry.chave, e.target.value)}
+                    onChange={(e) => onPaymentMethodChange(entry, e.target.value)}
                     disabled={confirmingAll || isConfirming}
                     className="h-6 text-xs w-auto"
                   >
@@ -210,7 +218,7 @@ function NotaCardImpl({
               disabled={confirmingAll || isConfirming || isArchiving}
               aria-label={`Arquivar nota ${entry.nfe_data.numero_nota}`}
               title="Arquivar nota"
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isArchiving ? <Loader2 className="animate-spin" size={15} /> : <Archive size={15} />}
             </button>
@@ -222,7 +230,7 @@ function NotaCardImpl({
               disabled={isRestoring}
               aria-label={`Restaurar nota ${entry.nfe_data.numero_nota} para revisão pendente`}
               title="Restaurar para revisão pendente"
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-1 rounded-none text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isRestoring ? <Loader2 className="animate-spin" size={15} /> : <ArchiveRestore size={15} />}
             </button>
@@ -237,7 +245,7 @@ function NotaCardImpl({
       </div>
 
       {!isReadOnly && (
-        <div className="overflow-x-auto rounded-md border border-border/50">
+        <div className="overflow-x-auto rounded-none border border-border/50">
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left bg-muted/40">
@@ -259,6 +267,7 @@ function NotaCardImpl({
               {entry.itens.map((item) => {
                 const selected = categorySelection[item.item_id] || item.categoria_sugerida_id;
                 const isManual = selected !== item.categoria_sugerida_id;
+                const origem = origemSugestaoCategoria(item);
                 return (
                   <tr key={item.item_id} className="border-t border-border/30">
                     <td className="py-2 pl-3 pr-2 text-foreground max-w-[260px] truncate" title={item.descricao}>
@@ -271,19 +280,15 @@ function NotaCardImpl({
                     <td className="py-2 pr-3">
                       <div className="flex items-center gap-1.5">
                         <span
-                          title={
-                            isManual
-                              ? "Categoria ajustada manualmente"
-                              : item.categoria_sugerida_origem === "historico"
-                                ? "Sugerido pelo histórico: mesma categoria usada nas notas anteriores deste fornecedor"
-                                : "Sugerido automaticamente pela descrição/NCM"
-                          }
+                          title={isManual ? "Categoria ajustada manualmente" : origem.titulo}
                           className={isManual ? "text-[var(--brand-primary)] shrink-0" : "text-muted-foreground shrink-0"}
                         >
                           {isManual ? (
                             <Pencil size={12} />
-                          ) : item.categoria_sugerida_origem === "historico" ? (
+                          ) : origem.icone === "historico" ? (
                             <History size={12} />
+                          ) : origem.icone === "qwen" ? (
+                            <Cpu size={12} />
                           ) : (
                             <Tag size={12} />
                           )}
@@ -309,7 +314,7 @@ function NotaCardImpl({
       )}
 
       {groupPreview.length > 0 && (
-        <div className="rounded-md border border-border/50 bg-muted/20 p-3">
+        <div className="rounded-none border border-border/50 bg-muted/20 p-3">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5 mb-2">
             <Layers size={12} />
             {groupPreview.length * parcelas === 1
@@ -343,6 +348,24 @@ function NotaCardImpl({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {erroSalvo && (
+        <div className="space-y-1.5">
+          <div className="flex items-start gap-1.5 text-xs p-2 rounded bg-[var(--status-error-bg)] text-[var(--status-error-fg)]">
+            <XCircle size={12} className="shrink-0 mt-0.5" />
+            <span>
+              <span className="font-medium">
+                Tiny recusou{entry.last_error_at ? ` em ${formatDateTimeBR(entry.last_error_at)}` : ""}:
+              </span>{" "}
+              {erroSalvo}
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <AlertTriangle size={12} />
+            Corrija no Tiny (ex.: cadastre o fornecedor) e confirme de novo: os lançamentos já feitos não são duplicados.
+          </p>
         </div>
       )}
 

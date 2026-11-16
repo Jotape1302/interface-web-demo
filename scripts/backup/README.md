@@ -90,6 +90,42 @@ primeiro erro do `tar` (ex.: qual arquivo deu "Permissão negada").
 Depois de instalar, teste pelo systemd e não só no terminal:
 `systemctl --user start norvia-backup.service`.
 
+### Teste de restauração mensal
+
+Um backup só vale se voltar. `backup.sh verify-restore` pega o último backup bem-sucedido
+(pasta com o marcador `BACKUP_OK`), confere o `SHA256SUMS`, sobe um MariaDB **descartável**
+(`DOCKER_BIN`, docker ou podman rootless, imagem `VERIFY_MARIADB_IMAGE`, padrão `mariadb:11`),
+carrega o dump, conta as tabelas (falha se houver menos que `VERIFY_MIN_TABLES`) e derruba
+o container. Nada toca no banco de produção. O resultado fica em `$BACKUP_DIR/last-verify.json`
+e no `journalctl`. Alternativa sem container: `VERIFY_DB_HOST` apontando para um servidor
+**temporário** (o dump é carregado com o banco renomeado e apagado no fim). Dump só em `.age`
+exige `BACKUP_AGE_IDENTITY` (chave privada) na hora do teste.
+
+```bash
+./backup.sh verify-restore      # manual
+cp systemd/norvia-backup-verify.service systemd/norvia-backup-verify.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now norvia-backup-verify.timer   # dia 1 de cada mês, 04:30
+systemctl --user start norvia-backup-verify.service         # testa pelo systemd agora
+```
+
+### Retenção
+
+Só é apagado o que for mais velho que `BACKUP_RETENTION_DAYS` **e** estiver além dos
+`BACKUP_KEEP_MIN` (padrão 3) backups bem-sucedidos mais recentes. "Bem-sucedido" = pasta com
+o marcador `BACKUP_OK`, gravado só no fim (dump conferido, criptografia, `SHA256SUMS` e cópia
+externa). Pastas antigas, anteriores ao marcador, valem como boas se tiverem `SHA256SUMS` e
+não tiverem `FALHOU`. Falhas seguidas, portanto, nunca apagam o último backup bom.
+
+### Consistência
+
+O dump é consistente **por banco** (`--single-transaction`), não **entre bancos**: com mais
+de um banco em `BACKUP_DB_NAMES` cada dump é uma foto de um instante ligeiramente diferente
+(segundos a minutos), e o `caches.tar.gz` é de outro instante ainda. Os bancos do projeto
+não têm FK entre si, então isso não quebra a restauração; ainda assim, ao restaurar mais de
+um banco, não espere que reflitam exatamente o mesmo momento. Para consistência entre bancos
+seria preciso pausar as escritas (parar o gateway e as automações) durante o dump.
+
 Alternativa com cron (`crontab -e`):
 
 ```cron
@@ -106,7 +142,7 @@ variável para o status, no serviço do gateway no `docker-compose.yml` do servi
     environment:
       BACKUP_STATUS_FILE: /backups/last-backup.json
     volumes:
-      - /home/jotape1302/backups/norvia:/backups:ro   # o mesmo BACKUP_DIR do backup.env
+      - /home/deploy/backups/norvia:/backups:ro   # o mesmo BACKUP_DIR do backup.env
 ```
 
 O `last-backup.json` é gravado com permissão 644 e a pasta raiz com 711, então o
@@ -165,7 +201,7 @@ sha256sum -c SHA256SUMS          # agora confere também os arquivos em claro
 Confira a integridade antes:
 
 ```bash
-cd /home/jotape1302/backups/norvia/2026-09-25_023000
+cd /home/deploy/backups/norvia/2026-09-25_023000
 test -f FALHOU && echo "backup incompleto, use outro"
 sha256sum -c SHA256SUMS
 ```

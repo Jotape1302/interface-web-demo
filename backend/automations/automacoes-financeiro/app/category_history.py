@@ -15,16 +15,30 @@ Ordem de precedência (do mais específico ao mais genérico):
 1. mesmo fornecedor + mesmo código de produto;
 2. mesmo fornecedor + mesmo NCM;
 3. categoria mais usada (por valor) com aquele fornecedor.
+
+Os níveis 1 e 2 são correspondência forte (o mesmo produto/NCM já foi confirmado); o 3 é
+fraco — um fornecedor que vende de tudo (papelaria, marketplace) erra aqui. Por isso
+`suggest_detalhado` devolve o nível, e a tela põe a sugestão do Qwen entre os dois
+(ver `_sugestao_item` em routers/danfe.py).
+
+Guarda também a última forma de pagamento confirmada por (empresa, fornecedor), usada na
+pré-seleção da revisão (forma_pagamento.py).
 """
+import json
+import logging
 import threading
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 from app.review_store import ReviewItem, ReviewRecord, list_confirmed
+from app.tiny_client import PAYMENT_METHOD_MARCADOR
 
+logger = logging.getLogger("automacao_nfe.category_history")
+
+NivelHistorico = Literal["codigo", "ncm", "fornecedor"]
 _Key = Tuple[str, str, str]  # (destinatario_cnpj, emitente_cnpj, codigo|ncm)
 
 
@@ -33,19 +47,52 @@ class CategoryHistoryIndex:
     by_codigo: Dict[_Key, str]
     by_ncm: Dict[_Key, str]
     by_fornecedor: Dict[Tuple[str, str], str]
+    forma_pagamento_por_fornecedor: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    # Último "Meio de pagamento da NFe" (código tPag) lançado com o fornecedor: na confirmação o
+    # escolhido na revisão sobrescreve o do XML em nfe_data.meio_pagamento_nfe.
+    meio_nfe_por_fornecedor: Dict[Tuple[str, str], str] = field(default_factory=dict)
 
-    def suggest(self, destinatario_cnpj: Optional[str], emitente_cnpj: Optional[str], item: ReviewItem) -> Optional[str]:
+    def suggest_detalhado(
+        self, destinatario_cnpj: Optional[str], emitente_cnpj: Optional[str], item: ReviewItem
+    ) -> Optional[Tuple[str, NivelHistorico]]:
         if not destinatario_cnpj or not emitente_cnpj:
             return None
         if item.codigo:
             cat = self.by_codigo.get((destinatario_cnpj, emitente_cnpj, item.codigo))
             if cat:
-                return cat
+                return cat, "codigo"
         if item.ncm:
             cat = self.by_ncm.get((destinatario_cnpj, emitente_cnpj, item.ncm))
             if cat:
-                return cat
-        return self.by_fornecedor.get((destinatario_cnpj, emitente_cnpj))
+                return cat, "ncm"
+        cat = self.by_fornecedor.get((destinatario_cnpj, emitente_cnpj))
+        return (cat, "fornecedor") if cat else None
+
+    def suggest(self, destinatario_cnpj: Optional[str], emitente_cnpj: Optional[str], item: ReviewItem) -> Optional[str]:
+        achado = self.suggest_detalhado(destinatario_cnpj, emitente_cnpj, item)
+        return achado[0] if achado else None
+
+    def forma_pagamento(self, destinatario_cnpj: Optional[str], emitente_cnpj: Optional[str]) -> Optional[str]:
+        if not destinatario_cnpj or not emitente_cnpj:
+            return None
+        return self.forma_pagamento_por_fornecedor.get((destinatario_cnpj, emitente_cnpj))
+
+    def meio_pagamento_nfe(self, destinatario_cnpj: Optional[str], emitente_cnpj: Optional[str]) -> Optional[str]:
+        if not destinatario_cnpj or not emitente_cnpj:
+            return None
+        return self.meio_nfe_por_fornecedor.get((destinatario_cnpj, emitente_cnpj))
+
+
+def forma_pagamento_confirmada(record: ReviewRecord) -> Optional[str]:
+    """A do `.review.json` (desde 11/2026) ou, nas notas mais antigas, a do `.meta.json` ao lado."""
+    forma = record.forma_pagamento
+    if not forma:
+        meta = record.file_path.with_suffix(record.file_path.suffix + ".meta.json")
+        try:
+            forma = json.loads(meta.read_text(encoding="utf-8")).get("forma_pagamento")
+        except (OSError, ValueError, AttributeError):
+            return None
+    return forma if forma in PAYMENT_METHOD_MARCADOR else None
 
 
 def build_index(records: List[ReviewRecord]) -> CategoryHistoryIndex:
@@ -57,12 +104,20 @@ def build_index(records: List[ReviewRecord]) -> CategoryHistoryIndex:
     by_codigo: Dict[_Key, str] = {}
     by_ncm: Dict[_Key, str] = {}
     valor_por_fornecedor: Dict[Tuple[str, str], Dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    forma_por_fornecedor: Dict[Tuple[str, str], str] = {}
+    meio_por_fornecedor: Dict[Tuple[str, str], str] = {}
 
     for record in ordered:
         dest = record.nfe_data.destinatario_cnpj
         emit = record.nfe_data.emitente_cnpj
         if not dest or not emit:
             continue
+        forma = forma_pagamento_confirmada(record)
+        if forma:
+            forma_por_fornecedor[(dest, emit)] = forma
+        meio = getattr(record.nfe_data, "meio_pagamento_nfe", None)
+        if meio:
+            meio_por_fornecedor[(dest, emit)] = meio
         for item in record.itens:
             cat = item.categoria_sugerida_id
             if not cat:
@@ -78,7 +133,10 @@ def build_index(records: List[ReviewRecord]) -> CategoryHistoryIndex:
         for key, valores in valor_por_fornecedor.items()
         if valores
     }
-    return CategoryHistoryIndex(by_codigo=by_codigo, by_ncm=by_ncm, by_fornecedor=by_fornecedor)
+    return CategoryHistoryIndex(
+        by_codigo=by_codigo, by_ncm=by_ncm, by_fornecedor=by_fornecedor, forma_pagamento_por_fornecedor=forma_por_fornecedor,
+        meio_nfe_por_fornecedor=meio_por_fornecedor,
+    )
 
 
 _cache_lock = threading.Lock()

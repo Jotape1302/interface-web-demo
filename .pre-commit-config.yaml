@@ -9,3 +9,9 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+  # Lint das automações Python (mesma config do CI: backend/automations/ruff.toml).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        files: ^backend/automations/

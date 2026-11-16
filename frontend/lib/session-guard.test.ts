@@ -8,7 +8,7 @@ import {
   shouldAttachSessionToken,
 } from "./session-guard";
 
-test("caminhoInterno aceita só caminhos internos", () => {
+void test("caminhoInterno aceita só caminhos internos", () => {
   assert.equal(caminhoInterno("/contas-a-pagar?x=1"), "/contas-a-pagar?x=1");
   assert.equal(caminhoInterno("/"), "/");
   assert.equal(caminhoInterno("//evil.com"), null);
@@ -21,7 +21,7 @@ test("caminhoInterno aceita só caminhos internos", () => {
   assert.equal(caminhoInterno(null), null);
 });
 
-test("rotas protegidas cobrem todo /api exceto health e login/cadastro", () => {
+void test("rotas protegidas cobrem todo /api exceto health e login/cadastro", () => {
   for (const url of [
     "https://h/automacoes/api/overview",
     "http://localhost:3100/api/financial-dashboard/sync",
@@ -53,7 +53,7 @@ test("rotas protegidas cobrem todo /api exceto health e login/cadastro", () => {
   }
 });
 
-test("token só vai para a origem da API", () => {
+void test("token só vai para a origem da API", () => {
   // API absoluta em outra porta (rede local)
   const lan = "http://192.168.50.20:3100";
   assert.equal(shouldAttachSessionToken("http://192.168.50.20:3100/api/overview", lan, "http://192.168.50.20:3001"), true);
@@ -74,7 +74,7 @@ test("token só vai para a origem da API", () => {
   assert.equal(shouldAttachSessionToken("blob:https://servidor.norvia.example/1", prod, page), true);
 });
 
-test("atalho demo só em build demo ou localhost", () => {
+void test("atalho demo só em build demo ou localhost", () => {
   assert.equal(isDemoLoginAllowed("demo", "servidor.norvia.example"), true);
   assert.equal(isDemoLoginAllowed("live", "localhost"), true);
   assert.equal(isDemoLoginAllowed(undefined, "127.0.0.1"), true);
@@ -82,7 +82,7 @@ test("atalho demo só em build demo ou localhost", () => {
   assert.equal(isDemoLoginAllowed(undefined, "192.168.50.20"), false);
 });
 
-test("linkExternoSeguro só deixa http(s)", () => {
+void test("linkExternoSeguro só deixa http(s)", () => {
   assert.equal(linkExternoSeguro("https://produto.mercadolivre.com.br/MLB-1"), "https://produto.mercadolivre.com.br/MLB-1");
   assert.equal(linkExternoSeguro("javascript:alert(1)"), undefined);
   assert.equal(linkExternoSeguro("data:text/html,x"), undefined);

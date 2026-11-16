@@ -55,6 +55,7 @@ export function BatchExecutionView<T>({
   // Atualiza se novos lotes chegarem e nenhum estiver expandido
   React.useEffect(() => {
     if (batches.length > 0) {
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
       setExpandedBatchIds((prev) => {
         if (Object.keys(prev).length === 0) {
           return { [batches[0].id]: true };
@@ -98,6 +99,7 @@ export function BatchExecutionView<T>({
           </span>
           <div
             className="inline-flex rounded-lg bg-muted/40 p-0.5 border border-border/60"
+            // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
             role="group"
             aria-label="Modo de visualização das execuções"
           >

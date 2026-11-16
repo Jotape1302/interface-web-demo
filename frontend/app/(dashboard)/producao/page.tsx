@@ -1,7 +1,7 @@
 'use client';
 
-import AreaOverviewProducao from "../../components/area-overview-producao";
+import AreaOverview from "../../components/area-overview";
 
 export default function ProducaoOverviewPage() {
-  return <AreaOverviewProducao />;
+  return <AreaOverview area="producao" />;
 }

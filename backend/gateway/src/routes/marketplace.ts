@@ -1,5 +1,5 @@
 import type { AuditAction, AuditService } from "../audit.js";
-import { logRequestError, parseJsonBody, type RequestContext } from "../http.js";
+import { logRequestError, parseJsonBody, type RequestContext, asJsonObject, type JsonObject } from "../http.js";
 import { actorHeaders, automationFetch, relayedError, withAutomationAuth } from "../automation-http.js";
 import { getCircuitBreaker, CircuitBreakerOpenError } from "../circuit-breaker.js";
 
@@ -16,15 +16,19 @@ export function marketplaceApiUrl(): string {
 const AUTOMACOES = ["fretes", "dimensoes"] as const;
 
 /** Ações feitas em nome do usuário: vão com X-Usuario (autor gravado pela automação). */
-const ACOES_DO_USUARIO = [/^fretes\/retentar$/, /^fretes\/executar$/, /^dimensoes\/validar$/, /^dimensoes\/reenviar$/, /^dimensoes\/executar$/];
+const ACOES_DO_USUARIO = [/^fretes\/retentar$/, /^fretes\/executar$/, /^fretes\/corrigir-tipo$/, /^dimensoes\/validar$/, /^dimensoes\/reenviar$/, /^dimensoes\/executar$/];
 
 const ACOES_AUDITADAS: Array<{ re: RegExp; metodo: string; acao: AuditAction }> = [
   { re: /^fretes\/executar$/, metodo: "POST", acao: "fretes_verificacao_manual" },
   { re: /^fretes\/retentar$/, metodo: "POST", acao: "fretes_nova_tentativa" },
+  { re: /^fretes\/corrigir-tipo$/, metodo: "POST", acao: "fretes_tipo_corrigido" },
   { re: /^dimensoes\/validar$/, metodo: "POST", acao: "dimensoes_validadas" },
   { re: /^dimensoes\/reenviar$/, metodo: "POST", acao: "dimensoes_reenviadas" },
   { re: /^dimensoes\/executar$/, metodo: "POST", acao: "dimensoes_coleta_manual" },
 ];
+
+/** Máximo de itens (skus/produtos/anúncios) por requisição ao marketplace (SEC-08). */
+export const LIMITE_ITENS_LOTE = 200;
 
 export function createMarketplaceRoutes(deps: { audit?: AuditService; baseUrl?: string; fetchImpl?: typeof fetch }) {
   const { audit } = deps;
@@ -42,11 +46,23 @@ export function createMarketplaceRoutes(deps: { audit?: AuditService; baseUrl?: 
     // A automação não tem PUT: só GET (leitura) e POST (ações mapeadas em permissions.ts).
     if (!["GET", "POST"].includes(method)) return send(405, { error: "Método não permitido" });
 
-    let body: any = undefined;
+    let body: unknown = undefined;
     if (method !== "GET") {
       body = await parseJsonBody(ctx.request);
       // Quem fez a alteração vai junto para o histórico da automação.
-      if (body && typeof body === "object") body.usuario = ctx.session?.user?.nome ?? body.usuario ?? null;
+      if (body && typeof body === "object") {
+        const pedido = body as JsonObject;
+        // SEC-08: lote grande demais derrubaria a automação (cada item é uma chamada ao ML).
+        for (const campo of ["skus", "produtos", "anuncios"] as const) {
+          const lista = pedido[campo];
+          if (Array.isArray(lista) && lista.length > LIMITE_ITENS_LOTE) {
+            return send(400, {
+              error: `Lote grande demais: envie no máximo ${LIMITE_ITENS_LOTE} itens por vez (recebidos ${lista.length}).`,
+            });
+          }
+        }
+        pedido.usuario = ctx.session?.user?.nome ?? pedido.usuario ?? null;
+      }
     }
 
     const base = deps.baseUrl ?? marketplaceApiUrl();
@@ -76,10 +92,13 @@ export function createMarketplaceRoutes(deps: { audit?: AuditService; baseUrl?: 
           error: "Automação de marketplace temporariamente indisponível: circuito aberto. Tente novamente em instantes.",
         });
       }
+      // O navegador desistiu (trocou de página, recarregou, filtro novo): não há a quem responder
+      // nem erro a registrar. Antes isto virava "AbortError" no log e incidente (#20, 05/11).
+      if (ctx.signal?.aborted) return true;
       logRequestError(ctx, e, "marketplace_upstream_error");
       return send(502, { error: "Automação de marketplace indisponível.", requestId: ctx.requestId });
     }
-    const data = (await res.json().catch(() => null)) as any;
+    const data: unknown = await res.json().catch(() => null);
 
     const auditada = ACOES_AUDITADAS.find((a) => a.metodo === method && a.re.test(resto));
     if (auditada && res.ok) {
@@ -88,7 +107,7 @@ export function createMarketplaceRoutes(deps: { audit?: AuditService; baseUrl?: 
         actorLabel: ctx.session?.user?.nome || "Usuário Marketplace",
         acao: auditada.acao,
         alvo: alvoAuditoria(body),
-        detalhes: body && typeof body === "object" ? { ...body, usuario: undefined } : undefined,
+        detalhes: body && typeof body === "object" ? { ...(body as JsonObject), usuario: undefined } : undefined,
         ip: ctx.ip,
       });
     }
@@ -102,12 +121,13 @@ export function createMarketplaceRoutes(deps: { audit?: AuditService; baseUrl?: 
 }
 
 /** SKUs (padronização) ou MLBs (nova tentativa de frete) da ação, para o Log de Auditoria. */
-function alvoAuditoria(body: any): string | undefined {
-  const ids: string[] = [
-    ...(Array.isArray(body?.produtos) ? body.produtos.map((p: any) => p?.sku) : []),
-    ...(Array.isArray(body?.skus) ? body.skus : []),
-    ...(Array.isArray(body?.anuncios) ? body.anuncios.map((a: any) => a?.mlb) : []),
-  ].filter(Boolean);
+function alvoAuditoria(body: unknown): string | undefined {
+  const pedido = asJsonObject(body);
+  const ids = [
+    ...(Array.isArray(pedido.produtos) ? pedido.produtos.map((p: unknown) => asJsonObject(p).sku) : []),
+    ...(Array.isArray(pedido.skus) ? (pedido.skus as unknown[]) : []),
+    ...(Array.isArray(pedido.anuncios) ? pedido.anuncios.map((a: unknown) => asJsonObject(a).mlb) : []),
+  ].filter(Boolean) as string[];
   if (ids.length === 0) return undefined;
   return ids.length > 5 ? `${ids.slice(0, 5).join(", ")} e mais ${ids.length - 5}` : ids.join(", ");
 }

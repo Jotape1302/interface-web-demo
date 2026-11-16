@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, Optional
 from urllib.parse import unquote
@@ -13,8 +14,9 @@ from urllib.parse import unquote
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
-from app.config import TinySettings
-from app.tiny_estoque import CONTA_TINY, ClienteTinyEstoque, EstoqueTinyErro, TinyAPIError, ajustar_contagem, consultar_produto, token_tiny_do_banco
+from app import execucoes
+from app.config import BotSettings, TinySettings
+from app.tiny_estoque import CONTA_TINY, ClienteTinyEstoque, EstoqueTinyErro, TinyAPIError, HistoricoLancamentos, ajustar_contagem, consultar_produto, exigir_processo_unico, token_tiny_do_banco
 
 logger = logging.getLogger("contagem_estoque.api")
 
@@ -30,6 +32,17 @@ def cliente() -> ClienteTinyEstoque:
     if _cliente is None:
         _cliente = ClienteTinyEstoque(token_tiny_do_banco(cfg), cfg)
     return _cliente
+
+
+_historico: Optional[HistoricoLancamentos] = None
+
+
+def historico() -> HistoricoLancamentos:
+    """Lançamentos já feitos por registro_id, na pasta do registro das contagens (volume persistente)."""
+    global _historico
+    if _historico is None:
+        _historico = HistoricoLancamentos(BotSettings().registro_dir)
+    return _historico
 
 
 def _chave_configurada() -> str:
@@ -59,14 +72,19 @@ async def exigir_chave_interna(request: Request) -> None:
 
 def _usuario(request: Request) -> str:
     bruto = (request.headers.get("X-Usuario") or "").strip()
-    try:
-        bruto = unquote(bruto)
-    except Exception:
-        pass
+    bruto = unquote(bruto)  # errors="replace" por padrão: nunca levanta
     return "".join(c for c in bruto if c.isprintable()).strip()[:_USUARIO_MAX]
 
 
-app = FastAPI(title="Contagem de estoque", dependencies=[Depends(exigir_chave_interna)])
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    exigir_processo_unico()  # _ajuste_lock é por processo (EST-02)
+    yield
+
+
+app = FastAPI(title="Contagem de estoque", lifespan=lifespan, dependencies=[Depends(exigir_chave_interna)])
+# Contagem de execuções por rota para o monitor dos agentes Qwen (app/execucoes.py).
+execucoes.instalar(app)
 
 
 class AjusteRequest(BaseModel):
@@ -121,7 +139,8 @@ def ajustar(payload: AjusteRequest, request: Request) -> Dict[str, Any]:
     sku = _sku_valido(payload.sku)
     try:
         return ajustar_contagem(
-            cliente(), sku, payload.quantidade, payload.registro_id, payload.numero, payload.criado_em, _usuario(request)
+            cliente(), sku, payload.quantidade, payload.registro_id, payload.numero, payload.criado_em, _usuario(request),
+            historico(),
         )
     except EstoqueTinyErro as e:
         raise HTTPException(status_code=409, detail=str(e))

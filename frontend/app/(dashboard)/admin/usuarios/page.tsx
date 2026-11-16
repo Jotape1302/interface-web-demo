@@ -1,20 +1,14 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   CheckCircle,
-  Clock,
-  Globe,
   Info,
-  LogOut,
   Monitor,
   RefreshCw,
   Search,
   ShieldCheck,
-  SlidersHorizontal,
-  Trash2,
   UserCheck,
-  UserCog,
   UserPlus,
   Users,
   XCircle,
@@ -24,12 +18,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { toast } from '@/components/ui/toast';
 import { useAuth } from '@/lib/auth-context';
-import { SETORES } from '@/lib/contracts';
-import { formatDateTimeBR, formatTimeBR } from '@/lib/formatters';
-import { createAdminUsersService } from '@/lib/admin-users-service';
+import { formatDateTimeBR } from '@/lib/formatters';
 import type {
   AdminChangeRequest,
   AdminSession,
@@ -43,34 +35,27 @@ import {
   formatAccessCount,
   hasNoAccess,
   targetPolicy,
-  type PermissionCatalog,
   type PermissionStateView,
-  type PolicyActor,
   type Role,
   type TargetPolicy,
 } from '@/lib/permissions';
 import { NewUserModal, ApproveUserModal } from '@/app/components/admin-user-modals';
 import { PermissionEditorSheet } from '@/app/components/permission-editor-sheet';
-import { RoleSelect } from '@/app/components/role-select';
 import { ConfirmImpactDialog } from '@/app/components/confirm-impact-dialog';
-import { AccessBadge, RootBadge } from '@/app/components/admin-user-badges';
 import { Notice } from '@/app/components/admin-notice';
+import { useAdminUsers } from '@/app/components/admin-users/use-admin-users';
+import { UsersTable } from '@/app/components/admin-users/users-table';
+import { ChangeRequestsPanel } from '@/app/components/admin-users/change-requests-panel';
+import { SessionsTable } from '@/app/components/admin-users/sessions-table';
+import { TD, TH } from '@/app/components/admin-users/styles';
 
 type Tab = 'pending' | 'users' | 'sessions';
-type LoadState = 'loading' | 'error' | 'ready';
 
 type Confirm =
   | { kind: 'delete'; user: AdminUserView }
   | { kind: 'reject'; user: AdminUserView }
   | { kind: 'session'; session: AdminSession }
   | { kind: 'rejectChange'; request: AdminChangeRequest };
-
-const STATUS_LABEL: Record<AdminUserView['status'], string> = {
-  pending: 'Pendente',
-  approved: 'Ativo',
-  rejected: 'Recusado',
-  blocked: 'Bloqueado',
-};
 
 const LAST_ADMIN_MESSAGE = 'Não é possível: o sistema precisa de pelo menos um administrador.';
 
@@ -124,32 +109,26 @@ function TableSkeleton() {
   );
 }
 
-const TH = 'p-3 text-left font-mono text-[10px] font-semibold uppercase text-muted-foreground';
-const TD = 'p-3 align-middle';
-
 export default function AdminUsersPage() {
-  const { user, token, isDemoMode, permissions, can, refreshPendingCount } = useAuth();
-
-  const actorId = user?.id;
-  const actorRole = user?.role;
-  const actor = useMemo<PolicyActor | null>(
-    () => (actorId !== undefined && actorRole ? { id: actorId, role: actorRole, permissions } : null),
-    [actorId, actorRole, permissions],
-  );
-  const service = useMemo(
-    () => (actor ? createAdminUsersService({ demo: isDemoMode, token, actor }) : null),
-    [actor, isDemoMode, token],
-  );
+  const { can } = useAuth();
+  const {
+    actor,
+    service,
+    users,
+    setUsers,
+    sessions,
+    changeRequests,
+    loadState,
+    loadError,
+    refreshing,
+    catalog,
+    catalogError,
+    loadCatalog,
+    refreshAll,
+    reloadNow,
+  } = useAdminUsers();
 
   const [activeTab, setActiveTab] = useState<Tab>(readInitialTab);
-  const [users, setUsers] = useState<AdminUserView[]>([]);
-  const [sessions, setSessions] = useState<AdminSession[]>([]);
-  const [changeRequests, setChangeRequests] = useState<AdminChangeRequest[]>([]);
-  const [loadState, setLoadState] = useState<LoadState>('loading');
-  const [loadError, setLoadError] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
-  const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<Role | 'all'>('all');
@@ -163,55 +142,6 @@ export default function AdminUsersPage() {
   const [setorBusy, setSetorBusy] = useState<number | null>(null);
 
   const isAdmin = actor?.role === 'admin';
-
-  // Busca (sem estado) + aplicação (com estado) separadas: o efeito inicial aplica no `.then`,
-  // e o botão Atualizar / "Tentar novamente" ligam o indicador antes (ver reloadNow).
-  const fetchCatalog = useCallback(async () => (service ? service.catalog() : null), [service]);
-  const applyCatalog = useCallback((res: Awaited<ReturnType<typeof fetchCatalog>>) => {
-    if (!res) return;
-    setCatalogError(res.ok ? null : res.error.message);
-    if (res.ok) setCatalog(res.data);
-  }, []);
-  const loadCatalog = useCallback(async () => applyCatalog(await fetchCatalog()), [applyCatalog, fetchCatalog]);
-
-  const fetchAll = useCallback(
-    async () => (service ? Promise.all([service.listUsers(), service.listSessions(), service.listChangeRequests()]) : null),
-    [service],
-  );
-  const applyAll = useCallback(
-    (result: Awaited<ReturnType<typeof fetchAll>>) => {
-      if (!result) return;
-      const [u, s, c] = result;
-      setRefreshing(false);
-      if (!u.ok) {
-        setLoadError(u.error.message);
-        setLoadState('error');
-        return;
-      }
-      setUsers(u.data);
-      if (s.ok) setSessions(s.data);
-      if (c.ok) setChangeRequests(c.data);
-      setLoadState('ready');
-      void refreshPendingCount();
-    },
-    [refreshPendingCount],
-  );
-  const refreshAll = useCallback(async () => applyAll(await fetchAll()), [applyAll, fetchAll]);
-
-  useEffect(() => {
-    let alive = true;
-    void fetchAll().then((r) => alive && applyAll(r));
-    void fetchCatalog().then((r) => alive && applyCatalog(r));
-    return () => {
-      alive = false;
-    };
-  }, [fetchAll, applyAll, fetchCatalog, applyCatalog]);
-
-  const reloadNow = (showSkeleton = false) => {
-    if (showSkeleton) setLoadState('loading');
-    setRefreshing(true);
-    void refreshAll();
-  };
 
   const policyFor = useCallback(
     (target: { id: number; role: Role; is_root: boolean }): TargetPolicy | null => (actor ? targetPolicy(actor, target) : null),
@@ -273,7 +203,7 @@ export default function AdminUsersPage() {
     return res;
   };
 
-  const handleRole = async (target: AdminUserView, role: Role): Promise<boolean> => {
+  const handleRole = useCallback(async (target: AdminUserView, role: Role): Promise<boolean> => {
     if (!service) return false;
     const res = await service.putRole(target.id, role);
     if (!res.ok) {
@@ -294,32 +224,47 @@ export default function AdminUsersPage() {
     // Admin rebaixado começa sem nenhuma permissão: abre o editor em seguida.
     if (res.data.previousRole === 'admin' && role !== 'admin') setEditorTarget(updated);
     return true;
-  };
+  }, [service, setUsers, refreshAll]);
 
-  const handleSetor = async (target: AdminUserView, setor: string, undo = false) => {
-    if (!service || setor === target.setor) return;
-    const previous = target.setor;
-    setSetorBusy(target.id);
-    const res = await service.putSetor(target.id, setor);
-    setSetorBusy(null);
-    if (!res.ok) {
-      toast.add({ title: res.error.message, type: 'error' });
-      return;
-    }
-    const updated = { ...target, setor };
-    setUsers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
-    if (undo) {
-      toast.add({ title: `Setor de ${target.nome} voltou para ${setor}.`, type: 'success' });
-      return;
-    }
-    toast.add({
-      title: `Setor de ${target.nome} alterado de ${previous || '—'} para ${setor}.`,
-      description: 'As permissões não mudaram.',
-      type: 'success',
-      timeout: 8000,
-      actionProps: { children: 'Desfazer', onClick: () => void handleSetor(updated, previous, true) },
-    });
-  };
+  const changeSetor = useCallback(
+    async (target: AdminUserView, setor: string): Promise<AdminUserView | null> => {
+      if (!service || setor === target.setor) return null;
+      setSetorBusy(target.id);
+      const res = await service.putSetor(target.id, setor);
+      setSetorBusy(null);
+      if (!res.ok) {
+        toast.add({ title: res.error.message, type: 'error' });
+        return null;
+      }
+      const updated = { ...target, setor };
+      setUsers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
+      return updated;
+    },
+    [service, setUsers],
+  );
+  const undoSetor = useCallback(
+    async (target: AdminUserView, setor: string) => {
+      if (await changeSetor(target, setor)) toast.add({ title: `Setor de ${target.nome} voltou para ${setor}.`, type: 'success' });
+    },
+    [changeSetor],
+  );
+  const handleSetor = useCallback(
+    async (target: AdminUserView, setor: string) => {
+      const previous = target.setor;
+      const updated = await changeSetor(target, setor);
+      if (!updated) return;
+      toast.add({
+        title: `Setor de ${target.nome} alterado de ${previous || '—'} para ${setor}.`,
+        description: 'As permissões não mudaram.',
+        type: 'success',
+        timeout: 8000,
+        actionProps: { children: 'Desfazer', onClick: () => void undoSetor(updated, previous) },
+      });
+    },
+    [changeSetor, undoSetor],
+  );
+  const onSetor = useCallback((u: AdminUserView, setor: string) => void handleSetor(u, setor), [handleSetor]);
+  const onDeleteUser = useCallback((u: AdminUserView) => setConfirm({ kind: 'delete', user: u }), []);
 
   const runConfirm = async () => {
     if (!confirm || !service) return;
@@ -405,107 +350,6 @@ export default function AdminUsersPage() {
   const pendingTotal = pendingUsers.length + changeRequests.length;
 
   // ---- Células reaproveitadas na tabela e nos cards (<768px) -------------------------------
-
-  const setorControl = (u: AdminUserView, policy: TargetPolicy | null) =>
-    policy?.canChangeSetor ? (
-      <NativeSelect
-        size="sm"
-        value={u.setor}
-        disabled={setorBusy === u.id}
-        onChange={(e) => void handleSetor(u, e.target.value)}
-        aria-label={`Setor de ${u.nome}`}
-        className="[&_select]:rounded-[4px] [&_select]:text-xs"
-      >
-        {(SETORES as readonly string[]).includes(u.setor) ? null : <NativeSelectOption value={u.setor}>{u.setor}</NativeSelectOption>}
-        {SETORES.map((s) => (
-          <NativeSelectOption key={s} value={s}>
-            {s}
-          </NativeSelectOption>
-        ))}
-      </NativeSelect>
-    ) : (
-      <span className="text-xs text-muted-foreground">{u.setor || '—'}</span>
-    );
-
-  const userActions = (u: AdminUserView, policy: TargetPolicy | null) => (
-    <div className="flex items-center justify-end gap-1.5">
-      <Button size="sm" variant="outline" onClick={() => openEditor(u)} aria-label={`Permissões de ${u.nome}`}>
-        <SlidersHorizontal aria-hidden="true" />
-        Permissões
-      </Button>
-      {policy?.canDelete && (
-        <Button
-          size="icon-sm"
-          variant="destructive"
-          onClick={() => setConfirm({ kind: 'delete', user: u })}
-          aria-label={`Excluir ${u.nome}`}
-          title="Excluir usuário"
-        >
-          <Trash2 aria-hidden="true" />
-        </Button>
-      )}
-    </div>
-  );
-
-  const nameCell = (u: AdminUserView) => (
-    <div className="min-w-0">
-      <div className="flex flex-wrap items-center gap-1.5 font-semibold text-foreground">
-        <span className="truncate">{u.nome}</span>
-        {u.is_root && <RootBadge />}
-        {u.status !== 'approved' && (
-          <Badge variant="warning" className="text-[10px]">
-            {STATUS_LABEL[u.status]}
-          </Badge>
-        )}
-      </div>
-      <div className="truncate font-mono text-[11px] font-normal text-muted-foreground">@{u.username}</div>
-    </div>
-  );
-
-  const sessionAction = (s: AdminSession) => {
-    if (s.current) return <span className="text-xs text-muted-foreground">Sua sessão</span>;
-    const policy = policyFor({ id: s.usuario_id, role: s.role, is_root: s.is_root });
-    if (policy?.canForceLogout) {
-      return (
-        <Button size="sm" variant="destructive" onClick={() => setConfirm({ kind: 'session', session: s })}>
-          <LogOut aria-hidden="true" />
-          Encerrar sessão
-        </Button>
-      );
-    }
-    const reason = s.is_root
-      ? 'O usuário ROOT não pode ter a sessão encerrada por outra pessoa.'
-      : 'Só o administrador encerra sessões de Gestores e Administradores';
-    return (
-      <Tooltip>
-        <TooltipTrigger render={<button type="button" className="cursor-help text-xs text-muted-foreground" aria-label={reason} />}>
-          —
-        </TooltipTrigger>
-        <TooltipContent>{reason}</TooltipContent>
-      </Tooltip>
-    );
-  };
-
-  const changeActions = (req: AdminChangeRequest) => {
-    const policy = req.usuario_role
-      ? policyFor({ id: req.usuario_id, role: req.usuario_role, is_root: req.usuario_is_root })
-      : null;
-    if (!policy?.canReviewChange) {
-      return <span className="text-xs text-muted-foreground">Só o administrador decide</span>;
-    }
-    return (
-      <div className="flex justify-end gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => void handleApproveChange(req)}>
-          <CheckCircle aria-hidden="true" />
-          Aprovar
-        </Button>
-        <Button size="sm" variant="destructive" onClick={() => setConfirm({ kind: 'rejectChange', request: req })}>
-          <XCircle aria-hidden="true" />
-          Recusar
-        </Button>
-      </div>
-    );
-  };
 
   const signupActions = (u: AdminUserView) => (
     <div className="flex justify-end gap-1.5">
@@ -649,60 +493,13 @@ export default function AdminUsersPage() {
                   </section>
                 )}
 
-                {changeRequests.length > 0 && (
-                  <section className="space-y-2">
-                    <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-foreground">
-                      <UserCog size={14} aria-hidden="true" />
-                      Alterações de cadastro
-                    </h2>
-                    <div className="hidden overflow-hidden rounded-[4px] border border-border bg-card md:block">
-                      <table className="w-full text-xs text-foreground">
-                        <thead className="border-b border-border bg-muted/60">
-                          <tr>
-                            <th scope="col" className={TH}>Colaborador</th>
-                            <th scope="col" className={TH}>Tipo</th>
-                            <th scope="col" className={TH}>Valor atual</th>
-                            <th scope="col" className={TH}>Novo valor</th>
-                            <th scope="col" className={TH}>Solicitado em</th>
-                            <th scope="col" className={`${TH} text-right`}>Ações</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-border/60">
-                          {changeRequests.map((req) => (
-                            <tr key={req.id} className="hover:bg-muted/40">
-                              <td className={`${TD} font-semibold`}>
-                                {req.usuario_nome || users.find((u) => u.id === req.usuario_id)?.nome || `Usuário #${req.usuario_id}`}
-                              </td>
-                              <td className={TD}>
-                                <Badge variant="outline" className="text-[11px]">
-                                  {req.tipo === 'username' ? 'Login' : 'E-mail'}
-                                </Badge>
-                              </td>
-                              <td className={`${TD} font-mono text-muted-foreground`}>{req.valor_atual}</td>
-                              <td className={`${TD} font-mono font-semibold`}>{req.valor_novo}</td>
-                              <td className={`${TD} text-muted-foreground`}>{formatDateTimeBR(req.solicitado_em)}</td>
-                              <td className={`${TD} text-right`}>{changeActions(req)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <ul className="space-y-2 md:hidden">
-                      {changeRequests.map((req) => (
-                        <li key={req.id} className="space-y-1.5 rounded-[4px] border border-border bg-card p-3 text-xs">
-                          <div className="font-semibold text-foreground">
-                            {req.usuario_nome || `Usuário #${req.usuario_id}`} ·{' '}
-                            <span className="font-normal text-muted-foreground">{req.tipo === 'username' ? 'Login' : 'E-mail'}</span>
-                          </div>
-                          <div className="break-all font-mono text-muted-foreground">
-                            {req.valor_atual} → <strong className="text-foreground">{req.valor_novo}</strong>
-                          </div>
-                          {changeActions(req)}
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
+                <ChangeRequestsPanel
+                  requests={changeRequests}
+                  users={users}
+                  policyFor={policyFor}
+                  onApprove={(req) => void handleApproveChange(req)}
+                  onReject={(req) => setConfirm({ kind: 'rejectChange', request: req })}
+                />
               </>
             )}
           </div>
@@ -761,56 +558,15 @@ export default function AdminUsersPage() {
                 Nenhum usuário encontrado com esses filtros.
               </div>
             ) : (
-              <>
-                <div className="hidden overflow-hidden rounded-[4px] border border-border bg-card md:block">
-                  <table className="w-full text-xs text-foreground">
-                    <thead className="border-b border-border bg-muted/60">
-                      <tr>
-                        <th scope="col" className={TH}>Usuário</th>
-                        <th scope="col" className={TH}>Setor</th>
-                        <th scope="col" className={TH}>Perfil</th>
-                        <th scope="col" className={TH}>Acesso</th>
-                        <th scope="col" className={`${TH} text-right`}>Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border/60">
-                      {filteredUsers.map((u) => {
-                        const policy = policyFor(u);
-                        return (
-                          <tr key={u.id} className="hover:bg-muted/40">
-                            <td className={`${TD} max-w-64`}>{nameCell(u)}</td>
-                            <td className={TD}>{setorControl(u, policy)}</td>
-                            <td className={TD}>{policy && <RoleSelect target={u} policy={policy} onConfirm={(r) => handleRole(u, r)} />}</td>
-                            <td className={TD}>
-                              <AccessBadge role={u.role} count={u.permissions_count} />
-                            </td>
-                            <td className={TD}>{userActions(u, policy)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <ul className="space-y-2 md:hidden">
-                  {filteredUsers.map((u) => {
-                    const policy = policyFor(u);
-                    return (
-                      <li key={u.id} className="space-y-2.5 rounded-[4px] border border-border bg-card p-3 text-xs">
-                        {nameCell(u)}
-                        <div className="flex flex-wrap items-center gap-2">
-                          {policy && <RoleSelect target={u} policy={policy} onConfirm={(r) => handleRole(u, r)} />}
-                          <AccessBadge role={u.role} count={u.permissions_count} />
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-muted-foreground">Setor:</span>
-                          {setorControl(u, policy)}
-                        </div>
-                        {userActions(u, policy)}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </>
+              <UsersTable
+                users={filteredUsers}
+                policyFor={policyFor}
+                setorBusy={setorBusy}
+                onSetor={onSetor}
+                onRole={handleRole}
+                onEditPermissions={openEditor}
+                onDelete={onDeleteUser}
+              />
             )}
           </div>
         ) : (
@@ -826,75 +582,11 @@ export default function AdminUsersPage() {
                 <p className="text-sm font-medium text-foreground">Nenhuma sessão ativa encontrada.</p>
               </div>
             ) : (
-              <>
-                <div className="hidden overflow-hidden rounded-[4px] border border-border bg-card md:block">
-                  <table className="w-full text-xs text-foreground">
-                    <thead className="border-b border-border bg-muted/60">
-                      <tr>
-                        <th scope="col" className={TH}>Colaborador</th>
-                        <th scope="col" className={TH}>Setor</th>
-                        <th scope="col" className={TH}>Endereço IP</th>
-                        <th scope="col" className={TH}>Navegador</th>
-                        <th scope="col" className={TH}>Última atividade</th>
-                        <th scope="col" className={`${TH} text-right`}>Ação</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border/60">
-                      {sessions.map((s) => (
-                        <tr key={s.id} className="hover:bg-muted/40">
-                          <td className={TD}>
-                            <div className="flex items-center gap-2 font-semibold">
-                              {s.nome}
-                              {s.current && (
-                                <Badge variant="outline" className="text-[9px] font-bold">
-                                  VOCÊ
-                                </Badge>
-                              )}
-                            </div>
-                            <span className="font-mono text-[11px] text-muted-foreground">{s.email}</span>
-                          </td>
-                          <td className={`${TD} text-muted-foreground`}>{s.setor}</td>
-                          <td className={`${TD} font-mono`}>
-                            <span className="flex items-center gap-1.5">
-                              <Globe size={13} className="text-muted-foreground" aria-hidden="true" />
-                              {s.ip_address}
-                            </span>
-                          </td>
-                          <td className={`${TD} max-w-xs truncate text-muted-foreground`} title={s.user_agent}>
-                            {s.user_agent}
-                          </td>
-                          <td className={`${TD} text-muted-foreground`}>
-                            <span className="flex items-center gap-1">
-                              <Clock size={12} aria-hidden="true" />
-                              {formatTimeBR(s.ultimo_acesso)}
-                            </span>
-                          </td>
-                          <td className={`${TD} text-right`}>{sessionAction(s)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <ul className="space-y-2 md:hidden">
-                  {sessions.map((s) => (
-                    <li key={s.id} className="space-y-1.5 rounded-[4px] border border-border bg-card p-3 text-xs">
-                      <div className="flex items-center gap-2 font-semibold text-foreground">
-                        {s.nome}
-                        {s.current && (
-                          <Badge variant="outline" className="text-[9px] font-bold">
-                            VOCÊ
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="text-muted-foreground">
-                        {s.setor} · <span className="font-mono">{s.ip_address}</span> · {formatTimeBR(s.ultimo_acesso)}
-                      </div>
-                      <div className="truncate text-muted-foreground">{s.user_agent}</div>
-                      <div className="flex justify-end">{sessionAction(s)}</div>
-                    </li>
-                  ))}
-                </ul>
-              </>
+              <SessionsTable
+                sessions={sessions}
+                policyFor={policyFor}
+                onForceLogout={(session) => setConfirm({ kind: 'session', session })}
+              />
             )}
           </div>
         )}

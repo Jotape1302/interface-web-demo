@@ -13,12 +13,12 @@ test("métricas preservam semântica, precisão e ausência de denominador", () 
     totalQueue: 1280,
     paidCount: 1092,
     reconciledCount: 1184,
-    hoursSaved: 91,
-    estimatedSavings: 1001,
+    hoursSaved: 81.9,
+    estimatedSavings: 900.9,
     automationRate: 92.5,
   });
   assert.equal(metricsFromCounts(0, 0, 0).automationRate, null);
-  assert.equal(metricsFromCounts(1, 1, 0).estimatedSavings, (5 / 60) * 11);
+  assert.equal(metricsFromCounts(1, 1, 0).estimatedSavings, 0.83);
   assert.throws(() => metricsFromCounts(1, 2, 0));
   assert.throws(() => metricsFromCounts(9007199254740993n, 0, 0));
 });
@@ -195,7 +195,7 @@ test("falhas parciais não substituem dados reais por demo ou zero", async () =>
       throw new Error("offline");
     },
   }).read();
-  assert.equal(n8nFail.metrics?.hoursSaved, 91);
+  assert.equal(n8nFail.metrics?.hoursSaved, 81.9);
   assert.equal(n8nFail.executions, null);
 });
 test("HTTP entrega contrato, CORS restrito, no-store e somente leitura", async (t) => {

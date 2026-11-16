@@ -232,24 +232,112 @@ test("mlReconciliationCheck: sem execução, falha parcial, token ausente e atra
   assert.equal(r.state, "error");
 });
 
-test("download da planilha repassa o binário e o nome do arquivo", async () => {
+test("download da planilha (vendas) repassa o binário e o nome do arquivo", async () => {
   const xlsx = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
   const py = fakePython({
-    "GET /api/v1/conciliacao-ml/analises/a1/arquivos/lancamentos": () =>
+    "GET /api/v1/conciliacao-ml/analises/a1/arquivos/vendas": () =>
+      new Response(xlsx, {
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "content-disposition": "attachment; filename*=UTF-8''VEN.xlsx",
+        },
+      }),
+  });
+  const handler = createMlReconciliationRoutes({ pythonApiUrl: "http://py:8000", fetchImpl: py.fetchImpl });
+  const c = ctx("/api/ml-reconciliation/analises/a1/arquivos/vendas", "GET");
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 200);
+  assert.deepEqual(c.sent.raw, xlsx);
+  assert.equal(c.sent.headers["content-disposition"], "attachment; filename*=UTF-8''VEN.xlsx");
+});
+
+test("SEC-06: GET .../arquivos/lancamentos responde 405 e não chama o motor", async () => {
+  const py = fakePython({});
+  const handler = createMlReconciliationRoutes({ pythonApiUrl: "http://py:8000", fetchImpl: py.fetchImpl });
+  const c = ctx("/api/ml-reconciliation/analises/a1/arquivos/lancamentos", "GET");
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 405);
+  assert.equal(py.chamadas.length, 0);
+});
+
+test("SEC-06: POST .../lancamentos/exportar repassa body, xlsx e cabeçalhos, e audita", async () => {
+  const xlsx = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x09]);
+  const py = fakePython({
+    "POST /api/v1/conciliacao-ml/analises/a1/arquivos/lancamentos/exportar": () =>
       new Response(xlsx, {
         status: 200,
         headers: {
           "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           "content-disposition": "attachment; filename*=UTF-8''LAN.xlsx",
+          "x-lancamentos-total": "12",
+          "x-lancamentos-ja-exportados": "4",
+          "x-lancamentos-na-planilha": "8",
         },
       }),
   });
-  const handler = createMlReconciliationRoutes({ pythonApiUrl: "http://py:8000", fetchImpl: py.fetchImpl });
-  const c = ctx("/api/ml-reconciliation/analises/a1/arquivos/lancamentos", "GET");
+  const auditados: any[] = [];
+  const handler = createMlReconciliationRoutes({
+    pythonApiUrl: "http://py:8000",
+    fetchImpl: py.fetchImpl,
+    audit: { record: async (e: any) => void auditados.push(e) } as any,
+  });
+  const c = ctx(
+    "/api/ml-reconciliation/analises/a1/arquivos/lancamentos/exportar",
+    "POST",
+    { incluir_exportados: true, extra: "ignorado" },
+    { "content-type": "application/json" },
+  );
   await handler(c.ctx as any);
   assert.equal(c.sent.status, 200);
   assert.deepEqual(c.sent.raw, xlsx);
   assert.equal(c.sent.headers["content-disposition"], "attachment; filename*=UTF-8''LAN.xlsx");
+  assert.equal(c.sent.headers["x-lancamentos-total"], "12");
+  assert.equal(c.sent.headers["x-lancamentos-ja-exportados"], "4");
+  assert.equal(c.sent.headers["x-lancamentos-na-planilha"], "8");
+  assert.match(c.sent.headers["access-control-expose-headers"]!, /X-Lancamentos-Na-Planilha/);
+  assert.match(c.sent.headers["access-control-expose-headers"]!, /Content-Disposition/);
+
+  const enviado = py.chamadas.find((x) => x.url.endsWith("/exportar"))!;
+  assert.equal(enviado.init.method, "POST");
+  assert.deepEqual(JSON.parse(String(enviado.init.body)), { incluir_exportados: true });
+
+  assert.equal(auditados.length, 1);
+  assert.equal(auditados[0].acao, "conciliacao_ml_lancamentos_exportados");
+  assert.equal(auditados[0].ip, "10.0.0.1");
+  assert.deepEqual(auditados[0].detalhes, {
+    analise_id: "a1",
+    incluir_exportados: true,
+    na_planilha: 8,
+    total: 12,
+    ja_exportados: 4,
+  });
+});
+
+test("SEC-06: exportar sem incluir_exportados envia false; erro do motor é repassado sem auditar", async () => {
+  const py = fakePython({
+    "POST /api/v1/conciliacao-ml/analises/a1/arquivos/lancamentos/exportar": () =>
+      new Response(JSON.stringify({ detail: "Análise expirada" }), { status: 404 }),
+  });
+  const auditados: any[] = [];
+  const handler = createMlReconciliationRoutes({
+    pythonApiUrl: "http://py:8000",
+    fetchImpl: py.fetchImpl,
+    audit: { record: async (e: any) => void auditados.push(e) } as any,
+  });
+  const c = ctx("/api/ml-reconciliation/analises/a1/arquivos/lancamentos/exportar", "POST", {}, { "content-type": "application/json" });
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 404);
+  assert.match(String(c.sent.body.error), /Análise expirada/);
+  assert.deepEqual(JSON.parse(String(py.chamadas[0]!.init.body)), { incluir_exportados: false });
+  assert.equal(auditados.length, 0);
+});
+
+test("SEC-06: a rota exportar exige conciliacao_ml:baixar (ver não basta)", () => {
+  assert.deepEqual(routeAccess("POST", "/api/ml-reconciliation/analises/a1/arquivos/lancamentos/exportar"), {
+    kind: "perm",
+    key: "conciliacao_ml:baixar",
+  });
 });
 
 test("análise expirada devolve o 404 do Python e caminho desconhecido não vaza para outras rotas", async () => {
@@ -339,3 +427,108 @@ test("SA-08: sincronizar tokens - upstream 429 repassa status e mensagem de cool
   assert.equal(c.sent.body.detail, "Aguarde 45 segundos antes de tentar novamente.");
 });
 
+
+test("tarifas depois da baixa: listar exige ver, lançar exige baixar", () => {
+  assert.deepEqual(routeAccess("GET", "/api/ml-reconciliation/tarifas"), { kind: "perm", key: "conciliacao_ml:ver" });
+  assert.deepEqual(routeAccess("POST", "/api/ml-reconciliation/jobs/lancar-tarifas"), { kind: "perm", key: "conciliacao_ml:baixar" });
+  assert.deepEqual(routeAccess("POST", "/api/ml-reconciliation/tarifas/conferir-apagados"), { kind: "perm", key: "conciliacao_ml:baixar" });
+});
+
+test("tarifas: a lista repassa empresa e opção; empresa inválida volta 400 sem chamar o Python", async () => {
+  const py = fakePython({
+    "GET /api/v1/conciliacao-ml/tarifas?empresa=revesta&incluir_exportados=true": () =>
+      new Response(JSON.stringify({ vendas: [], total_vendas: 0 }), { status: 200 }),
+  });
+  const handler = createMlReconciliationRoutes({ pythonApiUrl: "http://py:8000", fetchImpl: py.fetchImpl });
+  const c = ctx("/api/ml-reconciliation/tarifas?empresa=revesta&incluir_exportados=true", "GET");
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 200);
+  const ruim = ctx("/api/ml-reconciliation/tarifas?empresa=../x", "GET");
+  await handler(ruim.ctx as any);
+  assert.equal(ruim.sent.status, 400);
+  assert.equal(py.chamadas.length, 1);
+});
+
+test("tarifas: lançamento leva o usuário da sessão e vai para a auditoria", async () => {
+  const auditados: any[] = [];
+  let consultas = 0;
+  const py = fakePython({
+    "POST /api/v1/conciliacao-ml/jobs/lancar-tarifas": () => new Response(JSON.stringify({ job_id: "t1", status: "executando" }), { status: 200 }),
+    "GET /api/v1/conciliacao-ml/jobs/t1": () => {
+      consultas += 1;
+      const job =
+        consultas < 2
+          ? { job_id: "t1", status: "executando" }
+          : { job_id: "t1", status: "concluido", resultado: { total_lancamentos: 5, total_falhas: 0 } };
+      return new Response(JSON.stringify(job), { status: 200 });
+    },
+  });
+  const handler = createMlReconciliationRoutes({
+    pythonApiUrl: "http://py:8000",
+    audit: { record: async (e: any) => void auditados.push(e) } as any,
+    fetchImpl: py.fetchImpl,
+    jobPollIntervalMs: 5,
+  });
+  const c = ctx("/api/ml-reconciliation/jobs/lancar-tarifas", "POST", {
+    empresa: "norvia_campinas", grupos: ["C-1", "C-2"], incluir_exportados: "sim", usuario: "forjado",
+  });
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 200);
+  assert.deepEqual(JSON.parse(String(py.chamadas[0]!.init.body)), {
+    empresa: "norvia_campinas", grupos: ["C-1", "C-2"], incluir_exportados: false, usuario: "Fin",
+  });
+  await esperar(() => auditados.length > 0);
+  assert.equal(auditados[0].acao, "conciliacao_ml_tarifas_lancadas");
+  assert.deepEqual(auditados[0].detalhes, { empresa: "norvia_campinas", vendas: 2, lancamentos: 5, falhas: 0 });
+  assert.equal(auditados[0].sucesso, true);
+});
+
+test("tarifas: conferir apagados repassa a empresa e vai para a auditoria; empresa inválida volta 400", async () => {
+  const auditados: any[] = [];
+  const py = fakePython({
+    "POST /api/v1/conciliacao-ml/tarifas/conferir-apagados": () =>
+      new Response(JSON.stringify({ empresa: "revesta", conferidos: 3, liberados: 2, ainda_no_tiny: 1, nao_conferidos: 0 }), { status: 200 }),
+  });
+  const handler = createMlReconciliationRoutes({
+    pythonApiUrl: "http://py:8000",
+    audit: { record: async (e: any) => void auditados.push(e) } as any,
+    fetchImpl: py.fetchImpl,
+  });
+  const c = ctx("/api/ml-reconciliation/tarifas/conferir-apagados", "POST", { empresa: "revesta" });
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 200);
+  assert.deepEqual(JSON.parse(String(py.chamadas[0]!.init.body)), { empresa: "revesta" });
+  assert.equal(auditados[0].acao, "conciliacao_ml_tarifas_conferidas");
+  assert.deepEqual(auditados[0].detalhes, { empresa: "revesta", conferidos: 3, liberados: 2, nao_conferidos: 0 });
+  const ruim = ctx("/api/ml-reconciliation/tarifas/conferir-apagados", "POST", { empresa: "../x" });
+  await handler(ruim.ctx as any);
+  assert.equal(ruim.sent.status, 400);
+  assert.equal(py.chamadas.length, 1);
+});
+
+test("tarifas: marcar refeitos à mão repassa as chaves e o usuário e vai para a auditoria; vazio volta 400", async () => {
+  const auditados: any[] = [];
+  const py = fakePython({
+    "POST /api/v1/conciliacao-ml/tarifas/marcar-refeitos": () =>
+      new Response(JSON.stringify({ empresa: "norvia_campinas", marcados: 2, ignorados: 0 }), { status: 200 }),
+  });
+  const handler = createMlReconciliationRoutes({
+    pythonApiUrl: "http://py:8000",
+    audit: { record: async (e: any) => void auditados.push(e) } as any,
+    fetchImpl: py.fetchImpl,
+  });
+  const c = ctx("/api/ml-reconciliation/tarifas/marcar-refeitos", "POST", { empresa: "norvia_campinas", chaves: ["v2|a", "v2|b"] });
+  await handler(c.ctx as any);
+  assert.equal(c.sent.status, 200);
+  const corpo = JSON.parse(String(py.chamadas[0]!.init.body));
+  assert.deepEqual(corpo.chaves, ["v2|a", "v2|b"]);
+  assert.equal(corpo.empresa, "norvia_campinas");
+  assert.equal(auditados[0].acao, "conciliacao_ml_tarifas_refeitas_manual");
+  assert.deepEqual(auditados[0].detalhes, { empresa: "norvia_campinas", marcados: 2, ignorados: 0 });
+  const vazio = ctx("/api/ml-reconciliation/tarifas/marcar-refeitos", "POST", { empresa: "norvia_campinas", chaves: [] });
+  await handler(vazio.ctx as any);
+  assert.equal(vazio.sent.status, 400);
+  const ruim = ctx("/api/ml-reconciliation/tarifas/marcar-refeitos", "POST", { empresa: "../x", chaves: ["a"] });
+  await handler(ruim.ctx as any);
+  assert.equal(ruim.sent.status, 400);
+});

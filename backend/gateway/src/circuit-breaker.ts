@@ -72,6 +72,8 @@ export class CircuitBreaker {
   private nextAttemptAt = 0;
   private lastError: unknown = null;
   private lastStateChange = new Date();
+  /** Em half_open só uma chamada de teste (probe) corre por vez. */
+  private probeInFlight = false;
 
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
@@ -88,10 +90,9 @@ export class CircuitBreaker {
     this.isFailure = options.isFailure ?? defaultIsFailure;
   }
 
+  /** Estado atual, sem efeito colateral: o OPEN→HALF_OPEN acontece dentro de `execute`. */
   public getState(): CircuitBreakerState {
-    if (this.state === "open" && Date.now() >= this.nextAttemptAt) {
-      this.transitionTo("half_open");
-    }
+    if (this.state === "open" && Date.now() >= this.nextAttemptAt) return "half_open";
     return this.state;
   }
 
@@ -120,9 +121,19 @@ export class CircuitBreaker {
     fn: (signal: AbortSignal) => Promise<T>,
     options?: { clientSignal?: AbortSignal; timeoutMs?: number },
   ): Promise<T> {
-    const currentState = this.getState();
-    if (currentState === "open") {
-      throw new CircuitBreakerOpenError(this.name, this.resetTimeoutMs, new Date(this.nextAttemptAt));
+    if (this.state === "open") {
+      if (Date.now() < this.nextAttemptAt) {
+        throw new CircuitBreakerOpenError(this.name, this.resetTimeoutMs, new Date(this.nextAttemptAt));
+      }
+      this.transitionTo("half_open");
+    }
+    let isProbe = false;
+    if (this.state === "half_open") {
+      if (this.probeInFlight) {
+        throw new CircuitBreakerOpenError(this.name, this.resetTimeoutMs, new Date(Date.now() + 1000));
+      }
+      this.probeInFlight = true;
+      isProbe = true;
     }
 
     const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
@@ -145,6 +156,8 @@ export class CircuitBreaker {
         this.onFailure(err);
       }
       throw err;
+    } finally {
+      if (isProbe) this.probeInFlight = false;
     }
   }
 
@@ -188,6 +201,7 @@ export class CircuitBreaker {
   }
 
   public reset(): void {
+    this.probeInFlight = false;
     this.transitionTo("closed");
   }
 }

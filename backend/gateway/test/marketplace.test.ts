@@ -140,3 +140,54 @@ test("proxy devolve o erro da automação e recusa caminho estranho", async () =
   await handler(ruim.ctx as any);
   assert.equal(ruim.sent.status, 400);
 });
+
+test("SEC-08: mais de 200 skus/produtos/anúncios por requisição → 400 em pt-BR, sem chamar a automação", async () => {
+  let chamadas = 0;
+  const handler = createMarketplaceRoutes({
+    baseUrl: "http://py:8001",
+    fetchImpl: (async () => {
+      chamadas++;
+      return new Response("{}", { status: 200 });
+    }) as any,
+  });
+  const muitos = (n: number) => Array.from({ length: n }, (_, i) => ({ sku: `S${i}`, mlb: `MLB${i}` }));
+  for (const [path, body] of [
+    ["/api/marketplace/dimensoes/reenviar", { skus: muitos(201).map((x) => x.sku) }],
+    ["/api/marketplace/dimensoes/validar", { produtos: muitos(201) }],
+    ["/api/marketplace/fretes/retentar", { anuncios: muitos(201) }],
+  ] as const) {
+    const r = ctx(path, "POST", body);
+    await handler(r.ctx as any);
+    assert.equal(r.sent.status, 400, path);
+    assert.match(r.sent.body.error, /no máximo 200 itens/);
+  }
+  assert.equal(chamadas, 0);
+
+  const ok = ctx("/api/marketplace/fretes/retentar", "POST", { anuncios: muitos(200) });
+  await handler(ok.ctx as any);
+  assert.equal(ok.sent.status, 200);
+  assert.equal(chamadas, 1);
+});
+
+test("navegador que desiste no meio não vira erro no log (incidente #20)", async () => {
+  const controle = new AbortController();
+  const handler = createMarketplaceRoutes({
+    baseUrl: "http://py:8001",
+    fetchImpl: ((_url: string, init: RequestInit) =>
+      new Promise((_ok, falha) => {
+        init.signal!.addEventListener("abort", () => falha(new DOMException("This operation was aborted", "AbortError")));
+        controle.abort();
+      })) as any,
+  });
+  const r = ctx("/api/marketplace/dimensoes/produtos", "GET");
+  const erros: unknown[] = [];
+  const original = console.error;
+  console.error = (...a: unknown[]) => void erros.push(a);
+  try {
+    assert.equal(await handler({ ...r.ctx, signal: controle.signal } as any), true);
+  } finally {
+    console.error = original;
+  }
+  assert.equal(r.sent.status, undefined, "ninguém para responder");
+  assert.deepEqual(erros, []);
+});

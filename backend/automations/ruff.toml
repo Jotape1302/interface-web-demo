@@ -1,0 +1,12 @@
+# Lint das automações Python (CI: .github/workflows/ci.yml; local: `npm run lint:python`).
+# Só regras que apontam defeito, sem estilo: E9 (sintaxe), F (pyflakes: nome indefinido,
+# import morto) e S110 (`except: pass`, que esconde falha de SEFAZ/Tiny). Formatação não é
+# imposta: reformatar ~100 arquivos de uma vez só geraria ruído no histórico.
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[lint]
+select = ["E9", "F", "S110"]
+
+[lint.per-file-ignores]
+"*/tests/**" = ["S110"]

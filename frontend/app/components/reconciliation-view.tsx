@@ -1,14 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Elapsed } from "./elapsed";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertTriangle,
   ArrowLeftRight,
   ArrowRight,
-  Barcode,
   CheckCircle2,
-  ChevronRight,
   CircleCheckBig,
+  FileText,
   History,
   Info,
   Landmark,
@@ -19,14 +25,11 @@ import {
   Unplug,
   type LucideIcon,
 } from "lucide-react";
-import { InterLogo, TinyLogo } from "@/components/ui/brand-logos";
+import { InterLogo } from "@/components/ui/brand-logos";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -38,37 +41,29 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Empty, SourceError } from "./panel-state";
 import ReconciliationHistory from "./reconciliation-history";
+import DdaView from "./dda-view";
 import { cn } from "@/lib/utils";
-import { Progress } from "@/components/ui/progress";
-import { formatCnpjMask, formatDateBR, money } from "@/lib/formatters";
+import { formatDateBR, money } from "@/lib/formatters";
 import { toSaoPauloISODate } from "@/lib/date-range-utils";
 import { downloadCsv } from "@/lib/csv-export";
-import { ColumnFilterBar, ColumnFilterHeader } from "./column-filter";
+import { ColumnFilterBar } from "./column-filter";
 import {
   aplicaFiltros,
   carregarFiltrosSession,
   filtrosAtivosCount,
-  obterValoresUnicos,
   salvarFiltrosSession,
   type ColumnFilterDef,
   type ColumnFilterValue,
   type ColumnFiltersState,
 } from "@/lib/column-filters";
 import type {
-  AlreadyPaidItem,
   BaixaJob,
   BaixaResponse,
-  InternalTransferItem,
-  InternalTransferSituacao,
   PreviewJob,
   ReconciliationCompanyStatus,
-  ReconciliationMatch,
   ReconciliationPreviewResponse,
-  UnmatchedInterItem,
-  UnmatchedTinyItem,
 } from "@/lib/reconciliation-contracts";
 import {
-  INTER_HEALTH_META,
   MATCH_METHOD_META,
   RECONCILIATION_COMPANIES,
   buildBaixaItem,
@@ -76,345 +71,49 @@ import {
   describeEstadoAtualizadoEm,
   describeJobProgress,
   describeSeparated,
-  formatConfidence,
-  formatElapsed,
   isInterUnavailable,
   parseAvisos,
   resolveInterHealth,
   separatedTotals,
   waitForJob,
-  type InterHealth,
-  type StatusTone,
 } from "@/lib/reconciliation-helpers";
 import { createReconciliationService } from "@/lib/reconciliation-service";
 import { useAuth } from "@/lib/auth-context";
+import {
+  type TabId,
+  type ViewMode,
+  type InterCoverage,
+  MATCHES_DEFS,
+  UNMATCHED_INTER_DEFS,
+  UNMATCHED_TINY_DEFS,
+  JA_BAIXADAS_DEFS,
+  TRANSFERENCIAS_DEFS,
+  defaultStartDate,
+  PREVIEW_START_DELAY_MS,
+  describePreviewError,
+  describeBaixaError,
+  ProgressBar,
+  joinNames,
+  type CompanyRow,
+  TechnicalDetail,
+  CompanyStatusCell,
+  CompanyStatusSkeleton,
+  EmptyState,
+  PreviewProgressPanel,
+  MetricSkeletons,
+  TableSkeleton,
+  MetricCard,
+} from "./reconciliation-view-parts";
+import {
+  JaBaixadasTable,
+  MatchesTable,
+  TransferenciasTable,
+  UnmatchedInterTable,
+  UnmatchedTinyTable,
+} from "./reconciliation-tables";
 
 interface ReconciliationViewProps {
   apiBaseUrl?: string;
-}
-
-type TabId = "matches" | "unmatched_inter" | "unmatched_tiny" | "ja_baixadas" | "transferencias";
-
-type ViewMode = "conciliacao" | "historico";
-
-// Situação do extrato Inter na última prévia: define se os números de casamento são confiáveis.
-type InterCoverage = "completo" | "parcial" | "indisponivel";
-
-const DOT_CLASS: Record<StatusTone, string> = {
-  success: "bg-emerald-500",
-  warning: "bg-amber-500",
-  danger: "bg-rose-500",
-  secondary: "bg-muted-foreground/40",
-};
-
-const TRANSFER_SITUACAO_META: Record<InternalTransferSituacao, { label: string; tone: StatusTone }> = {
-  apta_baixa: { label: "Apta para baixa", tone: "success" },
-  ja_baixada: { label: "Já baixada no Tiny", tone: "secondary" },
-  sem_conta: { label: "Sem conta no Tiny", tone: "warning" },
-};
-
-const TABLE_SKELETON_ROWS = 6;
-
-/** Junta os campos pesquisáveis de uma coluna (nome + CNPJ, documento + IDs…). */
-function juntar(...campos: Array<string | number | null | undefined>): string {
-  return campos.filter((c) => c !== null && c !== undefined && c !== "").join(" ");
-}
-
-const MATCHES_DEFS: Record<string, ColumnFilterDef<ReconciliationMatch>> = {
-  empresa: { id: "empresa", label: "Empresa", tipo: "lista", accessor: (m) => m.empresa_nome || m.empresa },
-  fornecedor: { id: "fornecedor", label: "Fornecedor", tipo: "texto", accessor: (m) => juntar(m.fornecedor_nome, m.fornecedor_cnpj) },
-  documento: { id: "documento", label: "Documento", tipo: "texto", accessor: (m) => juntar(m.numero_documento, String(m.conta_pagar_id), m.codigo_barras) },
-  data_inter: { id: "data_inter", label: "Venc. / Pgto.", tipo: "data", accessor: (m) => m.data_pagamento || m.data_vencimento },
-  valor_inter: { id: "valor_inter", label: "Valor Inter", tipo: "numero", accessor: (m) => m.valor_pago },
-  data_tiny: { id: "data_tiny", label: "Data Tiny", tipo: "data", accessor: (m) => m.data_vencimento },
-  valor_tiny: { id: "valor_tiny", label: "Valor Tiny", tipo: "numero", accessor: (m) => m.valor_tiny },
-  diferenca: { id: "diferenca", label: "Diferença", tipo: "numero", accessor: (m) => Math.abs(m.valor_pago - m.valor_tiny) },
-  status: { id: "status", label: "Critério / Status", tipo: "lista", accessor: (m) => (m.metodo_match in MATCH_METHOD_META ? MATCH_METHOD_META[m.metodo_match].label : m.metodo_match) },
-};
-
-const UNMATCHED_INTER_DEFS: Record<string, ColumnFilterDef<UnmatchedInterItem>> = {
-  empresa: { id: "empresa", label: "Empresa", tipo: "lista", accessor: (i) => i.empresa_nome || i.empresa },
-  data: { id: "data", label: "Data pgto.", tipo: "data", accessor: (i) => i.data_pagamento },
-  favorecido: { id: "favorecido", label: "Favorecido", tipo: "texto", accessor: (i) => juntar(i.nome_favorecido, i.cpf_cnpj_favorecido) },
-  descricao: { id: "descricao", label: "Descrição", tipo: "texto", accessor: (i) => juntar(i.descricao, i.titulo) },
-  codigo: { id: "codigo", label: "Código de barras / ID", tipo: "texto", accessor: (i) => juntar(i.codigo_barras, i.transacao_id) },
-  valor: { id: "valor", label: "Valor", tipo: "numero", accessor: (i) => i.valor_pago },
-};
-
-const UNMATCHED_TINY_DEFS: Record<string, ColumnFilterDef<UnmatchedTinyItem>> = {
-  empresa: { id: "empresa", label: "Empresa", tipo: "lista", accessor: (c) => c.empresa_nome || c.empresa },
-  vencimento: { id: "vencimento", label: "Vencimento", tipo: "data", accessor: (c) => c.data_vencimento },
-  fornecedor: { id: "fornecedor", label: "Fornecedor", tipo: "texto", accessor: (c) => juntar(c.fornecedor_nome, c.fornecedor_cnpj) },
-  documento: { id: "documento", label: "Documento", tipo: "texto", accessor: (c) => juntar(c.numero_documento, String(c.id)) },
-  valor: { id: "valor", label: "Valor em aberto", tipo: "numero", accessor: (c) => c.valor },
-  historico: { id: "historico", label: "Histórico", tipo: "texto", accessor: (c) => `${c.numero_documento || ""} ${c.historico || ""}`.trim() },
-};
-
-const JA_BAIXADAS_DEFS: Record<string, ColumnFilterDef<AlreadyPaidItem>> = {
-  empresa: { id: "empresa", label: "Empresa", tipo: "lista", accessor: (p) => p.empresa_nome || p.empresa },
-  data_baixa: { id: "data_baixa", label: "Data pgto.", tipo: "data", accessor: (p) => p.data_pagamento },
-  fornecedor: { id: "fornecedor", label: "Favorecido (Inter)", tipo: "texto", accessor: (p) => juntar(p.nome_favorecido, p.fornecedor_nome, p.cpf_cnpj_favorecido) },
-  conta: { id: "conta", label: "Conta no Tiny", tipo: "texto", accessor: (p) => juntar(String(p.conta_pagar_id), p.numero_documento, p.inter_transacao_id) },
-  valor: { id: "valor", label: "Valor", tipo: "numero", accessor: (p) => p.valor_pago || p.valor_tiny },
-};
-
-const TRANSFERENCIAS_DEFS: Record<string, ColumnFilterDef<InternalTransferItem>> = {
-  empresa_origem: { id: "empresa_origem", label: "Empresa Origem", tipo: "lista", accessor: (t) => t.empresa_nome || t.empresa },
-  empresa_destino: { id: "empresa_destino", label: "Empresa Destino", tipo: "lista", accessor: (t) => t.empresa_destino_nome },
-  data: { id: "data", label: "Data pgto.", tipo: "data", accessor: (t) => t.data_pagamento },
-  valor: { id: "valor", label: "Valor", tipo: "numero", accessor: (t) => t.valor_pago },
-  situacao: { id: "situacao", label: "Situação", tipo: "lista", accessor: (t) => (t.situacao in TRANSFER_SITUACAO_META ? TRANSFER_SITUACAO_META[t.situacao].label : t.situacao) },
-  descricao: { id: "descricao", label: "Descrição", tipo: "texto", accessor: (t) => juntar(t.nome_favorecido, t.cpf_cnpj_favorecido, t.descricao, t.titulo, t.transacao_id) },
-};
-
-function defaultStartDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 30);
-  return toSaoPauloISODate(d);
-}
-
-// Espera após a última mudança de filtro antes de criar o job da prévia (evita um job por
-// tecla ao digitar datas). Curta: com o cache do backend a resposta costuma ser imediata.
-const PREVIEW_START_DELAY_MS = 300;
-
-function isTimeout(e: unknown): boolean {
-  return e instanceof DOMException && e.name === "TimeoutError";
-}
-
-function describePreviewError(e: unknown): string {
-  if (isTimeout(e)) {
-    return "O servidor não respondeu a tempo ao acompanhar a comparação. Tente novamente.";
-  }
-  return e instanceof Error ? e.message : "Erro ao carregar a prévia de conciliação.";
-}
-
-function describeBaixaError(e: unknown, fallback: string): string {
-  if (isTimeout(e)) return "O servidor não respondeu a tempo. Confira o Histórico antes de tentar de novo.";
-  return e instanceof Error ? e.message : fallback;
-}
-
-function ProgressBar({ percent, label }: { percent: number | null; label: string }) {
-  // value null = indeterminado (ainda sem total conhecido).
-  return (
-    <Progress
-      value={percent}
-      aria-label={label}
-      className={cn("w-full", percent === null && "[&_[data-slot=progress-indicator]]:w-1/3 [&_[data-slot=progress-indicator]]:animate-pulse")}
-    />
-  );
-}
-
-function joinNames(names: string[]): string {
-  if (names.length <= 1) return names.join("");
-  return `${names.slice(0, -1).join(", ")} e ${names[names.length - 1]}`;
-}
-
-interface CompanyRow {
-  id: string;
-  nome: string;
-  health: InterHealth;
-  detalhe: string | null;
-  tinyConfigurado: boolean | undefined;
-}
-
-function TechnicalDetail({ text }: { text: string }) {
-  return (
-    <details className="group text-[11px]">
-      <summary className="inline-flex cursor-pointer select-none items-center gap-1 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight size={12} className="transition-transform group-open:rotate-90" />
-        Detalhe técnico
-      </summary>
-      <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/50 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-        {text}
-      </pre>
-    </details>
-  );
-}
-
-function CompanyStatusCell({ row, inFilter }: { row: CompanyRow; inFilter: boolean }) {
-  const meta = INTER_HEALTH_META[row.health];
-  return (
-    <li className={cn("space-y-2 bg-card p-4", !inFilter && "opacity-60")}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-2 text-sm font-semibold text-foreground">
-          <span className={cn("size-2 shrink-0 rounded-full", DOT_CLASS[meta.tone])} aria-hidden="true" />
-          <span className="truncate">{row.nome}</span>
-        </span>
-        {!inFilter && <span className="shrink-0 text-[10px] text-muted-foreground">Fora do filtro</span>}
-      </div>
-      <Badge variant={meta.tone} className="h-auto whitespace-normal text-left">
-        {meta.label}
-      </Badge>
-      {row.health !== "conectado" && <p className="text-xs leading-relaxed text-muted-foreground">{meta.hint}</p>}
-      {row.detalhe && <TechnicalDetail text={row.detalhe} />}
-      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <TinyLogo size={12} />
-        Tiny ERP:{" "}
-        {row.tinyConfigurado === undefined ? "não verificado" : row.tinyConfigurado ? "token configurado" : "sem token"}
-      </p>
-    </li>
-  );
-}
-
-function CompanyStatusSkeleton() {
-  return (
-    <li className="space-y-2.5 bg-card p-4" aria-hidden="true">
-      <Skeleton className="h-4 w-32" />
-      <Skeleton className="h-5 w-24 rounded-full" />
-      <Skeleton className="h-3 w-full" />
-      <Skeleton className="h-3 w-28" />
-    </li>
-  );
-}
-
-function EmptyState({
-  icon: Icon,
-  title,
-  children,
-  action,
-}: {
-  icon: LucideIcon;
-  title: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="px-5 py-10 text-center text-xs text-muted-foreground">
-      <Icon size={22} className="mx-auto mb-2.5 text-primary" />
-      <p className="text-sm font-semibold text-foreground">{title}</p>
-      <p className="mx-auto mt-1 max-w-md">{children}</p>
-      {action && <div className="mt-4 flex justify-center">{action}</div>}
-    </div>
-  );
-}
-
-function PreviewProgressPanel({ job, elapsedMs }: { job: PreviewJob | null; elapsedMs: number | null }) {
-  // `total` da prévia conta filiais; se o backend passar a contar etapas, some a unidade.
-  const unidade = job && job.total > 0 && job.total <= RECONCILIATION_COMPANIES.length ? "filiais" : "";
-  const progress = job
-    ? describeJobProgress(job, unidade)
-    : { percent: null, label: "Iniciando a comparação no servidor…" };
-  return (
-    <div className="panel space-y-2.5 p-4 sm:px-5">
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
-        <output className="flex min-w-0 items-center gap-2 font-medium text-foreground" aria-live="polite">
-          <RefreshCw size={13} className="shrink-0 animate-spin text-primary" aria-hidden="true" />
-          <span className="truncate">{progress.label}</span>
-        </output>
-        {elapsedMs !== null && (
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
-            {formatElapsed(elapsedMs)}
-          </span>
-        )}
-      </div>
-      <ProgressBar percent={progress.percent} label="Andamento da comparação" />
-      <p className="text-[11px] text-muted-foreground">
-        Cruzando o extrato do Banco Inter com as contas a pagar do Tiny. Pode levar alguns minutos: o Tiny limita a
-        velocidade das consultas.
-      </p>
-    </div>
-  );
-}
-
-function MetricSkeletons() {
-  return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-3" aria-hidden="true">
-      {[1, 2, 3].map((i) => (
-        <div className="metric-card skeleton h-[132px]" key={i} />
-      ))}
-    </div>
-  );
-}
-
-function TableSkeleton() {
-  return (
-    <div className="panel" aria-hidden="true">
-      <div className="flex flex-wrap gap-2 border-b border-border p-3">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-8 w-44" />
-        <Skeleton className="h-8 w-40" />
-      </div>
-      <div className="divide-y divide-border">
-        {Array.from({ length: TABLE_SKELETON_ROWS }, (_, i) => (
-          <div key={i} className="flex items-center gap-4 px-4 py-3.5 sm:px-5">
-            <Skeleton className="size-4 shrink-0" />
-            <Skeleton className="h-4 w-24 shrink-0" />
-            <div className="flex-1 space-y-1.5">
-              <Skeleton className="h-3.5 w-3/5" />
-              <Skeleton className="h-3 w-2/5" />
-            </div>
-            <Skeleton className="hidden h-4 w-20 shrink-0 sm:block" />
-            <Skeleton className="h-4 w-24 shrink-0" />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function MetricCard({
-  active,
-  onSelect,
-  label,
-  icon: Icon,
-  iconClass,
-  value,
-  detail,
-  note,
-  partial,
-}: {
-  active: boolean;
-  onSelect: () => void;
-  label: string;
-  icon: LucideIcon;
-  iconClass: string;
-  value: string;
-  detail: string;
-  note?: string | null;
-  partial?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-pressed={active}
-      className={cn(
-        "metric-card cursor-pointer text-left outline-offset-[-1px] focus-visible:outline-2 focus-visible:outline-ring",
-        active && "outline-2 outline-primary",
-      )}
-    >
-      <div className="metric-top">
-        <span className="flex items-center gap-1.5">
-          {label}
-          {partial && (
-            <Badge variant="warning" className="text-[10px] normal-case tracking-normal">
-              Parcial
-            </Badge>
-          )}
-        </span>
-        <span className={cn("grid size-8 shrink-0 place-items-center rounded-md border", iconClass)}>
-          <Icon size={18} />
-        </span>
-      </div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-detail text-xs">{detail}</div>
-      {note && (
-        <p className="mt-2 flex items-start gap-1.5 border-t border-border/60 pt-2 text-[11px] leading-snug text-muted-foreground">
-          <Info size={12} className="mt-px shrink-0" aria-hidden="true" />
-          {note}
-        </p>
-      )}
-    </button>
-  );
-}
-
-function SupplierCell({ nome, cnpj }: { nome: string; cnpj: string | null }) {
-  return (
-    <div className="min-w-44 max-w-72 whitespace-normal">
-      <div className="font-medium text-foreground">{nome}</div>
-      {cnpj && <div className="font-mono text-[11px] text-muted-foreground">{formatCnpjMask(cnpj)}</div>}
-    </div>
-  );
 }
 
 export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewProps) {
@@ -426,12 +125,18 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
 
   // Conciliação × Histórico. O histórico só monta na primeira visita e depois fica montado
   // (escondido) para preservar filtros/página; `historyReload` o recarrega após uma baixa.
-  const [viewMode, setViewMode] = useState<ViewMode>("conciliacao");
+  // Link dos avisos do DDA (/contas-a-pagar?aba=dda) abre direto na aba.
+  const [abaInicial] = useState<ViewMode>(() =>
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("aba") === "dda" ? "dda" : "conciliacao",
+  );
+  const [viewMode, setViewMode] = useState<ViewMode>(abaInicial);
   const [historyMounted, setHistoryMounted] = useState(false);
   const [historyReload, setHistoryReload] = useState(0);
+  const [ddaMounted, setDdaMounted] = useState(abaInicial === "dda");
   const selectView = (mode: ViewMode) => {
     setViewMode(mode);
     if (mode === "historico") setHistoryMounted(true);
+    if (mode === "dda") setDdaMounted(true);
   };
 
   // Filtros
@@ -595,14 +300,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
     };
   }, [service, empresa, dataInicio, dataFim, datesInvalid, requestKey, forcarAtualizacao, canPreview]);
 
-  // Relógio para o tempo decorrido da prévia/baixa em andamento.
   const baixaRunning = baixaJob !== null && baixaResult === null && baixaError === null;
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!loading && !baixaRunning) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [loading, baixaRunning]);
   const currentProgress = previewProgress?.key === requestKey ? previewProgress : null;
 
   // Para o polling da baixa se a tela for desmontada.
@@ -712,7 +410,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
   const separated = useMemo(() => (data ? separatedTotals(data) : null), [data]);
   const separatedNote = separated ? describeSeparated(separated) : null;
 
-  const toggleSelectOne = (contaId: number) => {
+  const toggleSelectOne = useCallback((contaId: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(contaId)) {
@@ -722,7 +420,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
       }
       return next;
     });
-  };
+  }, []);
 
   // "Selecionar todas" age só sobre as linhas visíveis com o filtro atual.
   const visibleSelectedCount = filteredMatches.filter((m) => selectedIds.has(m.conta_pagar_id)).length;
@@ -889,7 +587,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
       aria-controls="rec-tabpanel"
       onClick={() => setActiveTab(t.id)}
       className={cn(
-        "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition",
+        "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-none px-3 py-1.5 font-medium transition",
         secondary ? "text-[11px]" : "text-xs",
         activeTab === t.id
           ? "bg-muted text-foreground"
@@ -909,6 +607,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
   const viewOptions: Array<{ id: ViewMode; label: string; icon: LucideIcon }> = [
     { id: "conciliacao", label: "Conciliação", icon: Landmark },
     { id: "historico", label: "Histórico de baixas", icon: History },
+    { id: "dda", label: "Boletos DDA", icon: FileText },
   ];
 
   return (
@@ -916,7 +615,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
       <div
         role="tablist"
         aria-label="Seção de contas a pagar"
-        className="inline-flex w-full rounded-lg border border-border bg-card p-1 text-sm sm:w-auto"
+        className="inline-flex w-full rounded-none border border-border bg-card p-1 text-sm sm:w-auto"
       >
         {viewOptions.map((o) => (
           <button
@@ -928,7 +627,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
             aria-controls={`rec-view-${o.id}`}
             onClick={() => selectView(o.id)}
             className={cn(
-              "flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-3.5 py-1.5 font-medium transition sm:flex-none",
+              "flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-none px-3.5 py-1.5 font-medium transition sm:flex-none",
               viewMode === o.id
                 ? "bg-muted text-foreground shadow-xs"
                 : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
@@ -948,6 +647,12 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
           hidden={viewMode !== "historico"}
         >
           <ReconciliationHistory service={service} reloadSignal={historyReload} />
+        </div>
+      )}
+
+      {ddaMounted && (
+        <div role="tabpanel" id="rec-view-dda" aria-labelledby="rec-view-tab-dda" hidden={viewMode !== "dda"}>
+          <DdaView apiBaseUrl={apiBaseUrl} />
         </div>
       )}
 
@@ -1078,14 +783,14 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
               <>
                 <PreviewProgressPanel
                   job={currentProgress?.job ?? null}
-                  elapsedMs={currentProgress ? now - currentProgress.startedAt : null}
+                  startedAt={currentProgress ? currentProgress.startedAt : null}
                 />
                 <MetricSkeletons />
                 <TableSkeleton />
               </>
             ) : currentError ? (
               <div className="panel">
-                <SourceError message={currentError} />
+                <SourceError message={currentError} reportar={{ automationId: "inter-reconciliation", executionId: "previa-da-conciliacao" }} />
                 <div className="flex justify-end border-t border-border px-4 py-3">
                   <Button size="sm" variant="outline" onClick={refreshForced} className="gap-1.5">
                     <RefreshCw size={13} />
@@ -1098,7 +803,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                 {coverage.state !== "completo" && (
                   <div
                     role="alert"
-                    className="flex gap-2.5 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3.5 py-3 text-xs"
+                    className="flex gap-2.5 rounded-none border border-amber-500/40 bg-amber-500/5 px-3.5 py-3 text-xs"
                   >
                     <AlertTriangle size={15} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" />
                     <div className="space-y-1">
@@ -1126,7 +831,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                 )}
 
                 {tinyAvisos.length > 0 && (
-                  <div className="flex gap-2.5 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3.5 py-3 text-xs">
+                  <div className="flex gap-2.5 rounded-none border border-amber-500/40 bg-amber-500/5 px-3.5 py-3 text-xs">
                     <AlertTriangle size={15} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" />
                     <div className="min-w-0 space-y-1.5">
                       <p className="font-semibold text-amber-700 dark:text-amber-300">
@@ -1258,154 +963,17 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                           </EmptyState>
                         )
                       ) : (
-                        <>
-                          <Table className="min-w-[980px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead className="w-10">
-                                  <Checkbox
-                                    checked={allVisibleSelected}
-                                    indeterminate={visibleSelectedCount > 0 && !allVisibleSelected}
-                                    onCheckedChange={toggleSelectAll}
-                                    aria-label={allVisibleSelected ? "Desmarcar todas" : "Selecionar todas"}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Empresa"
-                                    def={MATCHES_DEFS.empresa}
-                                    value={colFilters.matches.empresa}
-                                    onChange={(v) => updateColFilter("matches", "empresa", v)}
-                                    uniqueValues={obterValoresUnicos(data.matches ?? [], (m) => m.empresa_nome || m.empresa)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Fornecedor"
-                                    def={MATCHES_DEFS.fornecedor}
-                                    value={colFilters.matches.fornecedor}
-                                    onChange={(v) => updateColFilter("matches", "fornecedor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Documento"
-                                    def={MATCHES_DEFS.documento}
-                                    value={colFilters.matches.documento}
-                                    onChange={(v) => updateColFilter("matches", "documento", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Venc. / Pgto."
-                                    def={MATCHES_DEFS.data_inter}
-                                    value={colFilters.matches.data_inter}
-                                    onChange={(v) => updateColFilter("matches", "data_inter", v)}
-                                  />
-                                </TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Valor Tiny"
-                                    align="right"
-                                    def={MATCHES_DEFS.valor_tiny}
-                                    value={colFilters.matches.valor_tiny}
-                                    onChange={(v) => updateColFilter("matches", "valor_tiny", v)}
-                                  />
-                                </TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Pago no Inter"
-                                    align="right"
-                                    def={MATCHES_DEFS.valor_inter}
-                                    value={colFilters.matches.valor_inter}
-                                    onChange={(v) => updateColFilter("matches", "valor_inter", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Critério"
-                                    def={MATCHES_DEFS.status}
-                                    value={colFilters.matches.status}
-                                    onChange={(v) => updateColFilter("matches", "status", v)}
-                                    uniqueValues={obterValoresUnicos(data.matches ?? [], (m) => (m.metodo_match in MATCH_METHOD_META ? MATCH_METHOD_META[m.metodo_match].label : m.metodo_match))}
-                                  />
-                                </TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {filteredMatches.map((m) => {
-                                const isSelected = selectedIds.has(m.conta_pagar_id);
-                                const hasDivergence = Math.abs(m.valor_pago - m.valor_tiny) > 0.05;
-                                const method = MATCH_METHOD_META[m.metodo_match];
-                                return (
-                                  <TableRow
-                                    key={m.id}
-                                    data-state={isSelected ? "selected" : undefined}
-                                    onClick={() => toggleSelectOne(m.conta_pagar_id)}
-                                    className="cursor-pointer align-top"
-                                  >
-                                    <TableCell>
-                                      <Checkbox
-                                        checked={isSelected}
-                                        onCheckedChange={() => toggleSelectOne(m.conta_pagar_id)}
-                                        onClick={(e) => e.stopPropagation()}
-                                        aria-label={`Selecionar ${m.fornecedor_nome}, documento ${m.numero_documento}`}
-                                      />
-                                    </TableCell>
-                                    <TableCell>
-                                      <Badge variant="outline">{m.empresa_nome}</Badge>
-                                    </TableCell>
-                                    <TableCell>
-                                      <SupplierCell nome={m.fornecedor_nome} cnpj={m.fornecedor_cnpj} />
-                                    </TableCell>
-                                    <TableCell>
-                                      <div className="font-medium">{m.numero_documento}</div>
-                                      <code>#{m.conta_pagar_id}</code>
-                                    </TableCell>
-                                    <TableCell className="tabular-nums">
-                                      <div>{formatDateBR(m.data_vencimento)}</div>
-                                      <div className="text-xs text-emerald-700 dark:text-emerald-400">
-                                        {formatDateBR(m.data_pagamento)}
-                                      </div>
-                                    </TableCell>
-                                    <TableCell className="text-right tabular-nums">{money(m.valor_tiny)}</TableCell>
-                                    <TableCell className="text-right tabular-nums">
-                                      <div className="font-semibold">{money(m.valor_pago)}</div>
-                                      {hasDivergence && (m.juros > 0 || m.multa > 0 || m.desconto > 0) && (
-                                        <div className="space-x-1.5 text-[11px]">
-                                          {m.juros + m.multa > 0 && (
-                                            <span className="text-amber-700 dark:text-amber-400">
-                                              +{money(m.juros + m.multa)} {m.multa > 0 ? "juros/multa" : "juros"}
-                                            </span>
-                                          )}
-                                          {m.desconto > 0 && (
-                                            <span className="text-sky-700 dark:text-sky-400">−{money(m.desconto)} desc.</span>
-                                          )}
-                                        </div>
-                                      )}
-                                    </TableCell>
-                                    <TableCell>
-                                      <div className="max-w-60 space-y-1 whitespace-normal">
-                                        <Badge variant={method?.tone ?? "secondary"}>
-                                          {method?.label ?? m.metodo_match} · {formatConfidence(m.confianca)}
-                                        </Badge>
-                                        <p className="line-clamp-2 text-[11px] text-muted-foreground" title={m.motivo}>
-                                          {m.motivo}
-                                        </p>
-                                      </div>
-                                    </TableCell>
-                                  </TableRow>
-                                );
-                              })}
-                            </TableBody>
-                          </Table>
-                          <div className="table-footer">
-                            <span>
-                              Mostrando {filteredMatches.length} de {data.matches.length} casamento(s)
-                            </span>
-                            <span>Total casado: {money(filteredMatches.reduce((acc, m) => acc + m.valor_pago, 0))}</span>
-                          </div>
-                        </>
+                        <MatchesTable
+                          data={data}
+                          colFilters={colFilters}
+                          updateColFilter={updateColFilter}
+                          filteredMatches={filteredMatches}
+                          selectedIds={selectedIds}
+                          toggleSelectOne={toggleSelectOne}
+                          toggleSelectAll={toggleSelectAll}
+                          allVisibleSelected={allVisibleSelected}
+                          visibleSelectedCount={visibleSelectedCount}
+                        />
                       ))}
 
                     {activeTab === "unmatched_inter" && separatedNote && !interDown && (
@@ -1437,110 +1005,12 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                           <Empty>Todos os débitos do extrato foram casados com contas do Tiny no período.</Empty>
                         )
                       ) : (
-                        <>
-                          <Table className="min-w-[900px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Empresa"
-                                    def={UNMATCHED_INTER_DEFS.empresa}
-                                    value={colFilters.unmatched_inter.empresa}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "empresa", v)}
-                                    uniqueValues={obterValoresUnicos(data.unmatched_inter ?? [], (i) => i.empresa_nome || i.empresa)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Data pgto."
-                                    def={UNMATCHED_INTER_DEFS.data}
-                                    value={colFilters.unmatched_inter.data}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "data", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Favorecido"
-                                    def={UNMATCHED_INTER_DEFS.favorecido}
-                                    value={colFilters.unmatched_inter.favorecido}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "favorecido", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Descrição"
-                                    def={UNMATCHED_INTER_DEFS.descricao}
-                                    value={colFilters.unmatched_inter.descricao}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "descricao", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>Tipo</TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Valor"
-                                    align="right"
-                                    def={UNMATCHED_INTER_DEFS.valor}
-                                    value={colFilters.unmatched_inter.valor}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "valor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Código de barras / ID"
-                                    def={UNMATCHED_INTER_DEFS.codigo}
-                                    value={colFilters.unmatched_inter.codigo}
-                                    onChange={(v) => updateColFilter("unmatched_inter", "codigo", v)}
-                                  />
-                                </TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {filteredUnmatchedInter.map((itx) => (
-                                <TableRow key={itx.transacao_id} className="align-top">
-                                  <TableCell>
-                                    <Badge variant="outline">{itx.empresa_nome}</Badge>
-                                  </TableCell>
-                                  <TableCell className="tabular-nums">{formatDateBR(itx.data_pagamento)}</TableCell>
-                                  <TableCell>
-                                    <SupplierCell
-                                      nome={itx.nome_favorecido || itx.titulo || "Não informado"}
-                                      cnpj={itx.cpf_cnpj_favorecido}
-                                    />
-                                  </TableCell>
-                                  <TableCell>
-                                    <p className="line-clamp-2 max-w-64 whitespace-normal text-xs" title={itx.descricao}>
-                                      {itx.descricao || "—"}
-                                    </p>
-                                  </TableCell>
-                                  <TableCell>
-                                    <Badge variant="secondary">{itx.tipo_transacao}</Badge>
-                                  </TableCell>
-                                  <TableCell className="text-right font-semibold tabular-nums">{money(itx.valor_pago)}</TableCell>
-                                  <TableCell>
-                                    <code
-                                      className="block max-w-56 truncate"
-                                      title={itx.codigo_barras || itx.transacao_id}
-                                    >
-                                      {itx.codigo_barras ? (
-                                        <span className="inline-flex items-center gap-1">
-                                          <Barcode size={11} /> {itx.codigo_barras}
-                                        </span>
-                                      ) : (
-                                        `ID ${itx.transacao_id}`
-                                      )}
-                                    </code>
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                          <div className="table-footer">
-                            <span>
-                              Mostrando {filteredUnmatchedInter.length} de {data.unmatched_inter?.length ?? 0} débito(s)
-                            </span>
-                            <span>Total: {money(filteredUnmatchedInter.reduce((acc, itx) => acc + itx.valor_pago, 0))}</span>
-                          </div>
-                        </>
+                        <UnmatchedInterTable
+                          data={data}
+                          colFilters={colFilters}
+                          updateColFilter={updateColFilter}
+                          filteredUnmatchedInter={filteredUnmatchedInter}
+                        />
                       ))}
 
                     {activeTab === "unmatched_tiny" &&
@@ -1551,93 +1021,12 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                           <Empty>Nenhuma conta a pagar em aberto no Tiny para o período e filial selecionados.</Empty>
                         )
                       ) : (
-                        <>
-                          <Table className="min-w-[820px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Empresa"
-                                    def={UNMATCHED_TINY_DEFS.empresa}
-                                    value={colFilters.unmatched_tiny.empresa}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "empresa", v)}
-                                    uniqueValues={obterValoresUnicos(data.unmatched_tiny ?? [], (c) => c.empresa_nome || c.empresa)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Vencimento"
-                                    def={UNMATCHED_TINY_DEFS.vencimento}
-                                    value={colFilters.unmatched_tiny.vencimento}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "vencimento", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Fornecedor"
-                                    def={UNMATCHED_TINY_DEFS.fornecedor}
-                                    value={colFilters.unmatched_tiny.fornecedor}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "fornecedor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Documento"
-                                    def={UNMATCHED_TINY_DEFS.documento}
-                                    value={colFilters.unmatched_tiny.documento}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "documento", v)}
-                                  />
-                                </TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Valor em aberto"
-                                    align="right"
-                                    def={UNMATCHED_TINY_DEFS.valor}
-                                    value={colFilters.unmatched_tiny.valor}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "valor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Histórico"
-                                    def={UNMATCHED_TINY_DEFS.historico}
-                                    value={colFilters.unmatched_tiny.historico}
-                                    onChange={(v) => updateColFilter("unmatched_tiny", "historico", v)}
-                                  />
-                                </TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {filteredUnmatchedTiny.map((c) => (
-                                <TableRow key={`${c.empresa}-${c.id}`} className="align-top">
-                                  <TableCell>
-                                    <Badge variant="outline">{c.empresa_nome}</Badge>
-                                  </TableCell>
-                                  <TableCell className="tabular-nums">{formatDateBR(c.data_vencimento)}</TableCell>
-                                  <TableCell>
-                                    <SupplierCell nome={c.fornecedor_nome} cnpj={c.fornecedor_cnpj} />
-                                  </TableCell>
-                                  <TableCell>
-                                    <div className="font-medium">{c.numero_documento}</div>
-                                    <code>#{c.id}</code>
-                                  </TableCell>
-                                  <TableCell className="text-right font-semibold tabular-nums">{money(c.valor)}</TableCell>
-                                  <TableCell>
-                                    <p className="max-w-64 truncate text-xs text-muted-foreground" title={c.historico}>
-                                      {c.historico || "—"}
-                                    </p>
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                          <div className="table-footer">
-                            <span>
-                              Mostrando {filteredUnmatchedTiny.length} de {data.unmatched_tiny?.length ?? 0} conta(s)
-                            </span>
-                            <span>Total: {money(filteredUnmatchedTiny.reduce((acc, c) => acc + c.valor, 0))}</span>
-                          </div>
-                        </>
+                        <UnmatchedTinyTable
+                          data={data}
+                          colFilters={colFilters}
+                          updateColFilter={updateColFilter}
+                          filteredUnmatchedTiny={filteredUnmatchedTiny}
+                        />
                       ))}
 
                     {activeTab === "ja_baixadas" &&
@@ -1650,115 +1039,12 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                           <Empty>Nenhum débito do extrato corresponde a conta já baixada no Tiny no período.</Empty>
                         )
                       ) : (
-                        <>
-                          <p className="border-b border-border px-4 py-2 text-[11px] text-muted-foreground sm:px-5">
-                            Débitos do Banco Inter cuja conta correspondente já está paga no Tiny. Só para conferência:
-                            não há nada a baixar.
-                          </p>
-                          <Table className="min-w-[1040px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Empresa"
-                                    def={JA_BAIXADAS_DEFS.empresa}
-                                    value={colFilters.ja_baixadas.empresa}
-                                    onChange={(v) => updateColFilter("ja_baixadas", "empresa", v)}
-                                    uniqueValues={obterValoresUnicos(data.ja_baixadas ?? [], (p) => p.empresa_nome || p.empresa)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Data pgto."
-                                    def={JA_BAIXADAS_DEFS.data_baixa}
-                                    value={colFilters.ja_baixadas.data_baixa}
-                                    onChange={(v) => updateColFilter("ja_baixadas", "data_baixa", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Favorecido (Inter)"
-                                    def={JA_BAIXADAS_DEFS.fornecedor}
-                                    value={colFilters.ja_baixadas.fornecedor}
-                                    onChange={(v) => updateColFilter("ja_baixadas", "fornecedor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Conta no Tiny"
-                                    def={JA_BAIXADAS_DEFS.conta}
-                                    value={colFilters.ja_baixadas.conta}
-                                    onChange={(v) => updateColFilter("ja_baixadas", "conta", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>Vencimento</TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Pago / Valor Tiny"
-                                    align="right"
-                                    def={JA_BAIXADAS_DEFS.valor}
-                                    value={colFilters.ja_baixadas.valor}
-                                    onChange={(v) => updateColFilter("ja_baixadas", "valor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>Critério</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {filteredJaBaixadas.map((p) => {
-                                const method = MATCH_METHOD_META[p.metodo_match];
-                                const diverge = Math.abs(p.valor_pago - p.valor_tiny) > 0.05;
-                                return (
-                                  <TableRow key={`${p.empresa}-${p.inter_transacao_id}-${p.conta_pagar_id}`} className="align-top">
-                                    <TableCell>
-                                      <Badge variant="outline">{p.empresa_nome}</Badge>
-                                    </TableCell>
-                                    <TableCell className="tabular-nums">{formatDateBR(p.data_pagamento)}</TableCell>
-                                    <TableCell>
-                                      <SupplierCell nome={p.nome_favorecido || "Não informado"} cnpj={p.cpf_cnpj_favorecido} />
-                                    </TableCell>
-                                    <TableCell>
-                                      <div className="min-w-40 max-w-64 whitespace-normal">
-                                        <div className="font-medium text-foreground">
-                                          Doc. {p.numero_documento || "—"} <code>#{p.conta_pagar_id}</code>
-                                        </div>
-                                        <div className="text-[11px] text-muted-foreground">{p.fornecedor_nome}</div>
-                                      </div>
-                                    </TableCell>
-                                    <TableCell className="tabular-nums">{formatDateBR(p.data_vencimento)}</TableCell>
-                                    <TableCell className="text-right tabular-nums">
-                                      <div className="font-semibold">{money(p.valor_pago)}</div>
-                                      <div
-                                        className={cn(
-                                          "text-[11px]",
-                                          diverge ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground",
-                                        )}
-                                      >
-                                        Tiny: {money(p.valor_tiny)}
-                                      </div>
-                                    </TableCell>
-                                    <TableCell>
-                                      <div className="max-w-60 space-y-1 whitespace-normal">
-                                        <Badge variant="secondary">
-                                          {method?.label ?? p.metodo_match} · {formatConfidence(p.confianca)}
-                                        </Badge>
-                                        <p className="line-clamp-2 text-[11px] text-muted-foreground" title={p.motivo}>
-                                          {p.motivo}
-                                        </p>
-                                      </div>
-                                    </TableCell>
-                                  </TableRow>
-                                );
-                              })}
-                            </TableBody>
-                          </Table>
-                          <div className="table-footer">
-                            <span>
-                              Mostrando {filteredJaBaixadas.length} de {data.ja_baixadas?.length ?? 0} débito(s)
-                            </span>
-                            <span>Total: {money(filteredJaBaixadas.reduce((acc, p) => acc + p.valor_pago, 0))}</span>
-                          </div>
-                        </>
+                        <JaBaixadasTable
+                          data={data}
+                          colFilters={colFilters}
+                          updateColFilter={updateColFilter}
+                          filteredJaBaixadas={filteredJaBaixadas}
+                        />
                       ))}
 
                     {activeTab === "transferencias" &&
@@ -1771,149 +1057,14 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                           <Empty>Nenhuma transferência entre empresas do grupo no período.</Empty>
                         )
                       ) : (
-                        <>
-                          <p className="border-b border-border px-4 py-2 text-[11px] text-muted-foreground sm:px-5">
-                            Débitos para outra empresa do grupo (mesma raiz de CNPJ), conciliados com o Tiny. As que casaram
-                            com uma conta em aberto podem ser baixadas aqui; as sem conta precisam ser lançadas no Tiny antes.
-                          </p>
-                          <Table className="min-w-[1100px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead className="w-10">
-                                  <span className="sr-only">Selecionar</span>
-                                </TableHead>
-                                <TableHead>
-                                  <div className="flex items-center gap-2">
-                                    <ColumnFilterHeader
-                                      title="Origem"
-                                      def={TRANSFERENCIAS_DEFS.empresa_origem}
-                                      value={colFilters.transferencias.empresa_origem}
-                                      onChange={(v) => updateColFilter("transferencias", "empresa_origem", v)}
-                                      uniqueValues={obterValoresUnicos(data.transferencias_internas ?? [], (t) => t.empresa_nome || t.empresa)}
-                                    />
-                                    <span className="text-muted-foreground" aria-hidden="true">→</span>
-                                    <ColumnFilterHeader
-                                      title="Destino"
-                                      def={TRANSFERENCIAS_DEFS.empresa_destino}
-                                      value={colFilters.transferencias.empresa_destino}
-                                      onChange={(v) => updateColFilter("transferencias", "empresa_destino", v)}
-                                      uniqueValues={obterValoresUnicos(data.transferencias_internas ?? [], (t) => t.empresa_destino_nome)}
-                                    />
-                                  </div>
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Data"
-                                    def={TRANSFERENCIAS_DEFS.data}
-                                    value={colFilters.transferencias.data}
-                                    onChange={(v) => updateColFilter("transferencias", "data", v)}
-                                  />
-                                </TableHead>
-                                <TableHead className="text-right">
-                                  <ColumnFilterHeader
-                                    title="Valor"
-                                    align="right"
-                                    def={TRANSFERENCIAS_DEFS.valor}
-                                    value={colFilters.transferencias.valor}
-                                    onChange={(v) => updateColFilter("transferencias", "valor", v)}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Situação"
-                                    def={TRANSFERENCIAS_DEFS.situacao}
-                                    value={colFilters.transferencias.situacao}
-                                    onChange={(v) => updateColFilter("transferencias", "situacao", v)}
-                                    uniqueValues={obterValoresUnicos(data.transferencias_internas ?? [], (t) => (t.situacao in TRANSFER_SITUACAO_META ? TRANSFER_SITUACAO_META[t.situacao].label : t.situacao))}
-                                  />
-                                </TableHead>
-                                <TableHead>
-                                  <ColumnFilterHeader
-                                    title="Descrição"
-                                    def={TRANSFERENCIAS_DEFS.descricao}
-                                    value={colFilters.transferencias.descricao}
-                                    onChange={(v) => updateColFilter("transferencias", "descricao", v)}
-                                  />
-                                </TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {filteredTransferencias.map((t) => {
-                                // Backend anterior não manda situação/conciliação: trata como "sem conta".
-                                const conta = t.conciliacao ?? t.conta_ja_baixada ?? null;
-                                const apta = t.situacao === "apta_baixa" && !!t.conciliacao;
-                                const isSelected = apta && selectedIds.has(t.conciliacao!.conta_pagar_id);
-                                const situacao = TRANSFER_SITUACAO_META[t.situacao] ?? TRANSFER_SITUACAO_META.sem_conta;
-                                return (
-                                <TableRow
-                                  key={`${t.empresa}-${t.transacao_id}`}
-                                  data-state={isSelected ? "selected" : undefined}
-                                  onClick={apta ? () => toggleSelectOne(t.conciliacao!.conta_pagar_id) : undefined}
-                                  className={cn("align-top", apta && "cursor-pointer")}
-                                >
-                                  <TableCell>
-                                    {apta && (
-                                      <Checkbox
-                                        checked={isSelected}
-                                        onCheckedChange={() => toggleSelectOne(t.conciliacao!.conta_pagar_id)}
-                                        onClick={(e) => e.stopPropagation()}
-                                        aria-label={`Selecionar transferência para ${t.empresa_destino_nome} de ${money(t.valor_pago)}`}
-                                      />
-                                    )}
-                                  </TableCell>
-                                  <TableCell>
-                                    <div className="flex min-w-56 flex-wrap items-center gap-1.5">
-                                      <Badge variant="outline">{t.empresa_nome}</Badge>
-                                      <ArrowRight size={12} className="shrink-0 text-muted-foreground" aria-label="para" />
-                                      <span className="font-medium text-foreground">{t.empresa_destino_nome}</span>
-                                    </div>
-                                    {t.cpf_cnpj_favorecido && (
-                                      <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                                        {formatCnpjMask(t.cpf_cnpj_favorecido)}
-                                      </div>
-                                    )}
-                                  </TableCell>
-                                  <TableCell className="tabular-nums">{formatDateBR(t.data_pagamento)}</TableCell>
-                                  <TableCell className="text-right font-semibold tabular-nums">{money(t.valor_pago)}</TableCell>
-                                  <TableCell>
-                                    <div className="min-w-48 max-w-64 space-y-1 whitespace-normal">
-                                      <Badge variant={situacao.tone}>{situacao.label}</Badge>
-                                      {conta ? (
-                                        <>
-                                          <div className="text-xs font-medium text-foreground">
-                                            Doc. {conta.numero_documento || "—"} <code>#{conta.conta_pagar_id}</code>
-                                          </div>
-                                          <div className="text-[11px] text-muted-foreground">
-                                            Venc. {formatDateBR(conta.data_vencimento)} · Tiny {money(conta.valor_tiny)} ·{" "}
-                                            {MATCH_METHOD_META[conta.metodo_match]?.label ?? conta.metodo_match}
-                                          </div>
-                                        </>
-                                      ) : (
-                                        <div className="text-[11px] text-muted-foreground">
-                                          Lance a conta no Tiny para poder baixar.
-                                        </div>
-                                      )}
-                                    </div>
-                                  </TableCell>
-                                  <TableCell>
-                                    <p className="line-clamp-2 max-w-96 whitespace-normal text-xs" title={t.descricao || t.titulo}>
-                                      {t.descricao || t.titulo || "—"}
-                                    </p>
-                                    <span className="text-[11px] text-muted-foreground">{t.tipo_transacao}</span>
-                                  </TableCell>
-                                </TableRow>
-                                );
-                              })}
-                            </TableBody>
-                          </Table>
-                          <div className="table-footer">
-                            <span>
-                              Mostrando {filteredTransferencias.length} de {data.transferencias_internas?.length ?? 0}{" "}
-                              transferência(s)
-                            </span>
-                            <span>Total: {money(filteredTransferencias.reduce((acc, t) => acc + t.valor_pago, 0))}</span>
-                          </div>
-                        </>
+                        <TransferenciasTable
+                          data={data}
+                          colFilters={colFilters}
+                          updateColFilter={updateColFilter}
+                          filteredTransferencias={filteredTransferencias}
+                          selectedIds={selectedIds}
+                          toggleSelectOne={toggleSelectOne}
+                        />
                       ))}
                   </div>
                 </div>
@@ -1959,7 +1110,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
               {(() => {
                 const progress = describeJobProgress(baixaJob);
                 return (
-                  <div className="space-y-2 rounded-lg border border-border bg-muted/40 p-3">
+                  <div className="space-y-2 rounded-none border border-border bg-muted/40 p-3">
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <output className="flex min-w-0 items-center gap-2 font-medium text-foreground" aria-live="polite">
                         {baixaRunning && (
@@ -1968,9 +1119,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                         <span className="truncate">{progress.label}</span>
                       </output>
                       {baixaRunning && (
-                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
-                          {formatElapsed(now - baixaStartedAt)}
-                        </span>
+                        <Elapsed since={baixaStartedAt} className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground" />
                       )}
                     </div>
                     <ProgressBar percent={progress.percent} label="Andamento da baixa" />
@@ -1984,7 +1133,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                 </p>
               )}
               {baixaError && (
-                <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                <div role="alert" className="rounded-none border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
                   {baixaError}
                 </div>
               )}
@@ -1999,14 +1148,14 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                   { label: "Valor total", value: money(totalSelectedValor) },
                   { label: "Filiais", value: String(selectedCompanies) },
                 ].map((s) => (
-                  <div key={s.label} className="rounded-lg border border-border bg-muted/40 p-2.5">
+                  <div key={s.label} className="rounded-none border border-border bg-muted/40 p-2.5">
                     <dt className="text-muted-foreground">{s.label}</dt>
                     <dd className="mt-0.5 break-words font-mono text-xs font-semibold tabular-nums text-foreground sm:text-sm">{s.value}</dd>
                   </div>
                 ))}
               </dl>
 
-              <div className="flex gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
+              <div className="flex gap-2 rounded-none border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" />
                 <p className="leading-relaxed text-muted-foreground">
                   As contas serão marcadas como <strong className="text-foreground">pagas</strong> no Tiny ERP com a data
@@ -2014,7 +1163,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
                 </p>
               </div>
 
-              <ul className="max-h-60 divide-y divide-border overflow-y-auto rounded-lg border border-border text-xs">
+              <ul className="max-h-60 divide-y divide-border overflow-y-auto rounded-none border border-border text-xs">
                 {selectedMatches.map((m) => (
                   <li key={m.id} className="flex items-start justify-between gap-3 p-2.5">
                     <div className="min-w-0">
@@ -2034,7 +1183,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
               </ul>
 
               {baixaError && (
-                <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                <div role="alert" className="rounded-none border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
                   {baixaError}
                 </div>
               )}
@@ -2042,7 +1191,7 @@ export default function ReconciliationView({ apiBaseUrl }: ReconciliationViewPro
           )}
 
           {baixaResult && (
-            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-lg border border-border text-xs">
+            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-none border border-border text-xs">
               {baixaResult.resultados.map((r) => (
                 <li key={`${r.empresa}-${r.conta_pagar_id}`} className="flex items-start justify-between gap-3 p-2.5">
                   <div className="min-w-0">

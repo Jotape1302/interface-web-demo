@@ -1,9 +1,9 @@
 """
 Chave interna gateway → automação (contrato C1 das correções de segurança de 2026-10-06).
 
-A porta 8000 está publicada no host e o domínio do painel é público: sem esta chave qualquer um
-que alcançasse a porta podia lançar contas, baixar títulos e disparar varreduras. O gateway
-envia `X-Internal-Key: <AUTOMATIONS_INTERNAL_KEY>` em toda chamada; aqui ela é exigida em todas
+A porta 8000 só existe na rede do compose (não é publicada no host), mas o domínio do painel é
+público e a rede é compartilhada: sem esta chave qualquer um que alcançasse a porta podia lançar
+contas, baixar títulos e disparar varreduras. O gateway envia `X-Internal-Key: <AUTOMATIONS_INTERNAL_KEY>` em toda chamada; aqui ela é exigida em todas
 as rotas, menos `/health` e `/api/v1/health` (públicas, com status mínimo).
 
 - `AUTOMATIONS_INTERNAL_KEY` ausente → rotas protegidas respondem 503, a não ser que

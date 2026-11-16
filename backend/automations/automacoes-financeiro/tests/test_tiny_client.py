@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from app import tiny_client as tiny_client_module
+from app.tiny import base as tiny_base
 from app.categorization import GroupedLancamento
 from app.config import settings
 from app.nfe_client import NFeData, NFeDuplicate
@@ -34,7 +35,7 @@ def _no_tiny_api_throttle(request, monkeypatch):
     """
     if "real_tiny_throttle" in request.keywords:
         return
-    monkeypatch.setattr(tiny_client_module, "_throttle_tiny_api_call", lambda: None)
+    monkeypatch.setattr(tiny_client_module, "_throttle_tiny_api_call", lambda *a: None)
     monkeypatch.setattr(tiny_client_module, "_throttle_tiny_dashboard_call", lambda *a: None)
 
 
@@ -384,20 +385,21 @@ def test_send_conta_pagar_v3_does_not_retry_403_with_json_body():
 
 @pytest.mark.real_tiny_throttle
 def test_throttle_tiny_api_call_enforces_minimum_interval(monkeypatch):
-    """O throttle global (protege contra bloqueio por volume, ver comentário no módulo)
-    deve esperar o intervalo mínimo entre chamadas, mas não esperar nada se já passou
-    tempo suficiente desde a última."""
+    """O throttle (protege contra bloqueio por volume, ver comentário no módulo) espera o
+    intervalo mínimo entre chamadas da MESMA conta do Tiny; outra conta não espera."""
     sleeps = []
     monkeypatch.setattr(tiny_client_module.time, "sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr(tiny_client_module, "_tiny_api_last_call_at", 0.0)
+    monkeypatch.setattr(tiny_base, "_tiny_api_last_call", {})
 
     t0 = 100.0
     monkeypatch.setattr(tiny_client_module.time, "monotonic", lambda: t0)
-    tiny_client_module._throttle_tiny_api_call()
-    assert sleeps == []  # 1ª chamada: nada esperando ainda (last_call_at era 0)
+    tiny_client_module._throttle_tiny_api_call("Bearer a")
+    assert sleeps == []  # 1ª chamada: nada esperando ainda
 
     monkeypatch.setattr(tiny_client_module.time, "monotonic", lambda: t0 + 0.1)
-    tiny_client_module._throttle_tiny_api_call()
+    tiny_client_module._throttle_tiny_api_call("Bearer b")
+    assert sleeps == []  # outra conta: fila própria
+    tiny_client_module._throttle_tiny_api_call("Bearer a")
     assert sleeps == [pytest.approx(0.4)]  # esperou o restante até completar 0.5s
 
 
@@ -1207,7 +1209,7 @@ def test_throttle_tiny_dashboard_call_enforces_longer_minimum_interval(monkeypat
     """
     sleeps = []
     monkeypatch.setattr(tiny_client_module.time, "sleep", lambda s: sleeps.append(s))
-    monkeypatch.setattr(tiny_client_module, "_tiny_dashboard_last_call", {})
+    monkeypatch.setattr(tiny_base, "_tiny_dashboard_last_call", {})
 
     t0 = 200.0
     monkeypatch.setattr(tiny_client_module.time, "monotonic", lambda: t0)
@@ -1502,7 +1504,7 @@ def test_list_contas_pagar_abertas_chama_list_v3_com_situacao_aberto():
 def test_notas_diferentes_com_mesmo_valor_e_documento_generico_nao_sao_duplicadas():
     """Incidente 2026-09-29: VELTRIX3D NF 276 lançada; 280 e 282 (mesmo valor e vencimento) viraram 'Já existia'."""
     client = TinyClient(token="eyJh_jwt_v3_token")
-    chave_276 = "35260761937402000101551010000002761368274137"
+    chave_276 = "35260761937402000101551010000002761368274130"
     chave_280 = "35260761937402000101551010000002801368274130"
     ja_lancada = [{
         "id": 900, "numeroDocumento": "NF-e Norvia", "valor": 114.50, "dataVencimento": "2026-10-15",
@@ -1650,3 +1652,117 @@ def test_obter_contas_financeiras_v3_401_nao_repete_nem_quebra():
     with patch("requests.get", return_value=MagicMock(status_code=401, text="")) as get:
         assert client.obter_contas_financeiras_v3("tok") == []
     assert get.call_count == 1
+
+
+def _nfe_contato(nome, cnpj):
+    return NFeData(
+        chave="35261176139148000173550010000001231000000123",
+        numero_nota="123",
+        data_emissao=date(2026, 11, 3),
+        emitente_nome=nome,
+        emitente_cnpj=cnpj,
+        valor_total=Decimal("29.50"),
+    )
+
+
+def _respostas_contatos(por_cnpj, por_nome):
+    """requests.get falso: cpfCnpj → por_cnpj, nome → por_nome."""
+    def get(url, headers=None, params=None, timeout=None):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"itens": por_cnpj if "cpfCnpj" in (params or {}) else por_nome}
+        return resp
+    return get
+
+
+def test_contato_com_cnpj_ignora_nome_parcial_de_outra_empresa():
+    """Incidente 2026-11-03: a busca parcial por nome trazia outra empresa e o erro dizia 'Divergência cadastral'."""
+    client = TinyClient(token="eyJh_jwt_token")
+    nfe = _nfe_contato("BZ MATERIAIS PARA CONSTRUCAO LTDA", "76139148000173")
+    outra = [{"id": 815750732, "nome": "Casa Exemplo Materiais Para Construcao Ltda", "cpfCnpj": "85.199.698/0001-79"}]
+    with patch("requests.get", side_effect=_respostas_contatos([], outra)), patch("app.tiny_client._throttle_tiny_api_call"):
+        with pytest.raises(TinyAPIError) as erro:
+            client.resolve_contato_id_v3("t", nfe)
+    assert "não encontrado nos contatos" in str(erro.value)
+    assert "Divergência" not in str(erro.value)
+
+
+def test_contato_com_mesmo_nome_e_outro_cnpj_explica_filial():
+    client = TinyClient(token="eyJh_jwt_token")
+    nfe = _nfe_contato("Comercial Exemplo Ltda.", "76139148000173")
+    mesmo = [{"id": 1, "nome": "COMERCIAL EXEMPLO LTDA", "cpfCnpj": "85.199.698/0001-79"}]
+    with patch("requests.get", side_effect=_respostas_contatos([], mesmo)), patch("app.tiny_client._throttle_tiny_api_call"):
+        with pytest.raises(TinyAPIError) as erro:
+            client.resolve_contato_id_v3("t", nfe)
+    assert "Divergência cadastral" in str(erro.value)
+    assert "76.139.148/0001-73" in str(erro.value)
+
+
+def test_cupom_sem_cnpj_so_aceita_contato_com_o_mesmo_nome():
+    """Sem CNPJ, o primeiro resultado parcial emprestava o CNPJ de outra empresa ao cupom."""
+    client = TinyClient(token="eyJh_jwt_token")
+    parcial = [{"id": 815732200, "nome": "Supermercado Exemplo Eireli", "cpfCnpj": "16.448.156/0001-70"}]
+    with patch("requests.get", side_effect=_respostas_contatos([], parcial)), patch("app.tiny_client._throttle_tiny_api_call"):
+        with pytest.raises(TinyAPIError) as erro:
+            client.resolve_contato_id_v3("t", _nfe_contato("SUPERMERCADO", "00000000000000"))
+    assert "não encontrado" in str(erro.value)
+
+    nfe = _nfe_contato("Supermercado 88 Ltda", "00000000000000")
+    certos = parcial + [{"id": 42, "nome": "SUPERMERCADO 88 LTDA", "cpfCnpj": "58.203.741/0001-50"}]
+    with patch("requests.get", side_effect=_respostas_contatos([], certos)), patch("app.tiny_client._throttle_tiny_api_call"):
+        assert TinyClient(token="eyJh_jwt_token").resolve_contato_id_v3("t", nfe) == 42
+    assert nfe.emitente_cnpj == "58.203.741/0001-50"
+
+
+def test_cupom_sem_cnpj_com_dois_contatos_de_mesmo_nome_nao_escolhe():
+    client = TinyClient(token="eyJh_jwt_token")
+    dois = [{"id": 1, "nome": "Posto Central", "cpfCnpj": "43.105.047/0001-22"},
+            {"id": 2, "nome": "POSTO CENTRAL", "cpfCnpj": "42.540.298/0001-72"}]
+    with patch("requests.get", side_effect=_respostas_contatos([], dois)), patch("app.tiny_client._throttle_tiny_api_call"):
+        with pytest.raises(TinyAPIError) as erro:
+            client.resolve_contato_id_v3("t", _nfe_contato("Posto Central", ""))
+    assert "Mais de um contato" in str(erro.value)
+
+
+def _nfe_platinum(cnpj="19473528000106"):
+    return NFeData(chave="35260719473528000106650010000457621009638077", numero_nota="45762",
+                   data_emissao=date(2026, 7, 1), emitente_nome="PRATA CONSULTORIA E E-COMMERCE LTDA",
+                   emitente_cnpj=cnpj, valor_total=Decimal("100.00"))
+
+
+def test_fornecedor_sem_cadastro_e_recusa_cadastral():
+    from app.tiny_client import TinyCadastroError
+
+    client = TinyClient(token="eyJh_jwt_token")
+    with patch("requests.get") as mock_get:
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {"itens": []}
+        with pytest.raises(TinyCadastroError, match="não encontrado nos contatos"):
+            client.resolve_contato_id_v3("token", _nfe_platinum())
+
+
+def test_busca_que_falhou_no_tiny_nao_vira_fornecedor_nao_encontrado():
+    # Inc. #19: com HTTP != 200 a resposta era ignorada e caía em "não encontrado", mesmo com o
+    # fornecedor cadastrado. Agora é erro do Tiny (ERROR, tente de novo), não recusa de cadastro.
+    from app.tiny_client import TinyCadastroError
+
+    client = TinyClient(token="eyJh_jwt_token")
+    with patch("requests.get") as mock_get, patch("app.tiny_client.time.sleep"):
+        mock_get.return_value.status_code = 429
+        mock_get.return_value.headers = {}
+        with pytest.raises(TinyAPIError, match="não respondeu") as exc:
+            client.resolve_contato_id_v3("token", _nfe_platinum())
+        assert not isinstance(exc.value, TinyCadastroError)
+        assert "HTTP 429" in str(exc.value)
+        assert mock_get.call_count > 3  # 429 é repetido antes de desistir
+
+
+def test_busca_que_falha_e_depois_acha_pelo_nome():
+    client = TinyClient(token="eyJh_jwt_token")
+    falha = MagicMock(status_code=401)
+    vazio = MagicMock(status_code=200)
+    vazio.json.return_value = {"itens": []}
+    achou = MagicMock(status_code=200)
+    achou.json.return_value = {"itens": [{"id": 55, "nome": "Prata Consultoria e E-commerce Ltda",
+                                          "cpfCnpj": "19.473.528/0001-06"}]}
+    with patch("requests.get", side_effect=[falha, vazio, achou]):
+        assert client.resolve_contato_id_v3("token", _nfe_platinum()) == 55

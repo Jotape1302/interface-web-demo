@@ -10,7 +10,7 @@ Suporta:
 - Fallback para dados de demonstração quando certificados não estiverem disponíveis em ambiente local.
 """
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
 import logging
@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
 
+from app.fuso import hoje_sp
 from app.http_errors import sufixo_erro
 
 from app.boleto import parse_boleto
@@ -34,6 +35,12 @@ logger = logging.getLogger("automacao_nfe.inter_client")
 INTER_BASE_URL = "https://cdpj.partners.bancointer.com.br"
 INTER_TOKEN_PATH = "/oauth/v2/token"
 INTER_EXTRATO_PATH = "/banking/v2/extrato/completo"
+INTER_PAGAMENTO_PATH = "/banking/v2/pagamento"
+
+ESCOPO_EXTRATO = "extrato.read"
+# Pagamento de boleto (DDA → Inter): incluir/agendar e consultar. Escopos habilitados na aplicação
+# de cada empresa no Internet Banking; token separado do extrato (escopo que falta não derruba o outro).
+ESCOPO_PAGAMENTO_BOLETO = "pagamento-boleto.write pagamento-boleto.read"
 
 # Timeout padronizado para chamadas mTLS / HTTP ao Banco Inter (connect_timeout, read_timeout)
 DEFAULT_INTER_TIMEOUT: Tuple[float, float] = (5.0, 25.0)
@@ -114,6 +121,10 @@ EXTRATO_RETRY_DELAYS_SECONDS: Tuple[int, ...] = (2, 5)
 
 # empresa -> (access_token, expira_em_ts); ver InterClient.__init__
 _TOKEN_CACHE: Dict[str, Tuple[str, float]] = {}
+
+
+class PagamentoInterIncerto(RuntimeError):
+    """O pedido de pagamento pode ter entrado no Inter: conferir antes de repetir."""
 _TOKEN_LOCK = threading.Lock()
 
 
@@ -226,10 +237,11 @@ class InterClient:
                 "mensagem": f"Falha na autenticação do Banco Inter: {err_str}",
             }
 
-    def get_token(self, empresa: str) -> str:
-        """Obtém ou renova o access_token OAuth2 mTLS para a empresa."""
+    def get_token(self, empresa: str, escopo: str = ESCOPO_EXTRATO) -> str:
+        """Obtém ou renova o access_token OAuth2 mTLS para a empresa, por escopo."""
+        chave_cache = empresa if escopo == ESCOPO_EXTRATO else f"{empresa}|{escopo}"
         with self._lock:
-            cached = self._token_cache.get(empresa)
+            cached = self._token_cache.get(chave_cache)
             if cached:
                 token, exp_ts = cached
                 if time.time() < exp_ts - 60:  # Margem de 60 segundos
@@ -253,7 +265,7 @@ class InterClient:
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "grant_type": "client_credentials",
-                "scope": "extrato.read",
+                "scope": escopo,
             }
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
@@ -271,7 +283,7 @@ class InterClient:
             if not access_token:
                 raise RuntimeError("Resposta de autenticação do Banco Inter sem 'access_token'.")
 
-            self._token_cache[empresa] = (access_token, time.time() + expires_in)
+            self._token_cache[chave_cache] = (access_token, time.time() + expires_in)
             return access_token
 
     def _split_date_range(self, start: date, end: date, max_days: int = 89) -> List[Tuple[date, date]]:
@@ -366,6 +378,86 @@ class InterClient:
                     break
 
         return all_transacoes
+
+    # --- pagamento de boleto (DDA) ----------------------------------------------------------
+
+    def _pagamento_request(self, empresa: str, method: str, **kwargs: Any) -> requests.Response:
+        cert_pair = self.get_cert_pair(empresa)
+        if not cert_pair:
+            raise RuntimeError(f"Certificados mTLS (.crt e .key) não encontrados para a empresa '{empresa}'.")
+        for tentativa in (1, 2):
+            token = self.get_token(empresa, ESCOPO_PAGAMENTO_BOLETO)
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            resp = requests.request(
+                method, f"{self.base_url}{INTER_PAGAMENTO_PATH}", headers=headers, cert=cert_pair,
+                timeout=self.timeout, **kwargs,
+            )
+            if resp.status_code == 401 and tentativa == 1:
+                self._token_cache.pop(f"{empresa}|{ESCOPO_PAGAMENTO_BOLETO}", None)
+                continue
+            return resp
+        return resp
+
+    def buscar_pagamentos_boleto(
+        self,
+        empresa: str,
+        codigo_transacao: Optional[str] = None,
+        codigo_barras: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """GET /banking/v2/pagamento por código da transação ou do boleto (últimos 30 dias por inclusão)."""
+        params: Dict[str, str] = {}
+        if codigo_transacao:
+            params["codigoTransacao"] = codigo_transacao
+        if codigo_barras:
+            params["codBarraLinhaDigitavel"] = codigo_barras
+        resp = self._pagamento_request(empresa, "GET", params=params)
+        if not resp.ok:
+            logger.error(f"[INTER] Consulta de pagamento de boleto de '{empresa}' recusada (HTTP {resp.status_code}): {resp.text[:500]}")
+            raise RuntimeError(f"Consulta de pagamento no Banco Inter falhou (HTTP {resp.status_code}){sufixo_erro(resp)}")
+        dados = resp.json()
+        return dados if isinstance(dados, list) else []
+
+    def pagar_boleto(
+        self,
+        empresa: str,
+        codigo_barras: str,
+        valor: Decimal,
+        data_vencimento: date,
+        data_pagamento: Optional[date] = None,
+        cnpj_beneficiario: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        POST /banking/v2/pagamento: inclui o pagamento (ou o agendamento, com `data_pagamento`
+        futura) do boleto. Conforme a conta, fica aguardando a aprovação no Internet Banking.
+        Devolve o corpo (codigoTransacao, statusPagamento, quantidadeAprovadores, dataAgendamento).
+        Sem resposta clara (timeout, 5xx) levanta `PagamentoInterIncerto`: o pagamento pode ter
+        entrado, então quem chama procura pelo código de barras antes de tentar de novo.
+        """
+        corpo: Dict[str, Any] = {
+            "codBarraLinhaDigitavel": codigo_barras,
+            "valorPagar": f"{Decimal(valor).quantize(Decimal('0.01'))}",
+            "dataVencimento": data_vencimento.isoformat(),
+        }
+        if data_pagamento:
+            corpo["dataPagamento"] = data_pagamento.isoformat()
+        cnpj = _clean_digits(cnpj_beneficiario)
+        if cnpj and len(cnpj) in (11, 14):
+            corpo["cpfCnpjBeneficiario"] = cnpj
+        try:
+            resp = self._pagamento_request(empresa, "POST", json=corpo)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if isinstance(e, requests.ConnectTimeout):
+                raise RuntimeError(f"Sem conexão com o Banco Inter: {e}") from e
+            raise PagamentoInterIncerto(f"sem resposta do Banco Inter ({e})") from e
+        if resp.status_code >= 500:
+            raise PagamentoInterIncerto(f"Banco Inter respondeu HTTP {resp.status_code}{sufixo_erro(resp)}")
+        if not resp.ok:
+            logger.error(f"[INTER] Pagamento de boleto de '{empresa}' recusado (HTTP {resp.status_code}): {resp.text[:500]}")
+            raise RuntimeError(f"Banco Inter recusou o pagamento (HTTP {resp.status_code}){sufixo_erro(resp)}")
+        dados = resp.json() if resp.content else {}
+        if not isinstance(dados, dict) or not dados.get("codigoTransacao"):
+            raise PagamentoInterIncerto("resposta do Banco Inter sem codigoTransacao")
+        return dados
 
     def _normalize_transacao(self, empresa: str, item: Dict[str, Any]) -> Optional[InterTransacao]:
         """Normaliza um registro de débito da API Inter em InterTransacao."""
@@ -467,7 +559,7 @@ class InterClient:
 
     def get_demo_extrato(self, empresa: str, data_inicio: date, data_fim: date) -> List[InterTransacao]:
         """Gera pagamentos de demonstração coerentes com o Tiny ERP para simulação e testes."""
-        hoje = date.today()
+        hoje = hoje_sp()
         ref_date = min(hoje, data_fim)
 
         demo_dataset: Dict[str, List[Dict[str, Any]]] = {

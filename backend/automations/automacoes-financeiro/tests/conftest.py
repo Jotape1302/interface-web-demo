@@ -4,7 +4,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _limpa_cache_conciliacao():
     """O cache da conciliação vive no módulo: sem isto, um teste herdaria os dados simulados do anterior."""
-    from app.api import invalidar_cache_conciliacao, limpar_aptos_baixa
+    from app.routers.reconciliacao import invalidar_cache_conciliacao, limpar_aptos_baixa
 
     invalidar_cache_conciliacao()
     limpar_aptos_baixa()
@@ -26,7 +26,7 @@ def _sem_chave_interna_por_padrao(monkeypatch):
 @pytest.fixture(autouse=True)
 def _registro_de_baixas_isolado(tmp_path, monkeypatch):
     """O registro persistente de baixas do Inter vai para uma pasta temporária por teste."""
-    from app import api
+    from app.routers import reconciliacao as api
 
     monkeypatch.setattr(api, "_arquivo_registro_baixas", lambda: tmp_path / "reconciliacao_inter_baixas.json")
 
@@ -65,3 +65,18 @@ def _isolamento_tokens_ml(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "ML_TOKENS_FILE", tmp_path / "ml_tokens.json")
 
 
+
+
+# Categoria da parte do frete nos testes da conciliação ML. Em produção é "Fretes sobre Vendas"
+# pelo nome no Tiny (ResolvedorTiny.categoria_frete_id, teste próprio em test_ml_categoria_frete.py);
+# os Tinys simulados não listam categorias, então os testes usam um ID fixo.
+CATEGORIA_FRETE_TESTE = 900000001
+
+
+@pytest.fixture(autouse=True)
+def _categoria_frete_fixa(request, monkeypatch):
+    if request.node.get_closest_marker("categoria_frete_real"):
+        return
+    from app import ml_reconciliation_rotina as rot
+
+    monkeypatch.setattr(rot.ResolvedorTiny, "categoria_frete_id", lambda self, empresa: CATEGORIA_FRETE_TESTE)

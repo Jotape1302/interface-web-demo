@@ -13,15 +13,17 @@ import type {
   RoleChangeResult,
 } from './admin-users-contracts';
 import { resolveApiBaseUrl } from './contracts';
-import { demoAdminStore } from './demo-permissions';
+import { loadDemoPermissions } from './demo-permissions-loader';
+
+const demoStore = () => loadDemoPermissions().then((m) => m.demoAdminStore);
 import { demoDelay } from './demo-session';
 import type { PermissionCatalog, PermissionStateView, PolicyActor, Role } from './permissions';
 
 export interface AdminUsersService {
-  catalog(): Promise<AdminResult<PermissionCatalog>>;
-  listUsers(): Promise<AdminResult<AdminUserView[]>>;
-  listSessions(): Promise<AdminResult<AdminSession[]>>;
-  listChangeRequests(): Promise<AdminResult<AdminChangeRequest[]>>;
+  catalog(signal?: AbortSignal): Promise<AdminResult<PermissionCatalog>>;
+  listUsers(signal?: AbortSignal): Promise<AdminResult<AdminUserView[]>>;
+  listSessions(signal?: AbortSignal): Promise<AdminResult<AdminSession[]>>;
+  listChangeRequests(signal?: AbortSignal): Promise<AdminResult<AdminChangeRequest[]>>;
   getPermissions(userId: number): Promise<AdminResult<PermissionStateView>>;
   putPermissions(userId: number, grants: string[], expectedVersion: number): Promise<AdminResult<PermissionStateView>>;
   putRole(userId: number, role: Role): Promise<AdminResult<RoleChangeResult>>;
@@ -39,7 +41,7 @@ const NETWORK_ERROR = 'Não foi possível falar com o servidor. Verifique a cone
 class LiveAdminUsersService implements AdminUsersService {
   constructor(private readonly token: string | null) {}
 
-  private async request<T>(method: string, path: string, fallback: string, body?: unknown): Promise<AdminResult<T>> {
+  private async request<T>(method: string, path: string, fallback: string, body?: unknown, signal?: AbortSignal): Promise<AdminResult<T>> {
     let res: Response;
     try {
       res = await fetch(`${resolveApiBaseUrl().replace(/\/$/, '')}${path}`, {
@@ -49,6 +51,7 @@ class LiveAdminUsersService implements AdminUsersService {
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(signal ? { signal } : {}),
       });
     } catch {
       return {
@@ -61,20 +64,22 @@ class LiveAdminUsersService implements AdminUsersService {
     return { ok: true, data };
   }
 
-  catalog() {
-    return this.request<PermissionCatalog>('GET', '/api/admin/permissions/catalog', 'Falha ao carregar o catálogo de permissões');
+  catalog(signal?: AbortSignal) {
+    return this.request<PermissionCatalog>('GET', '/api/admin/permissions/catalog', 'Falha ao carregar o catálogo de permissões', undefined, signal);
   }
-  listUsers() {
-    return this.request<AdminUserView[]>('GET', '/api/admin/users', 'Falha ao carregar a lista de usuários');
+  listUsers(signal?: AbortSignal) {
+    return this.request<AdminUserView[]>('GET', '/api/admin/users', 'Falha ao carregar a lista de usuários', undefined, signal);
   }
-  listSessions() {
-    return this.request<AdminSession[]>('GET', '/api/admin/sessions', 'Falha ao carregar as sessões ativas');
+  listSessions(signal?: AbortSignal) {
+    return this.request<AdminSession[]>('GET', '/api/admin/sessions', 'Falha ao carregar as sessões ativas', undefined, signal);
   }
-  listChangeRequests() {
+  listChangeRequests(signal?: AbortSignal) {
     return this.request<AdminChangeRequest[]>(
       'GET',
       '/api/admin/change-requests?status=pending',
       'Falha ao carregar as alterações de cadastro',
+      undefined,
+      signal,
     );
   }
   getPermissions(userId: number) {
@@ -122,47 +127,61 @@ class LiveAdminUsersService implements AdminUsersService {
 
 class DemoAdminUsersService implements AdminUsersService {
   constructor(private readonly actor: PolicyActor) {}
-  catalog() {
-    return demoDelay<AdminResult<PermissionCatalog>>({ ok: true, data: demoAdminStore.catalog() }, 250);
+  async catalog() {
+    const store = await demoStore();
+    return demoDelay<AdminResult<PermissionCatalog>>({ ok: true, data: store.catalog() }, 250);
   }
-  listUsers() {
-    return demoDelay(demoAdminStore.listUsers(this.actor));
+  async listUsers() {
+    const store = await demoStore();
+    return demoDelay(store.listUsers(this.actor));
   }
-  listSessions() {
-    return demoDelay(demoAdminStore.listSessions(this.actor));
+  async listSessions() {
+    const store = await demoStore();
+    return demoDelay(store.listSessions(this.actor));
   }
-  listChangeRequests() {
-    return demoDelay(demoAdminStore.listChangeRequests(this.actor));
+  async listChangeRequests() {
+    const store = await demoStore();
+    return demoDelay(store.listChangeRequests(this.actor));
   }
-  getPermissions(userId: number) {
-    return demoDelay(demoAdminStore.getPermissions(this.actor, userId), 400);
+  async getPermissions(userId: number) {
+    const store = await demoStore();
+    return demoDelay(store.getPermissions(this.actor, userId), 400);
   }
-  putPermissions(userId: number, grants: string[], expectedVersion: number) {
-    return demoDelay(demoAdminStore.putPermissions(this.actor, userId, grants, expectedVersion), 600);
+  async putPermissions(userId: number, grants: string[], expectedVersion: number) {
+    const store = await demoStore();
+    return demoDelay(store.putPermissions(this.actor, userId, grants, expectedVersion), 600);
   }
-  putRole(userId: number, role: Role) {
-    return demoDelay(demoAdminStore.putRole(this.actor, userId, role), 500);
+  async putRole(userId: number, role: Role) {
+    const store = await demoStore();
+    return demoDelay(store.putRole(this.actor, userId, role), 500);
   }
-  putSetor(userId: number, setor: string) {
-    return demoDelay(demoAdminStore.putSetor(this.actor, userId, setor), 300);
+  async putSetor(userId: number, setor: string) {
+    const store = await demoStore();
+    return demoDelay(store.putSetor(this.actor, userId, setor), 300);
   }
-  deleteUser(userId: number) {
-    return demoDelay(demoAdminStore.deleteUser(this.actor, userId), 500);
+  async deleteUser(userId: number) {
+    const store = await demoStore();
+    return demoDelay(store.deleteUser(this.actor, userId), 500);
   }
-  createUser(payload: NewUserPayload) {
-    return demoDelay(demoAdminStore.createUser(this.actor, payload), 700);
+  async createUser(payload: NewUserPayload) {
+    const store = await demoStore();
+    return demoDelay(store.createUser(this.actor, payload), 700);
   }
-  approve(userId: number, payload: ApprovePayload) {
-    return demoDelay(demoAdminStore.approve(this.actor, userId, payload), 600);
+  async approve(userId: number, payload: ApprovePayload) {
+    const store = await demoStore();
+    return demoDelay(store.approve(this.actor, userId, payload), 600);
   }
-  reject(userId: number) {
-    return demoDelay(demoAdminStore.reject(this.actor, userId), 400);
+  async reject(userId: number) {
+    const store = await demoStore();
+    return demoDelay(store.reject(this.actor, userId), 400);
   }
-  forceLogout(sessionId: string) {
-    return demoDelay(demoAdminStore.forceLogout(this.actor, sessionId), 400);
+  async forceLogout(sessionId: string) {
+    const store = await demoStore();
+    return demoDelay(store.forceLogout(this.actor, sessionId), 400);
   }
-  reviewChangeRequest(requestId: number, approve: boolean) {
-    return demoDelay(demoAdminStore.reviewChangeRequest(this.actor, requestId, approve), 400);
+  async reviewChangeRequest(requestId: number, approve: boolean) {
+    const store = await demoStore();
+    return demoDelay(store.reviewChangeRequest(this.actor, requestId, approve), 400);
   }
 }
 

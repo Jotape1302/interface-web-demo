@@ -1,6 +1,7 @@
-import { PublicError } from "./errors.js";
+import { PublicError, logWarn } from "./errors.js";
 import type { Pool } from "mariadb";
 import type { Config } from "./config.js";
+import { asWriteResult, type DbRow } from "./database.js";
 
 export interface DirectMessage {
   id: number;
@@ -47,7 +48,7 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
   const memoryMessages = new Map<number, DirectMessage>();
   let nextId = 1;
 
-  async function query<T = any>(sql: string, values: any[] = []): Promise<T[]> {
+  async function query<T = DbRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     if (!pool) throw new Error("Pool de banco não configurado");
     const conn = await pool.getConnection();
     try {
@@ -57,12 +58,12 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
     }
   }
 
-  function mapRow(r: any): DirectMessage {
+  function mapRow(r: DbRow): DirectMessage {
     return {
       id: Number(r.id),
       remetente_id: Number(r.remetente_id),
       destinatario_id: Number(r.destinatario_id),
-      conteudo: r.conteudo,
+      conteudo: r.conteudo as string,
       enviado_em: String(r.enviado_em),
       lida: Boolean(r.lida),
       lida_em: r.lida_em ? String(r.lida_em) : null,
@@ -107,7 +108,7 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
     async listConversations(userId) {
       if (pool) {
         try {
-          const rows = await query<any>(
+          const rows = await query(
             `SELECT
                CASE WHEN remetente_id = ? THEN destinatario_id ELSE remetente_id END AS outro_usuario_id,
                conteudo, enviado_em, lida, destinatario_id
@@ -123,7 +124,7 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
             if (!byOther.has(otherId)) {
               byOther.set(otherId, {
                 outroUsuarioId: otherId,
-                ultimaMensagem: r.conteudo,
+                ultimaMensagem: r.conteudo as string,
                 enviadoEm: String(r.enviado_em),
                 naoLidas: 0,
               });
@@ -135,7 +136,9 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
           return Array.from(byOther.values())
             .map((c) => ({ ...c, naoLidas: unreadByOther.get(c.outroUsuarioId) || 0 }))
             .sort((a, b) => (a.enviadoEm < b.enviadoEm ? 1 : -1));
-        } catch {}
+        } catch (err) {
+          logWarn("chat_db_query_failed", err);
+        }
       }
       const byOther = new Map<number, ConversationSummary>();
       const sorted = Array.from(memoryMessages.values())
@@ -160,7 +163,7 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
       const limit = opts?.limit ?? 50;
       if (pool) {
         try {
-          const rows = await query<any>(
+          const rows = await query(
             `SELECT id, remetente_id, destinatario_id, conteudo,
                     DATE_FORMAT(enviado_em, '%Y-%m-%dT%H:%i:%sZ') AS enviado_em, lida,
                     DATE_FORMAT(lida_em, '%Y-%m-%dT%H:%i:%sZ') AS lida_em
@@ -173,7 +176,9 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
               : [userId, otherUserId, otherUserId, userId, limit],
           );
           return rows.map(mapRow).reverse();
-        } catch {}
+        } catch (err) {
+          logWarn("chat_db_query_failed", err);
+        }
       }
       return memoryConversationMessages(userId, otherUserId)
         .sort((a, b) => (a.enviado_em < b.enviado_em ? -1 : 1))
@@ -187,10 +192,10 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
 
       if (pool) {
         try {
-          const res: any = await query(
+          const res = asWriteResult(await query(
             `INSERT INTO mensagens_diretas (remetente_id, destinatario_id, conteudo) VALUES (?, ?, ?)`,
             [remetenteId, destinatarioId, texto],
-          );
+          ));
           return {
             id: Number(res.insertId),
             remetente_id: remetenteId,
@@ -199,7 +204,9 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
             enviado_em: new Date().toISOString(),
             lida: false,
           };
-        } catch {}
+        } catch (err) {
+          logWarn("chat_db_query_failed", err);
+        }
       }
       const m: DirectMessage = {
         id: nextId++,
@@ -221,7 +228,9 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
             [userId, otherUserId],
           );
           return;
-        } catch {}
+        } catch (err) {
+          logWarn("chat_db_query_failed", err);
+        }
       }
       for (const m of memoryMessages.values()) {
         if (m.destinatario_id === userId && m.remetente_id === otherUserId && !m.lida) {
@@ -234,12 +243,14 @@ export function createChatService(config: Config, pool: Pool | undefined, deps: 
     async getTotalUnreadCount(userId) {
       if (pool) {
         try {
-          const rows = await query<any>(
+          const rows = await query(
             "SELECT COUNT(*) as count FROM mensagens_diretas WHERE destinatario_id = ? AND lida = FALSE",
             [userId],
           );
           return Number(rows[0]?.count || 0);
-        } catch {}
+        } catch (err) {
+          logWarn("chat_db_query_failed", err);
+        }
       }
       let count = 0;
       for (const m of memoryMessages.values()) {

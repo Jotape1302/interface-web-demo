@@ -1,0 +1,8 @@
+.env
+data/*
+!data/.gitkeep
+publico/*
+!publico/.gitkeep
+__pycache__/
+.pytest_cache/
+.venv

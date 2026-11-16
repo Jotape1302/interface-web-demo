@@ -1,8 +1,9 @@
 -- =============================================================================
 -- 04-incidentes-schema.sql - INCIDENTES REPORTADOS PELOS OPERADORES (NORVIA)
 -- =============================================================================
--- Antes ficavam só no localStorage do navegador de quem reportava. O gateway também
--- cria esta tabela no bootstrap (incidents.ts) se ela ainda não existir.
+-- Reportes do botão "Reportar erro" das abas. Vão aos agentes Qwen (agente_incidente_id é o
+-- incidente que os recebeu no PC; agente_grupo, onde ele está). O gateway também cria esta tabela
+-- no bootstrap (incidents.ts) se ela ainda não existir.
 
 USE financeiro;
 
@@ -22,6 +23,10 @@ CREATE TABLE IF NOT EXISTS incidentes (
     operator_note TEXT NULL,
     resolved_at DATETIME NULL,
     resolved_by VARCHAR(255) NULL,
+    mensagem_erro TEXT NULL,
+    agente_incidente_id INT NULL,
+    agente_grupo VARCHAR(20) NULL,
     INDEX idx_incidentes_status (status),
-    INDEX idx_incidentes_execucao (execution_id)
+    INDEX idx_incidentes_execucao (execution_id),
+    INDEX idx_incidentes_agente (agente_incidente_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

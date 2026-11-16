@@ -7,12 +7,14 @@ LABEL maintainer="Engenharia de Software"
 LABEL description="Automação de extração de DANFEs e lançamento de contas a pagar no ERP Tiny"
 
 # Configurações do Python para container
-ENV PYTHONUNBUFFERED=1 \
+ENV TZ=America/Sao_Paulo \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
 # Instalação de dependências do sistema necessárias para Pyzbar, OpenCV, Tesseract OCR e Poppler (PDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
     tesseract-ocr \
     tesseract-ocr-por \
     tesseract-ocr-eng \
@@ -26,8 +28,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Instalação prévia de dependências Python para aproveitamento de cache de camadas Docker
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements.lock: versões exatas + hashes geradas do requirements.txt (que guarda só os
+# mínimos e o motivo de cada um). Para atualizar, ver scripts/README.md ("Lock das dependências").
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Criação de usuário de sistema sem privilégios (non-root) e diretórios operacionais
 RUN groupadd -r -g 1000 appuser && \
@@ -40,6 +44,10 @@ COPY --chown=appuser:appuser app/ /app/app/
 COPY --chown=appuser:appuser scripts/ /app/scripts/
 
 USER appuser
+
+# Modo API: GET /health na porta da API; modo daemon: só o processo vivo (app/healthcheck.py).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["python", "-m", "app.healthcheck"]
 
 # Execução padrão em modo daemon
 CMD ["python", "-m", "app.main"]

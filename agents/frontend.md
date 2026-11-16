@@ -35,9 +35,10 @@ Sua missão é traduzir os contratos de API (`frontend/lib/contracts.ts` e `fron
    - **Empty State:** explicação clara (ex.: "Nenhuma DANFE pendente de revisão");
    - **Success:** números em `Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' })`, datas `DD/MM/AAAA HH:mm` em `America/Sao_Paulo`.
 4. **Toda tela nova tem modo demo:** fixture determinística em `lib/demo-*.ts`; em demo, desativar pollings que só regenerariam fixtures (evita sobrescrever estado otimista, bug já visto em `chat.tsx`).
-5. **RBAC refletido na navegação:** rotas e áreas novas entram em `lib/areas.ts` (espelho de `backend/gateway/src/areas.ts`); a autorização real é do gateway, o frontend só esconde.
-6. **Login e telas de automação:** logotipo oficial, sem credenciais pré-preenchidas (`placeholder="Username/E-mail"`); telas de controle exibem o histórico das últimas execuções com status (sucesso, falha, executando).
-7. **Integração futura do mascote 3D:** só quando encomendada — Canvas lazy (sem SSR), `frameloop="demand"` em repouso, DPR limitado. Até lá, nada de dependências Three.js/R3F especulativas.
+5. **Revisão de NF-e:** cada item mostra a origem da categoria sugerida (`categoria_sugerida_origem`: histórico/Qwen/regra; com o Qwen, confiança e motivo); a forma de pagamento vem sugerida pelo backend (`forma_pagamento_sugerida`, abaixo do marcador do nome do arquivo) e o meio de pagamento da NFe acompanha a forma (`lib/danfe-review-helpers.ts`) até a pessoa mudar o meio à mão.
+6. **RBAC refletido na navegação:** rotas e áreas novas entram em `lib/areas.ts` (espelho de `backend/gateway/src/areas.ts`); a autorização real é do gateway, o frontend só esconde.
+7. **Login e telas de automação:** logotipo oficial, sem credenciais pré-preenchidas (`placeholder="Username/E-mail"`); telas de controle exibem o histórico das últimas execuções com status (sucesso, falha, executando).
+8. **Integração futura do mascote 3D:** só quando encomendada — Canvas lazy (sem SSR), `frameloop="demand"` em repouso, DPR limitado. Até lá, nada de dependências Three.js/R3F especulativas.
 
 ### O que NÃO fazer (Fronteiras Invioláveis):
 - **NÃO expor segredos no cliente:** nunca tokens privados, senhas ou certificados em `NEXT_PUBLIC_*`.

@@ -1,6 +1,26 @@
 import mariadb, { type Pool } from "mariadb";
 import type { Config } from "./config.js";
 import type { Metrics } from "./contracts.js";
+import { economia } from "./roi.js";
+
+/**
+ * Linha crua devolvida pelo driver mariadb num SELECT. Os `mapRow` de cada serviço convertem
+ * campo a campo para o tipo de domínio; `unknown` obriga essa conversão a ser explícita.
+ */
+export type DbRow = Record<string, unknown>;
+
+/** Resultado de INSERT/UPDATE/DELETE no driver mariadb (OkPacket). */
+export interface DbWriteResult {
+  affectedRows: number;
+  insertId: number | bigint;
+  warningStatus: number;
+}
+
+/** Em INSERT/UPDATE/DELETE o driver devolve o OkPacket no lugar do array de linhas. */
+export function asWriteResult(result: unknown): DbWriteResult {
+  return result as DbWriteResult;
+}
+
 export function metricsFromCounts(total: unknown, paid: unknown, reconciled: unknown): Metrics {
   function count(v: unknown): number {
     if (!["bigint", "number", "string"].includes(typeof v) || !/^\d+$/.test(String(v)))
@@ -14,13 +34,13 @@ export function metricsFromCounts(total: unknown, paid: unknown, reconciled: unk
     reconciledCount = count(reconciled);
   if (paidCount > totalQueue || reconciledCount > totalQueue)
     throw new Error("Contagens inconsistentes");
-  const hoursSaved = (paidCount * 5) / 60;
+  const { horas: hoursSaved, reais } = economia("accounts-payable", paidCount);
   return {
     totalQueue,
     paidCount,
     reconciledCount,
     hoursSaved,
-    estimatedSavings: hoursSaved * 11,
+    estimatedSavings: reais,
     automationRate: totalQueue ? (reconciledCount / totalQueue) * 100 : null,
   };
 }

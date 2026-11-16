@@ -55,7 +55,7 @@ function baseData(overrides: Partial<FinancialDashboardResponse> = {}): Financia
   };
 }
 
-test("flags despesas growing faster than receita as a warning", () => {
+void test("flags despesas growing faster than receita as a warning", () => {
   const data = baseData({
     summary: {
       ...baseData().summary,
@@ -69,7 +69,7 @@ test("flags despesas growing faster than receita as a warning", () => {
   assert.equal(found?.tone, "warning");
 });
 
-test("flags receita growing faster than despesas as positive", () => {
+void test("flags receita growing faster than despesas as positive", () => {
   const data = baseData({
     summary: { ...baseData().summary, receita_variacao_pct: 15, despesa_variacao_pct: 2 },
   });
@@ -79,7 +79,7 @@ test("flags receita growing faster than despesas as positive", () => {
   assert.equal(found?.tone, "positive");
 });
 
-test("negative resultado_liquido is always tone negative regardless of trend", () => {
+void test("negative resultado_liquido is always tone negative regardless of trend", () => {
   const data = baseData({
     summary: {
       ...baseData().summary,
@@ -93,7 +93,7 @@ test("negative resultado_liquido is always tone negative regardless of trend", (
   assert.equal(found?.tone, "negative");
 });
 
-test("overdue contas a pagar always surfaces a negative insight", () => {
+void test("overdue contas a pagar always surfaces a negative insight", () => {
   const data = baseData({
     contas_a_pagar: {
       vencido_valor: 8000,
@@ -112,7 +112,7 @@ test("overdue contas a pagar always surfaces a negative insight", () => {
   assert.match(found!.description, /3 conta/);
 });
 
-test("high inadimplencia rate triggers a warning", () => {
+void test("high inadimplencia rate triggers a warning", () => {
   const data = baseData({
     contas_a_receber: { ...baseData().contas_a_receber, taxa_inadimplencia_pct: 12.5 },
   });
@@ -120,7 +120,7 @@ test("high inadimplencia rate triggers a warning", () => {
   assert.ok(insights.find((i) => i.id === "inadimplencia"));
 });
 
-test("worst company with negative resultado surfaces a negative insight", () => {
+void test("worst company with negative resultado surfaces a negative insight", () => {
   const data = baseData({
     por_empresa: [
       { account_id: "a", label: "Empresa A", receita: 100, despesa: 50, resultado_liquido: 50 },
@@ -132,7 +132,7 @@ test("worst company with negative resultado surfaces a negative insight", () => 
   assert.ok(insights.find((i) => i.id === "pior-empresa" && i.title.includes("Empresa B")));
 });
 
-test("insights are sorted negative/warning before positive/neutral", () => {
+void test("insights are sorted negative/warning before positive/neutral", () => {
   const data = baseData({
     summary: { ...baseData().summary, receita_variacao_pct: 15, despesa_variacao_pct: 2 },
     contas_a_pagar: {
@@ -152,7 +152,7 @@ test("insights are sorted negative/warning before positive/neutral", () => {
   assert.ok(negativeIdx < positiveIdx);
 });
 
-test("caps the number of insights returned", () => {
+void test("caps the number of insights returned", () => {
   const data = baseData({
     categoria_maior_alta: { categoria_nome: "Comissões", variacao_pct: 40 },
     concentracao_despesas_top3_pct: 80,

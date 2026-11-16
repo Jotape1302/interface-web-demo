@@ -69,6 +69,9 @@ test("Histórico de baixas: grava uma linha por conta com o resultado certo de c
         batches.push({ sql: opts.sql, rows });
       },
       query: async () => [],
+      beginTransaction: async () => undefined,
+      commit: async () => undefined,
+      rollback: async () => undefined,
       release: () => undefined,
     }),
   } as unknown as Pool;
@@ -121,7 +124,7 @@ function fakePool(respond: (sql: string, values: unknown[]) => unknown[]) {
   return { pool, calls, releases: () => releases };
 }
 
-test("Painel Contas a Pagar: ROI vem das baixas com sucesso (5 min por conta, R$ 11/h)", async () => {
+test("Painel Contas a Pagar: ROI vem das baixas com sucesso (5 min manual − 0,5 min atual por conta, R$ 11/h)", async () => {
   const { pool, releases } = fakePool((sql) => {
     if (sql.includes("COUNT(*)")) return [{ total: 13n, sucessos: "12" }];
     return [
@@ -136,8 +139,8 @@ test("Painel Contas a Pagar: ROI vem das baixas com sucesso (5 min por conta, R$
   const snap = await createReconciliationHistoryService(readConfig(), pool).snapshot();
   assert.equal(snap.metrics.totalQueue, 13);
   assert.equal(snap.metrics.paidCount, 12);
-  assert.equal(snap.metrics.hoursSaved, 1);
-  assert.equal(snap.metrics.estimatedSavings, 11);
+  assert.equal(snap.metrics.hoursSaved, 0.9);
+  assert.equal(snap.metrics.estimatedSavings, 9.9);
   assert.deepEqual(snap.approvals, []);
   assert.equal(snap.failures[0]!.beneficiary, "Conta #55");
   assert.equal(snap.failures[0]!.amount, "150.50");
@@ -348,4 +351,53 @@ test("Histórico: lote pendente é fechado conta a conta e o que ficou sem resul
   assert.equal(updates[1]!.values[0], "erro");
   assert.match(String(updates[1]!.values[1]), /confira no Tiny/);
   assert.equal(updates[1]!.values[2], 2);
+});
+
+test("DB-03: duplicata de baixa com sucesso (1062) vira 'já registrada' e não derruba as demais linhas", async () => {
+  const gravadas: unknown[][] = [];
+  let rollbacks = 0;
+  const pool = {
+    getConnection: async () => ({
+      beginTransaction: async () => undefined,
+      commit: async () => undefined,
+      rollback: async () => {
+        rollbacks += 1;
+      },
+      batch: async () => {
+        throw Object.assign(new Error("Duplicate entry"), { errno: 1062, code: "ER_DUP_ENTRY" });
+      },
+      query: async (_opts: { sql: string }, row: unknown[]) => {
+        // conta 20 (empresa revesta) já tem sucesso registrado
+        if (row[4] === 20) throw Object.assign(new Error("Duplicate entry"), { errno: 1062, code: "ER_DUP_ENTRY" });
+        gravadas.push(row);
+        return { affectedRows: 1 };
+      },
+      release: () => undefined,
+    }),
+  } as unknown as Pool;
+  const history = createReconciliationHistoryService(readConfig(), pool);
+  const avisos: string[] = [];
+  const original = console.warn;
+  console.warn = (...a: unknown[]) => void avisos.push(String(a[0]));
+  try {
+    await history.recordBatch({
+      usuarioId: 1,
+      usuarioNome: "Ana",
+      itens: [
+        { empresa: "fabrilux", conta_pagar_id: 10, valor_pago: 1 },
+        { empresa: "revesta", conta_pagar_id: 20, valor_pago: 2 },
+        { empresa: "fabrilux", conta_pagar_id: 30, valor_pago: 3 },
+      ],
+      resultados: [
+        { conta_pagar_id: 10, empresa: "fabrilux", status: "sucesso" },
+        { conta_pagar_id: 20, empresa: "revesta", status: "sucesso" },
+        { conta_pagar_id: 30, empresa: "fabrilux", status: "sucesso" },
+      ],
+    });
+  } finally {
+    console.warn = original;
+  }
+  assert.deepEqual(gravadas.map((r) => r[4]), [10, 30], "as outras linhas foram gravadas");
+  assert.equal(rollbacks, 1, "o batch parcial é desfeito antes de regravar linha a linha");
+  assert.ok(avisos.some((a) => a.includes("baixa_historico_ja_registrada")));
 });

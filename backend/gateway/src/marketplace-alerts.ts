@@ -27,6 +27,17 @@ export interface AlertDeps {
 }
 
 /**
+ * GW-08: no boot, posiciona o cursor no último aviso existente SEM notificar, para um restart
+ * do gateway não reenviar avisos antigos. Falha de leitura deixa o cursor nulo (vale a janela
+ * inicial de `JANELA_INICIAL_MS` na primeira checagem).
+ */
+export async function primeAlertCursor(deps: Pick<AlertDeps, "readAvisos" | "cursor">): Promise<void> {
+  if (deps.cursor.ultimoId !== null) return;
+  const { ultimo_id } = await deps.readAvisos(0);
+  deps.cursor.ultimoId = Math.max(ultimo_id, 0);
+}
+
+/**
  * Avisos de uma automação (fila com id crescente no Python) -> notificações de quem tem o "ver"
  * da aba do aviso (`permissionFor`) e dos admins. Usado pelo Marketplace e pela conciliação
  * Mercado Livre (Financeiro). Setor não conta.

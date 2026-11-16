@@ -1,6 +1,7 @@
 import {
   actorHeaders,
   automationFetch,
+  callAutomation,
   createAutomationUrlResolver,
   upstreamError,
   type ActorContext,
@@ -56,8 +57,11 @@ export function contagemCandidateUrls(preferred?: string): string[] {
 }
 
 export function createStockTinyClient(opts: { baseUrl?: string; fetchImpl?: typeof fetch } = {}): StockTinyClient {
-  const fetchImpl = opts.fetchImpl ?? automationFetch;
-  const resolveUrl = createAutomationUrlResolver(contagemCandidateUrls(opts.baseUrl), fetchImpl);
+  const rawFetch = opts.fetchImpl ?? automationFetch;
+  const resolveUrl = createAutomationUrlResolver(contagemCandidateUrls(opts.baseUrl), rawFetch);
+  // Circuit breaker "contagem-estoque": rede/timeout/5xx contam; 4xx do serviço não.
+  const fetchImpl = ((input: string | URL | Request, init?: RequestInit) =>
+    callAutomation("contagem-estoque", () => rawFetch(input, init), { invalidate: resolveUrl.invalidate })) as typeof fetch;
   return {
     async consultar(sku, actor) {
       const base = await resolveUrl();

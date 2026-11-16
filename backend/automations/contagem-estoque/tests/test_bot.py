@@ -338,3 +338,15 @@ def test_prendedor_rosa_registra_fardo_de_10(tmp_path: Path):
     (reg,) = registros(tmp_path).values()
     assert reg["cor"] == "rosa" and reg["unidades_por_fardo"] == 10 and reg["quantidade_detectada"] == 3
     assert "rosa choque: 10 un. por fardo = 30 un." in message.reply_photo.await_args.kwargs["caption"]
+
+
+def test_falha_de_rede_no_polling_fica_em_warning(caplog):
+    from telegram.error import BadRequest, NetworkError
+
+    from app.bot import _log_unhandled
+
+    with caplog.at_level("WARNING", logger="contagem_estoque.bot"):
+        asyncio.run(_log_unhandled(None, SimpleNamespace(error=NetworkError("Bad Gateway"))))
+        asyncio.run(_log_unhandled(None, SimpleNamespace(error=BadRequest("chat not found"))))
+        asyncio.run(_log_unhandled(object(), SimpleNamespace(error=NetworkError("Bad Gateway"))))
+    assert [r.levelname for r in caplog.records] == ["WARNING", "ERROR", "ERROR"]

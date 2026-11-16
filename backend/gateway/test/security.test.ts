@@ -204,6 +204,9 @@ test("Histórico de baixas grava os valores efetivos devolvidos pela automação
     getConnection: async () => ({
       batch: async (_o: unknown, rows: unknown[][]) => void batches.push(rows),
       query: async () => [],
+      beginTransaction: async () => undefined,
+      commit: async () => undefined,
+      rollback: async () => undefined,
       release: () => undefined,
     }),
   } as unknown as Pool;
@@ -451,7 +454,7 @@ test("GW-16: INTERNAL_API_KEY confere em tempo constante; incidentes filtrados p
   const rep = await fetch(`${base}/api/incidents`, {
     method: "POST",
     headers: withKey({ ...admin, ...json }),
-    body: JSON.stringify({ executionId: "e1", automationId: "danfe-tiny" }),
+    body: JSON.stringify({ executionId: "e1", automationId: "danfe-tiny", errorMessage: "Falha ao lançar no Tiny" }),
   });
   assert.equal(rep.status, 201);
   const forAdmin = (await (await fetch(`${base}/api/incidents`, { headers: withKey(admin) })).json()) as any[];
@@ -475,7 +478,8 @@ test("GW-16: login_falhou não grava o texto digitado quando não é um usuário
 test("SEC-01: NODE_ENV=production sem DATA_MODE não sobe (sem fail-open para demo)", () => {
   assert.throws(() => readConfig({ NODE_ENV: "production" }), /DATA_MODE obrigatório/);
   assert.throws(() => readConfig({ NODE_ENV: "production", DATA_MODE: " " }), /DATA_MODE obrigatório/);
-  assert.equal(readConfig({ NODE_ENV: "production", DATA_MODE: "demo" }).mode, "demo");
+  // SEC-10: produção só com DATA_MODE=live explícito.
+  assert.throws(() => readConfig({ NODE_ENV: "production", DATA_MODE: "demo" }), /NODE_ENV=production/);
   assert.equal(readConfig({}).mode, "demo");
 });
 
@@ -514,4 +518,31 @@ test("SEC-04: conciliação ML e dashboard financeiro têm permissão própria (
   assert.equal((await fetch(`${base}/api/financial-dashboard/status`, { headers: h })).status, 403);
   // Rota inexistente sob uma aba: negada por padrão (sem mapeamento), mesmo com sessão.
   assert.equal((await fetch(`${base}/api/financial-dashboard/summary`, { headers: h })).status, 404);
+});
+
+test("SEC-06: exportar lançamentos da conciliação ML exige conciliacao_ml:baixar (403 só com ver)", async (t) => {
+  const { base, admin, login } = await startApi(t);
+  const created = await fetch(`${base}/api/admin/users`, {
+    method: "POST",
+    headers: { ...admin, ...json },
+    body: JSON.stringify({
+      nome: "Fin Ver",
+      email: "finver@norvia.example",
+      setor: "Financeiro",
+      senha: "senha-forte-123",
+      grants: ["conciliacao_ml:ver"],
+    }),
+  });
+  assert.equal(created.status, 201);
+  const h = { Authorization: `Bearer ${((await (await login("finver", "senha-forte-123")).json()) as any).token}` };
+  const alvo = `${base}/api/ml-reconciliation/analises/a1/arquivos/lancamentos/exportar`;
+  const r = await fetch(alvo, { method: "POST", headers: { ...h, ...json }, body: JSON.stringify({ incluir_exportados: false }) });
+  assert.equal(r.status, 403);
+  assert.equal(((await r.json()) as any).permission, "conciliacao_ml:baixar");
+  // Com a permissão a requisição chega à rota (o motor financeiro não está no ar: 502, nunca 403/405).
+  const comPerm = await fetch(alvo, { method: "POST", headers: { ...admin, ...json }, body: "{}" });
+  assert.ok([502, 503].includes(comPerm.status), String(comPerm.status));
+  // GET de lançamentos nunca gera a planilha, nem para quem pode ver.
+  const get = await fetch(`${base}/api/ml-reconciliation/analises/a1/arquivos/lancamentos`, { headers: h });
+  assert.equal(get.status, 405);
 });

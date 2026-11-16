@@ -25,6 +25,8 @@ regexes = [
   # Tokens falsos dos testes (tok_test, tok_abc…, test-token, test_token…).
   '''^tok_[A-Za-z0-9_-]{0,40}$''',
   '''^test[-_][A-Za-z0-9_-]{0,40}$''',
+  # Chave interna fixa dos testes do automacoes-marketing (passa dos 40 caracteres acima).
+  '''^test-internal-key-marketing-32-chars-long-secret$''',
   # Placeholders dos .env.example ("seu_..._aqui", "norvia_pass").
   '''^seu_[a-z0-9_]+$''',
   '''^norvia_pass$''',

@@ -4,6 +4,7 @@ import { TinyLogo, InterLogo } from "@/components/ui/brand-logos";
 import type { Account } from "@/lib/contracts";
 import { money } from "@/lib/formatters";
 import { Empty, SourceError } from "./panel-state";
+import { ReportarErro } from "@/components/reportar-erro";
 
 export default function Failures({
   accounts,
@@ -45,7 +46,7 @@ export default function Failures({
         loading ? (
           <div className="table-loading">Carregando falhas…</div>
         ) : (
-          <SourceError message={error} />
+          <SourceError message={error} reportar={{ automationId: "accounts-payable", executionId: "falhas-e-bloqueios" }} />
         )
       ) : accounts.length === 0 ? (
         <Empty>Nenhuma falha de negócio registrada.</Empty>
@@ -90,6 +91,13 @@ export default function Failures({
                 <pre>
                   {account.errorLog ?? "A origem não forneceu log_erro para este registro."}
                 </pre>
+                <ReportarErro
+                  className="mt-2"
+                  automationId="accounts-payable"
+                  executionId={`conta-${account.id}`}
+                  stoppedNode={account.stoppedNode ?? undefined}
+                  errorMessage={account.errorLog ?? `Conta ${account.id} de ${account.beneficiary} falhou sem log de erro`}
+                />
               </div>
             </details>
           ))}

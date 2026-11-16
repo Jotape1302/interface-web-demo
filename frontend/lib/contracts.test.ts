@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolveApiBaseUrl } from './contracts';
 
-test('resolveApiBaseUrl em ambiente Node/SSR usa fallback ou valor configurado', () => {
+/** `window` simulado: os testes rodam no Node, sem DOM. */
+const global = globalThis as { window?: unknown };
+
+void test('resolveApiBaseUrl em ambiente Node/SSR usa fallback ou valor configurado', () => {
   const originalEnv = process.env.NEXT_PUBLIC_API_BASE_URL;
   delete process.env.NEXT_PUBLIC_API_BASE_URL;
 
@@ -16,11 +19,11 @@ test('resolveApiBaseUrl em ambiente Node/SSR usa fallback ou valor configurado',
   }
 });
 
-test('resolveApiBaseUrl no navegador sob HTTPS e subpath /automacoes utiliza a origin com /automacoes', () => {
-  const originalWindow = (globalThis as any).window;
+void test('resolveApiBaseUrl no navegador sob HTTPS e subpath /automacoes utiliza a origin com /automacoes', () => {
+  const originalWindow = global.window;
 
   try {
-    (globalThis as any).window = {
+    global.window = {
       location: {
         protocol: 'https:',
         hostname: 'servidor.norvia.example',
@@ -33,15 +36,15 @@ test('resolveApiBaseUrl no navegador sob HTTPS e subpath /automacoes utiliza a o
     // Sob HTTPS na VPS com Nginx servindo em /automacoes, a base deve ser https://servidor.norvia.example/automacoes
     assert.equal(resolveApiBaseUrl(), 'https://servidor.norvia.example/automacoes');
   } finally {
-    (globalThis as any).window = originalWindow;
+    global.window = originalWindow;
   }
 });
 
-test('resolveApiBaseUrl no navegador sob porta padrao HTTP (80) utiliza a origin do proxy', () => {
-  const originalWindow = (globalThis as any).window;
+void test('resolveApiBaseUrl no navegador sob porta padrao HTTP (80) utiliza a origin do proxy', () => {
+  const originalWindow = global.window;
 
   try {
-    (globalThis as any).window = {
+    global.window = {
       location: {
         protocol: 'http:',
         hostname: 'servidor.norvia.example',
@@ -53,15 +56,15 @@ test('resolveApiBaseUrl no navegador sob porta padrao HTTP (80) utiliza a origin
 
     assert.equal(resolveApiBaseUrl(), 'http://servidor.norvia.example/automacoes');
   } finally {
-    (globalThis as any).window = originalWindow;
+    global.window = originalWindow;
   }
 });
 
-test('resolveApiBaseUrl no navegador via IP de rede local e porta customizada direciona para :3100', () => {
-  const originalWindow = (globalThis as any).window;
+void test('resolveApiBaseUrl no navegador via IP de rede local e porta customizada direciona para :3100', () => {
+  const originalWindow = global.window;
 
   try {
-    (globalThis as any).window = {
+    global.window = {
       location: {
         protocol: 'http:',
         hostname: '192.168.50.20',
@@ -72,15 +75,15 @@ test('resolveApiBaseUrl no navegador via IP de rede local e porta customizada di
 
     assert.equal(resolveApiBaseUrl(), 'http://192.168.50.20:3100');
   } finally {
-    (globalThis as any).window = originalWindow;
+    global.window = originalWindow;
   }
 });
 
-test('resolveApiBaseUrl no navegador via localhost direciona para http://localhost:3100', () => {
-  const originalWindow = (globalThis as any).window;
+void test('resolveApiBaseUrl no navegador via localhost direciona para http://localhost:3100', () => {
+  const originalWindow = global.window;
 
   try {
-    (globalThis as any).window = {
+    global.window = {
       location: {
         protocol: 'http:',
         hostname: 'localhost',
@@ -91,15 +94,15 @@ test('resolveApiBaseUrl no navegador via localhost direciona para http://localho
 
     assert.equal(resolveApiBaseUrl(), 'http://localhost:3100');
   } finally {
-    (globalThis as any).window = originalWindow;
+    global.window = originalWindow;
   }
 });
 
-test('resolveApiBaseUrl respeita URL remota customizada explicita', () => {
-  const originalWindow = (globalThis as any).window;
+void test('resolveApiBaseUrl respeita URL remota customizada explicita', () => {
+  const originalWindow = global.window;
 
   try {
-    (globalThis as any).window = {
+    global.window = {
       location: {
         protocol: 'https:',
         hostname: 'servidor.norvia.example',
@@ -110,6 +113,6 @@ test('resolveApiBaseUrl respeita URL remota customizada explicita', () => {
 
     assert.equal(resolveApiBaseUrl('https://custom-gateway.empresa.com'), 'https://custom-gateway.empresa.com');
   } finally {
-    (globalThis as any).window = originalWindow;
+    global.window = originalWindow;
   }
 });

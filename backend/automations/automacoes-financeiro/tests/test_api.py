@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.api import app
 from app.audit import record_audit_error
 from app.config import settings
-from app.nfe_client import MockNFeProvider, NFeData, NFeDuplicate
+from app.nfe_client import MockNFeProvider, NFeData, NFeProviderError
 from app.nfe_items import NFeItem
 from app.review_store import stage_for_review
 from app.scanner import ScanResult
@@ -55,9 +55,9 @@ def test_process_batch_empty(client):
     assert response.status_code == 422 or response.status_code == 400
 
 
-@patch("app.api.DANFEScanner")
-@patch("app.api.get_nfe_provider")
-@patch("app.api.TinyClient")
+@patch("app.routers.danfe.DANFEScanner")
+@patch("app.routers.danfe.get_nfe_provider")
+@patch("app.routers.danfe.TinyClient")
 def test_process_batch_success(mock_tiny_class, mock_nfe_class, mock_scanner_class, client, tmp_path, monkeypatch):
     """
     A esteira agora pausa antes do lançamento: process-batch só escaneia, consulta
@@ -110,9 +110,9 @@ def test_process_batch_success(mock_tiny_class, mock_nfe_class, mock_scanner_cla
     assert list((tmp_path / "pending_review").glob("*.review.json"))
 
 
-@patch("app.api.DANFEScanner")
-@patch("app.api.get_nfe_provider")
-@patch("app.api.already_launched_in_tiny", return_value=True)
+@patch("app.routers.danfe.DANFEScanner")
+@patch("app.routers.danfe.get_nfe_provider")
+@patch("app.routers.danfe.already_launched_in_tiny", return_value=True)
 def test_process_batch_skips_note_already_launched_in_tiny(
     mock_already_launched, mock_nfe_class, mock_scanner_class, client, tmp_path, monkeypatch
 ):
@@ -204,7 +204,22 @@ def test_sefaz_status_endpoint(client, tmp_path, monkeypatch):
     assert data["pending_review_count"] == 0
 
 
-@patch("app.api.run_daily_scan")
+def test_sefaz_status_conta_pendentes_sem_ler_os_arquivos(client, tmp_path, monkeypatch):
+    """Incidente #35: o status só conta os .review.json; não abre nem interpreta nenhum."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    pendentes = tmp_path / "pending_review"
+    monkeypatch.setattr(settings, "PENDING_REVIEW_DIR", pendentes)
+    settings.ensure_directories()
+    for i in range(3):
+        (pendentes / f"nota{i}.xml.review.json").write_text("{ilegível", encoding="utf-8")
+
+    with patch("app.review_store._load_record", side_effect=AssertionError("não deveria ler")):
+        response = client.get("/api/v1/danfe/sefaz-status")
+    assert response.status_code == 200
+    assert response.json()["pending_review_count"] == 3
+
+
+@patch("app.routers.danfe.run_daily_scan")
 def test_scan_sefaz_endpoint_triggers_scan(mock_run_daily_scan, client, tmp_path, monkeypatch):
     """
     O botão 'Rodar agora' dispara a varredura direta na SEFAZ de forma assíncrona
@@ -254,7 +269,7 @@ def test_get_tiny_categories(client):
 
 
 def test_get_tiny_categories_dynamic_from_account(client):
-    with patch("app.api.TinyClient") as mock_tiny_cls:
+    with patch("app.routers.danfe.TinyClient") as mock_tiny_cls:
         instance = mock_tiny_cls.return_value
         instance.resolve_token_for_cnpj.return_value = ("eyJh_v3_jwt", "norvia_campinas")
         instance.list_categorias_receita_despesa_v3.return_value = [
@@ -269,7 +284,7 @@ def test_get_tiny_categories_dynamic_from_account(client):
         assert data[0]["label"] == "Despesas Operacionais → Materiais de Limpeza"
 
 
-@patch("app.api.TinyClient")
+@patch("app.routers.danfe.TinyClient")
 def test_confirm_lancamento_groups_by_category(mock_tiny_class, client, tmp_path, monkeypatch):
     """
     Itens da mesma categoria devem virar 1 único lançamento agrupado; categorias
@@ -331,6 +346,9 @@ def test_confirm_lancamento_groups_by_category(mock_tiny_class, client, tmp_path
     data = response.json()
     assert data["status"] == "success"
     assert len(data["grupos"]) == 2  # Materiais de Limpeza (2 itens) + Material de Escritório (1 item)
+    # Registro de treino: a nota como a revisão mostrou e a sugestão de antes da escolha humana.
+    assert len(data["treino"]["contexto"]["itens"]) == 3
+    assert data["treino"]["sugestao"]["2"]["categoria_id"] == "484437483"
     total_lancado = sum(g["valor_total"] for g in data["grupos"])
     assert round(total_lancado, 2) == 300.00
     assert mock_tiny.lancar_grupo_categorizado.call_count == 2
@@ -344,7 +362,7 @@ def test_confirm_lancamento_groups_by_category(mock_tiny_class, client, tmp_path
     assert list((tmp_path / "processed").glob("*.pdf"))
 
 
-@patch("app.api.TinyClient")
+@patch("app.routers.danfe.TinyClient")
 def test_confirm_lancamento_parcelado_gera_n_contas_por_categoria(mock_tiny_class, client, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "PROCESSED_DIR", tmp_path / "processed")
     monkeypatch.setattr(settings, "PENDING_REVIEW_DIR", tmp_path / "pending_review")
@@ -396,7 +414,40 @@ def test_confirm_lancamento_parcelado_gera_n_contas_por_categoria(mock_tiny_clas
     ).status_code == 422
 
 
-@patch("app.api.TinyClient")
+@patch("app.routers.danfe.TinyClient")
+def test_confirm_lancamento_recusa_cadastral_e_warning_sem_incidente(mock_tiny_class, client, tmp_path, monkeypatch, caplog):
+    """Fornecedor sem cadastro no Tiny (inc. #19): a recusa vai para o card e a auditoria, mas em
+    WARNING — o coletor de incidentes só pega ERROR, e não há o que os agentes corrigirem no código."""
+    import logging
+
+    from app.tiny_client import TinyCadastroError
+
+    for pasta in ("PROCESSED_DIR", "PENDING_REVIEW_DIR", "FAILED_DIR"):
+        monkeypatch.setattr(settings, pasta, tmp_path / pasta.lower())
+    settings.ensure_directories()
+    nfe_data = NFeData(chave="35230999999999000199550010000009998000000998", numero_nota="998",
+                       data_emissao=date(2026, 9, 1), emitente_nome="PRATA TESTE LTDA",
+                       emitente_cnpj="99999999000199", valor_total=Decimal("100.00"))
+    original_file = tmp_path / "input_cadastro.pdf"
+    original_file.write_bytes(b"%PDF dummy")
+    stage_for_review(original_file, nfe_data, [NFeItem(item_id="1", descricao="Item", valor_total=Decimal("100.00"))],
+                     categoria_por_item={"1": "480897321"})
+    mock_tiny = MagicMock()
+    mock_tiny.lancar_grupo_categorizado.side_effect = TinyCadastroError(
+        "Fornecedor 'PRATA TESTE LTDA' não encontrado nos contatos do Tiny ERP.")
+    mock_tiny_class.return_value = mock_tiny
+
+    with caplog.at_level(logging.WARNING):
+        resp = client.post("/api/v1/danfe/confirm-lancamento",
+                           json={"chave": nfe_data.chave, "itens": [{"item_id": "1", "categoria_id": "480897321"}]})
+    assert resp.json()["status"] == "partial_error"
+    meus = [r for r in caplog.records if nfe_data.chave in r.getMessage()]
+    assert meus and all(r.levelno == logging.WARNING for r in meus)
+    pendente = client.get("/api/v1/danfe/pending-review").json()["pending"][0]
+    assert "não encontrado nos contatos" in pendente["last_error"]
+
+
+@patch("app.routers.danfe.TinyClient")
 def test_confirm_lancamento_partial_failure_keeps_pending(mock_tiny_class, client, tmp_path, monkeypatch):
     """Se um grupo falhar no Tiny, a nota permanece em pending_review/ para nova tentativa."""
     monkeypatch.setattr(settings, "PROCESSED_DIR", tmp_path / "processed")
@@ -474,6 +525,27 @@ def test_confirm_lancamento_partial_failure_keeps_pending(mock_tiny_class, clien
     assert hist_data["history"][0]["audit_status"] == "error"
     assert hist_data["history"][0]["chave_acesso"] == nfe_data.chave
 
+    # A recusa volta na listagem (o card mostra mesmo depois de recarregar a tela)
+    pendente = client.get("/api/v1/danfe/pending-review").json()["pending"][0]
+    assert "Fornecedor não encontrado no Tiny" in pendente["last_error"]
+    assert pendente["last_error_at"]
+
+    # Reenvio que dá certo limpa o erro
+    mock_tiny.lancar_grupo_categorizado.side_effect = lambda nfe, grupo, idx, total, **kw: TinyContaResult(
+        conta_id=3000 + idx, nro_documento=f"999-{idx}", valor=grupo.valor_total,
+        vencimento=nfe.data_emissao, situacao="aberto", is_duplicate=False
+    )
+    reenvio = client.post("/api/v1/danfe/confirm-lancamento", json={
+        "chave": nfe_data.chave,
+        "itens": [{"item_id": "1", "categoria_id": "480897321"}, {"item_id": "2", "categoria_id": "484437789"}],
+    })
+    assert reenvio.json()["status"] == "success"
+    # A falha do primeiro envio sai das pendências sozinha
+    hist = client.get("/api/v1/danfe/history").json()["history"]
+    assert hist[0]["audit_status"] == "error" and hist[0]["resolved_at"]
+    confirmada = client.get("/api/v1/danfe/notas", params={"status_filter": "confirmed"}).json()["notas"][0]
+    assert confirmada["last_error"] is None
+
 
 def test_confirm_lancamento_unknown_chave_returns_404(client, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "PENDING_REVIEW_DIR", tmp_path / "pending_review")
@@ -510,7 +582,10 @@ def test_archive_and_restore_nota(client, tmp_path, monkeypatch):
 
     archive_res = client.post("/api/v1/danfe/archive", json={"chave": nfe_data.chave})
     assert archive_res.status_code == 200
-    assert archive_res.json() == {"chave": nfe_data.chave, "status": "archived"}
+    arquivada = archive_res.json()
+    assert (arquivada["chave"], arquivada["status"]) == (nfe_data.chave, "archived")
+    # Registro de treino (o gateway tira antes de responder ao painel): a nota como a revisão mostrou.
+    assert arquivada["treino"]["contexto"]["chave"] == nfe_data.chave and arquivada["treino"]["contexto"]["itens"]
 
     pending_res = client.get("/api/v1/danfe/notas", params={"status_filter": "pending"})
     assert pending_res.json()["total"] == 0
@@ -550,7 +625,7 @@ def test_restore_unknown_chave_returns_404(client, tmp_path, monkeypatch):
     assert response.status_code == 404
 
 
-@patch("app.api.TinyClient")
+@patch("app.routers.danfe.TinyClient")
 def test_notas_endpoint_lists_confirmed_after_lancamento(mock_tiny_class, client, tmp_path, monkeypatch):
     """Depois de confirmada, a nota deve aparecer em status=confirmed com os itens preservados."""
     monkeypatch.setattr(settings, "PROCESSED_DIR", tmp_path / "processed")
@@ -651,7 +726,7 @@ def test_reconciliacao_preview_endpoint(client):
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado", "mensagem": "ok"}), \
             patch.object(InterClient, "get_extrato", return_value=[pagamento]), \
             patch.object(TinyClient, "list_contas_pagar_v3", side_effect=_contas_por_situacao({"aberto": [conta_tiny]})), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         res = client.post(
@@ -675,7 +750,7 @@ def test_reconciliacao_preview_inter_desconectado_um_aviso_por_empresa(client):
     diag = {"status": "certificados_sem_permissao", "mensagem": "Certificados mTLS sem permissão de leitura."}
     with patch.object(InterClient, "check_credentials_status", return_value=diag), \
             patch.object(InterClient, "get_extrato") as get_extrato, \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", None):
         token_repo.return_value.is_configured.return_value = False
         res = client.post("/api/v1/reconciliacao/preview", json={"empresa": "fabrilux"})
@@ -696,7 +771,7 @@ def test_reconciliacao_preview_tiny_recusando_vira_aviso_e_nao_zero_silencioso(c
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado"}), \
             patch.object(TinyOAuthManager, "is_configured", return_value=False), \
             patch.object(InterClient, "get_extrato", return_value=[]), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"), \
             patch("requests.get", return_value=recusado), \
             patch("time.sleep"):
@@ -712,7 +787,7 @@ def test_reconciliacao_preview_sem_token_do_tiny_avisa(client):
 
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado"}), \
             patch.object(InterClient, "get_extrato", return_value=[]), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", None):
         token_repo.return_value.is_configured.return_value = False
         res = client.post("/api/v1/reconciliacao/preview", json={"empresa": "fabrilux", "forcar_atualizacao": True})
@@ -740,7 +815,7 @@ _BAIXA_PAYLOAD = {
 def _apto_teste(empresa="fabrilux", conta_id=12345, inter_id="TX-1", valor="150.50", juros="0", desconto="0", valor_tiny=None):
     """Registra um casamento apto como a prévia faria (a baixa só aceita o que a prévia guardou)."""
     from types import SimpleNamespace
-    from app import api as api_module
+    from app.routers import reconciliacao as api_module
 
     api_module._registrar_aptos([SimpleNamespace(
         empresa=empresa, conta_pagar_id=conta_id, inter_transacao_id=inter_id,
@@ -762,7 +837,7 @@ def test_reconciliacao_baixar_endpoint(client):
     with patch.object(TinyClient, "baixar_conta_pagar_v3", return_value=True) as baixar, \
             patch.object(TinyClient, "obter_conta_pagar_v3", return_value=_conta_tiny()), \
             patch.object(TinyClient, "resolve_conta_origem_inter", return_value=42) as resolve_conta, \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         res = client.post("/api/v1/reconciliacao/baixar", json=_BAIXA_PAYLOAD)
@@ -783,7 +858,7 @@ def test_reconciliacao_baixar_sem_conta_inter_nao_baixa_na_conta_padrao(client):
     with patch.object(TinyClient, "baixar_conta_pagar_v3") as baixar, \
             patch.object(TinyClient, "obter_conta_pagar_v3", return_value=_conta_tiny()), \
             patch.object(TinyClient, "resolve_conta_origem_inter", return_value=None), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         res = client.post("/api/v1/reconciliacao/baixar", json=_BAIXA_PAYLOAD)
@@ -800,7 +875,7 @@ def test_reconciliacao_baixar_sem_token_nao_finge_sucesso(client):
 
     _apto_teste()
     with patch.object(TinyClient, "baixar_conta_pagar_v3") as baixar, \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", None):
         token_repo.return_value.is_configured.return_value = False
         res = client.post("/api/v1/reconciliacao/baixar", json=_BAIXA_PAYLOAD)
@@ -847,7 +922,7 @@ def test_reconciliacao_preview_separa_atrasadas_pagas_e_transferencias(client):
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado", "mensagem": "ok"}), \
             patch.object(InterClient, "get_extrato", return_value=extrato), \
             patch.object(TinyClient, "list_contas_pagar_v3", side_effect=_contas_por_situacao(contas)), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         res = client.post(
@@ -885,7 +960,7 @@ def test_reconciliacao_job_preview_roda_em_segundo_plano(client):
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado", "mensagem": "ok"}), \
             patch.object(InterClient, "get_extrato", return_value=[]), \
             patch.object(TinyClient, "list_contas_pagar_v3", side_effect=_contas_por_situacao({})) as listar, \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         inicio = client.post("/api/v1/reconciliacao/jobs/preview", json={"empresa": "fabrilux", "data_inicio": "2026-09-01", "data_fim": "2026-09-28"})
@@ -910,10 +985,16 @@ def test_reconciliacao_job_baixa_e_job_inexistente(client):
     with patch.object(TinyClient, "baixar_conta_pagar_v3", return_value=True), \
             patch.object(TinyClient, "obter_conta_pagar_v3", return_value=_conta_tiny()), \
             patch.object(TinyClient, "resolve_conta_origem_inter", return_value=42), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
-        job = _aguardar_job(client, client.post("/api/v1/reconciliacao/jobs/baixar", json=_BAIXA_PAYLOAD).json()["job_id"])
+        _apto_teste(conta_id=999, inter_id="TX-9")  # sugerido e não escolhido
+        inicio = client.post("/api/v1/reconciliacao/jobs/baixar", json=_BAIXA_PAYLOAD).json()
+        job = _aguardar_job(client, inicio["job_id"])
+
+    # Registro de treino: todos os casamentos sugeridos da filial; a escolha humana é o pedido.
+    sugeridos = {(s["conta_pagar_id"], s["inter_transacao_id"]) for s in inicio["treino"]["sugestao"]["baixar"]}
+    assert {(12345, "TX-1"), (999, "TX-9")} <= sugeridos
 
     assert job["status"] == "concluido"
     assert job["resultado"]["total_sucessos"] == 1
@@ -928,7 +1009,7 @@ def _preview_fabrilux(client, extrato, contas):
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado", "mensagem": "ok"}), \
             patch.object(InterClient, "get_extrato", return_value=extrato), \
             patch.object(TinyClient, "list_contas_pagar_v3", side_effect=_contas_por_situacao(contas)), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         token_repo.return_value.is_configured.return_value = False
         return client.post(
@@ -1015,7 +1096,7 @@ def test_erro_do_extrato_inter_aparece_como_aviso(client):
             patch.object(InterClient, "get_cert_pair", return_value=("a.crt", "a.key")), \
             patch.object(InterClient, "get_token", return_value="tok"), \
             patch("app.inter_client.requests.get", return_value=resp), \
-            patch("app.api.TokenRepository") as token_repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as token_repo, \
             patch.object(settings, "TINY_API_TOKEN", None):
         token_repo.return_value.is_configured.return_value = False
         data = client.post("/api/v1/reconciliacao/preview", json={"empresa": "fabrilux"}).json()
@@ -1047,7 +1128,7 @@ class _FontesSimuladas:
             patch.object(TinyClient, "resolve_conta_origem_inter", return_value=42),
             patch.object(settings, "TINY_API_TOKEN", "token-teste"),
         ]
-        self._repo = patch("app.api.TokenRepository")
+        self._repo = patch("app.routers.reconciliacao.TokenRepository")
 
     def __enter__(self):
         for p in self._patches:
@@ -1118,7 +1199,7 @@ def test_cache_falha_nao_fica_guardada(client):
 
 
 def test_cache_baixa_com_sucesso_move_a_conta_para_pagas_sem_consultar_de_novo(client):
-    from app import api as api_module
+    from app.routers import reconciliacao as api_module
 
     with _FontesSimuladas() as fontes:
         fontes.tiny.side_effect = _contas_por_situacao({
@@ -1154,7 +1235,7 @@ def test_job_de_previa_em_cache_volta_concluido_na_hora(client):
 def test_previa_de_todas_as_filiais_busca_em_paralelo(monkeypatch):
     """Cada filial tem conta própria no Tiny/Inter: a prévia não soma a espera de todas."""
     import time as _time
-    from app import api as api_module
+    from app.routers import reconciliacao as api_module
 
     atrasos = 0.3
 
@@ -1189,8 +1270,8 @@ _NFE_COMPLETA_XML = f"""<?xml version="1.0" encoding="UTF-8"?>
 </nfeProc>"""
 
 
-@patch("app.api.get_nfe_provider")
-@patch("app.api.already_launched_in_tiny", return_value=False)
+@patch("app.routers.danfe.get_nfe_provider")
+@patch("app.routers.danfe.already_launched_in_tiny", return_value=False)
 def test_upload_de_xml_completo_le_do_arquivo_sem_consultar_sefaz(
     mock_already, mock_provider_factory, client, tmp_path, monkeypatch
 ):
@@ -1205,7 +1286,7 @@ def test_upload_de_xml_completo_le_do_arquivo_sem_consultar_sefaz(
 
     response = client.post(
         "/api/v1/danfe/process-batch",
-        files={"files": ("invoice-2000017019020870.xml", io.BytesIO(_NFE_COMPLETA_XML.encode()), "text/xml")},
+        files={"files": ("invoice-2000074881215530.xml", io.BytesIO(_NFE_COMPLETA_XML.encode()), "text/xml")},
     )
 
     item = response.json()["items"][0]
@@ -1230,6 +1311,8 @@ def test_mesma_chave_na_fila_de_revisao_substitui_a_entrada_anterior(tmp_path, m
     _stage_dummy_nota(tmp_path)
 
     assert len(list_pending()) == 1
+    from app.review_store import count_pending
+    assert count_pending() == 1
     assert len(list(pendentes.glob("*.review.json"))) == 1
     json_path = next(pendentes.glob("*.review.json"))
     staged = _json.loads(json_path.read_text())["staged_filename"]
@@ -1262,11 +1345,11 @@ def test_duplicadas_antigas_da_mesma_chave_sao_limpas_ficando_a_mais_recente(tmp
     assert len(list(pendentes.glob("*.review.json"))) == 1
 
 
-@patch("app.api.get_nfe_provider")
+@patch("app.routers.danfe.get_nfe_provider")
 def test_import_key_nota_com_mais_de_90_dias_orienta_a_enviar_o_xml(mock_provider_factory, client):
     provider = MagicMock()
-    provider.get_nfe_data.side_effect = RuntimeError(
-        "SEFAZ retornou rejeição: cStat 632 - Rejeicao: Solicitacao fora de prazo"
+    provider.get_nfe_data.side_effect = NFeProviderError(
+        "SEFAZ retornou rejeição: cStat 632 - Rejeicao: Solicitacao fora de prazo", c_stat="632"
     )
     mock_provider_factory.return_value = provider
     res = client.post("/api/v1/danfe/import-key", json={"chave": "41260552740396000107550010000000241143751412"})
@@ -1274,8 +1357,8 @@ def test_import_key_nota_com_mais_de_90_dias_orienta_a_enviar_o_xml(mock_provide
     assert "Upload Manual" in res.json()["detail"]
 
 
-@patch("app.api.already_launched_in_tiny", return_value=False)
-@patch("app.api.get_nfe_provider")
+@patch("app.routers.danfe.already_launched_in_tiny", return_value=False)
+@patch("app.routers.danfe.get_nfe_provider")
 def test_import_key_coloca_a_nota_em_revisao(mock_provider_factory, _mock_tiny, client, tmp_path, monkeypatch):
     # Caminho feliz: faltava file_path no ScanResult e toda importação por chave dava 500.
     monkeypatch.setattr(settings, "INPUT_DIR", tmp_path / "input")
@@ -1302,11 +1385,12 @@ def test_import_key_coloca_a_nota_em_revisao(mock_provider_factory, _mock_tiny, 
 def test_erro_nao_tratado_devolve_mensagem_generica_com_id(monkeypatch):
     from fastapi.testclient import TestClient
     from app import api as api_module
+    from app.routers import danfe
 
     def quebra(*a, **kw):
         raise PermissionError("[Errno 13] Permission denied: '/app/input'")
 
-    monkeypatch.setattr(api_module, "get_nfe_provider", quebra)
+    monkeypatch.setattr(danfe, "get_nfe_provider", quebra)
     resp = TestClient(api_module.app, raise_server_exceptions=False).post(
         "/api/v1/danfe/import-key", json={"chave": "3" * 44}
     )

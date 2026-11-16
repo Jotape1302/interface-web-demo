@@ -10,6 +10,7 @@ import {
   grupoNoFiltro,
   lancamentoNoFluxo,
   nomeDoArquivo,
+  podeBaixar,
   pendenciaMotivoMeta,
   pendenciaNoFluxo,
   periodoTexto,
@@ -23,7 +24,7 @@ import { demoMlReconciliation } from './demo-ml-reconciliation';
 function grupo(id: string, situacao: string, extra: Partial<MlGrupo> = {}): MlGrupo {
   return {
     id,
-    id_venda: '2000013231387746',
+    id_venda: '2000016459282530',
     data: '01/09/2025',
     nome_cliente: 'Lucas Teixeira',
     valor_total: 29.38,
@@ -49,6 +50,13 @@ function job(status: MlExecucaoJob['status'], extra: Partial<MlExecucaoJob> = {}
   };
 }
 
+void test('erro de API numa baixa anterior pode ser marcado de novo', () => {
+  assert.equal(podeBaixar(grupo('g1', 'ERRO API')), true);
+  assert.equal(podeBaixar(grupo('g2', 'ERRO API', { conta_id: null })), false);
+  assert.equal(podeBaixar(grupo('g3', 'APTO PARA BAIXA')), true);
+  assert.equal(podeBaixar(grupo('g4', 'VALOR DIVERGENTE')), false);
+});
+
 void test('situação do recebimento vira rótulo e cor', () => {
   assert.deepEqual(situacaoMeta('APTO PARA BAIXA'), { label: 'Apto para baixa', tone: 'info' });
   assert.deepEqual(situacaoMeta('STATUS: PAGO'), { label: 'Já pago no Tiny', tone: 'secondary' });
@@ -66,19 +74,21 @@ void test('filtros separam aptos, baixados, já pagos e pendências', () => {
     grupo('d', 'NÃO LOCALIZADO'),
     grupo('e', 'Não conciliado'),
     grupo('f', 'VALOR DIVERGENTE'),
+    grupo('g', 'ERRO API'),
+    grupo('h', 'ERRO API', { conta_id: null }),
   ];
   const ids = (f: Parameters<typeof grupoNoFiltro>[1]) => grupos.filter((g) => grupoNoFiltro(g, f)).map((g) => g.id);
-  assert.deepEqual(ids('aptos'), ['a']);
+  assert.deepEqual(ids('aptos'), ['a', 'g']);
   assert.deepEqual(ids('conciliados'), ['b']);
   assert.deepEqual(ids('ja_baixados'), ['c']);
-  assert.deepEqual(ids('pendentes'), ['d', 'e', 'f']);
-  assert.equal(ids('todos').length, 6);
+  assert.deepEqual(ids('pendentes'), ['d', 'e', 'f', 'h']);
+  assert.equal(ids('todos').length, 8);
 });
 
 void test('busca ignora acento e caixa e procura também venda e conta', () => {
   const g = grupo('a', 'APTO PARA BAIXA', { nome_cliente: 'José Antônio' });
   assert.ok(grupoCombinaBusca(g, 'jose antonio'));
-  assert.ok(grupoCombinaBusca(g, '3231387746'));
+  assert.ok(grupoCombinaBusca(g, '6459282530'));
   assert.ok(grupoCombinaBusca(g, '894315320'));
   assert.ok(!grupoCombinaBusca(g, 'maria'));
   assert.ok(grupoCombinaBusca(g, '  '));
@@ -200,4 +210,27 @@ void test('pendenciaMotivoMeta identifica categorias de motivos amigáveis', () 
   assert.equal(pendenciaMotivoMeta('Não encontrado par no Tiny').label, 'Sem par no Tiny');
   assert.equal(pendenciaMotivoMeta('Não encontrado par no Mercado Livre').label, 'Sem par no ML');
   assert.equal(pendenciaMotivoMeta('Dinheiro retido aguardando liberação futura').label, 'Dinheiro retido (futuro)');
+});
+
+void test('venda cancelada: baixável pelo backend, com atalho próprio e fora de aptos/pendentes', () => {
+  const pronta = grupo('c1', 'VENDA CANCELADA', { conta_id: null, pode_baixar: true });
+  const semPedido = grupo('c2', 'VENDA CANCELADA', { conta_id: null, pode_baixar: false });
+  assert.equal(podeBaixar(pronta), true);
+  assert.equal(podeBaixar(semPedido), false);
+  for (const g of [pronta, semPedido]) {
+    assert.equal(grupoNoFiltro(g, 'canceladas'), true);
+    assert.equal(grupoNoFiltro(g, 'aptos'), false);
+    assert.equal(grupoNoFiltro(g, 'pendentes'), false);
+  }
+  assert.equal(situacaoMeta('VENDA CANCELADA').label, 'Venda cancelada/devolvida');
+});
+
+void test('sem conta a receber: baixável pelo backend, entra nos aptos; sem cliente/valor fica pendente', () => {
+  const pronta = grupo('s1', 'SEM CONTA A RECEBER', { conta_id: null, pode_baixar: true });
+  const semPedido = grupo('s2', 'SEM CONTA A RECEBER', { conta_id: null, pode_baixar: false });
+  assert.equal(podeBaixar(pronta), true);
+  assert.equal(grupoNoFiltro(pronta, 'aptos'), true);
+  assert.equal(podeBaixar(semPedido), false);
+  assert.equal(grupoNoFiltro(semPedido, 'pendentes'), true);
+  assert.equal(situacaoMeta('SEM CONTA A RECEBER').label, 'Sem conta a receber (a baixa cria)');
 });

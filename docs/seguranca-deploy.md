@@ -4,7 +4,7 @@ Passo a passo das mudanças de infraestrutura das correções de segurança de 2
 Tudo aqui é **manual** e fica fora do git: `docker-compose.yml` (governança humana, os
 agentes não editam), `.env` reais, NGINX (do analista), MariaDB e configurações do GitHub.
 
-Premissas: Docker **rootless** (usuário `jotape1302`, uid 1003, sem sudo). O repositório
+Premissas: Docker **rootless** (usuário `deploy`, uid 1003, sem sudo). O repositório
 e o `docker-compose.yml` (fora do git) ficam em `~/norvia/interface-web`: rode todo
 `docker compose ...` dali. `servidor.norvia.example` é **público**,
 então trate o painel, o gateway e qualquer porta publicada como alcançáveis pela internet.
@@ -27,6 +27,8 @@ Sumário:
 ---
 
 ## 1. Ordem do deploy
+
+Revisão de 2026-10-27 (SEC-06, migrações, TZ e backup): siga [docs/deploy-2026-10-27.md](deploy-2026-10-27.md). A ordem abaixo é a das correções de 2026-10-06.
 
 O gateway e as duas automações HTTP (financeiro e marketplace) passam a conversar com a
 chave interna `AUTOMATIONS_INTERNAL_KEY`. **Os três sobem juntos e com o mesmo valor.**
@@ -63,8 +65,8 @@ ss -ltn | grep -E ':(3100|8000|8001)\b'                     # 3100 só em 127.0.
    cd ~/norvia/interface-web/frontend
    npm ci && npm run build                     # export estático (basePath /automacoes)
    # Só dist/client/automacoes/ é publicado. Veja o que muda antes do --delete:
-   rsync -a --delete --dry-run dist/client/automacoes/ /var/www/automacoes/
-   rsync -a --delete dist/client/automacoes/ /var/www/automacoes/
+   rsync -av --delete --dry-run dist/client/automacoes/ /var/www/automacoes/
+   rsync -av --delete dist/client/automacoes/ /var/www/automacoes/
    ```
    O `--dry-run` serve para ver o que vai mudar antes de apagar algo em `/var/www/automacoes/`.
 6. **Bot de contagem de estoque**: `TELEGRAM_ALLOWED_USERS`/`TELEGRAM_ALLOWED_CHATS` no
@@ -190,7 +192,9 @@ Confira com `ss -ltn | grep 3100`: deve aparecer `127.0.0.1:3100`, não `0.0.0.0
 
 ### 3.2 Tirar a porta 8000 (automacao-nfe) do host
 
-Hoje a 8000 está publicada no host e a 8001 (marketplace) não. Só dá para tirar a 8000 se o
+Feito: no compose de produção a 8000 já não é publicada (conferido em 03/11/2026 com
+`docker compose ps automacao-nfe`); quem roda no host, como o coletor de incidentes, chega à
+automação pelo gateway. Ficou registrado o requisito que permitiu isso: só dá para tirar a 8000 se o
 gateway falar com o financeiro **pela rede docker, pelo nome do serviço**. O que o código faz:
 
 - `index.ts`, `danfe.ts` e `financial-dashboard.ts` usam a mesma descoberta
@@ -252,7 +256,7 @@ No Docker rootless, o root do container é você (uid 1003) e os outros uids vir
 **subuids**. O `appuser` (uid 1000 no container) vira `<início do subuid> + 999` no host:
 
 ```bash
-grep "^jotape1302:" /etc/subuid                        # ex.: jotape1302:231072:65536
+grep "^deploy:" /etc/subuid                        # ex.: deploy:231072:65536
 cat /proc/$(cat "$XDG_RUNTIME_DIR/docker.pid")/uid_map # 0 1003 1 / 1 231072 65536
 # appuser = 231072 + (1000 - 1) = 232071
 
@@ -511,6 +515,12 @@ Detalhes em `scripts/backup/README.md`. Resumo do que mudou:
 
 ---
 
+**Retenção e teste de restauração (2026-10-27)**: `BACKUP_KEEP_MIN` (padrão 3) garante que os N backups
+bem-sucedidos mais recentes nunca sejam apagados, mesmo se a retenção de dias já passou. O timer
+`norvia-backup-verify.timer` roda `backup.sh verify-restore` no dia 1 de cada mês, às 04:30: sobe um MariaDB
+descartável com o último backup, confere as tabelas e derruba o container. Passos e units em
+[scripts/backup/README.md](../scripts/backup/README.md).
+
 ## 9. Varredura de segredos e dependências (CI)
 
 `.github/workflows/security.yml` roda em todo push na `main`, toda segunda às 06:00 (BRT) e
@@ -520,7 +530,7 @@ sob demanda (Actions → security → Run workflow):
 |---|---|---|
 | `gitleaks` | Varre **todo o histórico** com o `.gitleaks.toml` (binário 8.30.1 conferido por SHA256; a `gitleaks-action` exige licença para repositórios de organização) | qualquer segredo fora da allowlist |
 | `npm-audit` | `npm audit --omit=dev --audit-level=high` no `backend/gateway` e no `frontend` | vulnerabilidade high/critical em dependência de produção |
-| `pip-audit` | `pip-audit -r requirements.txt` em cada automação | qualquer vulnerabilidade conhecida |
+| `pip-audit` | `pip-audit -r requirements.lock` em cada automação (as versões exatas que a imagem instala) | qualquer vulnerabilidade conhecida |
 
 Os dois jobs `npm-audit` (gateway e frontend) **bloqueiam** (`blocking: true` na matriz).
 O do frontend passou a bloquear em 2026-10-08; antes só reportava.
@@ -663,6 +673,17 @@ Para atualizar, troque a tag de patch e o digest juntos no Dockerfile e rode `do
   (`input_danfes`, `processed`, `failed`, `pending_review`, `archived`). Assim nenhum
   segredo nem nota fiscal vai para o contexto do daemon ou para uma camada da imagem por
   engano.
+- **Fuso e tzdata** (2026-10-27): gateway, financeiro, marketplace e contagem-estoque têm
+  `TZ=America/Sao_Paulo` e instalam `tzdata` (o `slim` não traz a base de fusos). Confira com
+  `docker compose exec <serviço> sh -c 'echo "$TZ"; date'`.
+- **Dependências Python travadas** (2026-10-20): as imagens instalam `requirements.lock`
+  (versões exatas + hashes, `pip --require-hashes`), não mais o `requirements.txt` com `>=`.
+  Rebuild sem commit não puxa versão nova. Atualizar: `scripts/README.md`, "Lock das dependências".
+- **HEALTHCHECK** (2026-10-20) no gateway, financeiro, marketplace e contagem-estoque:
+  `GET /health` local a cada 60 s; o `docker compose ps` passa a mostrar `healthy`/`unhealthy`.
+  O financeiro em modo daemon (sem `--serve`) só confere o processo (`app/healthcheck.py`).
+  Para o compose reiniciar um container doente, use `restart: unless-stopped` + algo que
+  reaja ao status (o Docker sozinho só marca, não reinicia).
 
 ---
 
@@ -689,7 +710,7 @@ Esta entrega substitui o modelo de permissões baseado em setor pelo controle gr
    # Build e publicação do frontend estático
    cd ~/norvia/interface-web/frontend
    npm ci && npm run build
-   rsync -a --delete dist/client/automacoes/ /var/www/automacoes/
+   rsync -av --delete dist/client/automacoes/ /var/www/automacoes/
    ```
 
 3. **Aplicar a PARTE 2 da migração SQL (limpeza das permissões legadas):**

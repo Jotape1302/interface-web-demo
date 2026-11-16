@@ -4,7 +4,7 @@ import { groupExecutions, groupDanfeHistory } from "./batch-grouping";
 import { getPresetRange, isDateWithinFilter, formatDateRangeLabel } from "./date-range-utils";
 import type { Execution } from "./contracts";
 
-test("deve agrupar execuções disparadas na mesma janela de 5 minutos no mesmo lote", () => {
+void test("deve agrupar execuções disparadas na mesma janela de 5 minutos no mesmo lote", () => {
   const items: Execution[] = [
     { id: "1", startedAt: "2026-09-14T10:00:00Z", stoppedAt: "2026-09-14T10:01:00Z", durationMs: 60000, status: "success", stoppedNode: null },
     { id: "2", startedAt: "2026-09-14T10:02:00Z", stoppedAt: "2026-09-14T10:03:00Z", durationMs: 60000, status: "success", stoppedNode: null },
@@ -26,7 +26,7 @@ test("deve agrupar execuções disparadas na mesma janela de 5 minutos no mesmo 
   assert.match(loteAnterior.summary.successRateFormatted, /66[,.]67%|66[,.]7%/);
 });
 
-test("presets de período respeitam o fuso America/Sao_Paulo estritamente", () => {
+void test("presets de período respeitam o fuso America/Sao_Paulo estritamente", () => {
   const hoje = getPresetRange("today");
   assert.ok(hoje.from !== null && hoje.to !== null);
   assert.equal(hoje.key, "today");
@@ -43,7 +43,7 @@ test("presets de período respeitam o fuso America/Sao_Paulo estritamente", () =
   assert.equal(formatDateRangeLabel({ key: "all", from: null, to: null }), "Todo o Período");
 });
 
-test("agrupamento de DANFEs calcula valor financeiro e taxa de sucesso corretamente", () => {
+void test("agrupamento de DANFEs calcula valor financeiro e taxa de sucesso corretamente", () => {
   const danfes = [
     { processed_at: "2026-09-10T14:10:00Z", audit_status: "success", valor_total: 216.24 },
     { processed_at: "2026-09-10T14:12:00Z", audit_status: "success", valor_total: 43.15 },

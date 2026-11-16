@@ -64,13 +64,15 @@ const OVERRIDES: Record<string, string[]> = {
   "health.ts /api/health": ["GET"],
 };
 
-// Rotas montadas dinamicamente (proxy do marketplace e detalhes de health): lista explícita.
+// Rotas montadas dinamicamente (proxies do marketplace e do e-mail marketing, detalhes de health): lista explícita.
 const DYNAMIC: Array<{ method: string; path: string }> = [
   ...["status", "anuncios", "desfeitos", "historico", "avisos"].map((s) => ({ method: "GET", path: `/api/marketplace/fretes/${s}` })),
-  ...["retentar", "executar"].map((s) => ({ method: "POST", path: `/api/marketplace/fretes/${s}` })),
+  ...["retentar", "executar", "corrigir-tipo"].map((s) => ({ method: "POST", path: `/api/marketplace/fretes/${s}` })),
   ...["status", "produtos", "sem-sku"].map((s) => ({ method: "GET", path: `/api/marketplace/dimensoes/${s}` })),
   ...["validar", "reenviar", "executar"].map((s) => ({ method: "POST", path: `/api/marketplace/dimensoes/${s}` })),
   ...["circuits", "tiny", "inter", "n8n"].map((s) => ({ method: "GET", path: `/api/health/${s}` })),
+  ...["status", "rascunhos", "produtos", "catalogo", "execucoes", "ambientes", "ambientes/img1.jpg", "rascunhos/j1/carrossel/1", "rascunhos/j1/carrossel.zip"].map((s) => ({ method: "GET", path: `/api/marketing/${s}` })),
+  ...["gerar-lote-semanal", "ambientes/gerar", "rascunhos/j1/aprovar", "rascunhos/j1/produto", "ambientes/img1/aprovar", "ambientes/img1/recusar"].map((s) => ({ method: "POST", path: `/api/marketing/${s}` })),
 ];
 
 /** Sempre liberados a qualquer logado, fora do catálogo (A.5 + catálogo do editor). */

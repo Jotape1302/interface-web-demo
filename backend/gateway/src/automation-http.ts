@@ -1,4 +1,5 @@
 import { UpstreamError } from "./errors.js";
+import { CircuitBreakerOpenError, getCircuitBreaker } from "./circuit-breaker.js";
 
 /**
  * Chamadas HTTP do gateway às automações financeiro (porta 8000) e marketplace (8001).
@@ -40,9 +41,18 @@ export function withAutomationAuth(fetchImpl: typeof fetch = fetch): typeof fetc
   }) as typeof fetch;
 }
 
-/** fetch para as automações, com a chave interna. Resolve `fetch` a cada chamada (mockável). */
+/** Timeout padrão de uma chamada às automações quando quem chama não passa `signal` (GW-04). */
+export const AUTOMATION_DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * fetch para as automações, com a chave interna e timeout padrão de 30 s (só quando a chamada não
+ * traz o próprio `signal`). Resolve `fetch` a cada chamada (mockável).
+ */
 export const automationFetch: typeof fetch = ((input: string | URL | Request, init?: RequestInit) =>
-  withAutomationAuth(globalThis.fetch)(input, init)) as typeof fetch;
+  withAutomationAuth(globalThis.fetch)(input, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(AUTOMATION_DEFAULT_TIMEOUT_MS),
+  })) as typeof fetch;
 
 /** Autor e correlação de uma requisição do usuário, para repassar à automação. */
 export interface ActorContext {
@@ -87,7 +97,10 @@ export function upstreamDetail(body: unknown): string | null {
     if (Array.isArray(detail) && detail.length > 0) {
       // Erro de validação do FastAPI (422): [{loc, msg, ...}]
       const msgs = detail
-        .map((d) => (d && typeof d === "object" && typeof (d as any).msg === "string" ? (d as any).msg : null))
+        .map((d: unknown) => {
+          const msg = d && typeof d === "object" ? (d as { msg?: unknown }).msg : undefined;
+          return typeof msg === "string" ? msg : null;
+        })
         .filter(Boolean);
       if (msgs.length) return msgs.join("; ").slice(0, 1000);
     }
@@ -161,18 +174,38 @@ export function financeiroCandidateUrls(preferred?: string): string[] {
   );
 }
 
+/** Quanto tempo a URL ativa do upstream fica memorizada antes de ser revalidada por /health. */
+export const AUTOMATION_URL_TTL_MS = 60_000;
+
+export interface AutomationUrlResolver {
+  (): Promise<string>;
+  /** Esquece a URL memorizada (chamar após erro de conexão) para a próxima chamada re-sondar. */
+  invalidate(): void;
+}
+
 /**
  * Descobre qual candidato responde `/api/v1/health` (com a chave interna) e memoriza o que
- * funcionou; se nenhum responder, devolve o último que funcionou (ou o primeiro).
+ * funcionou por 60 s: dentro desse prazo NÃO há GET /health antes de cada chamada (GW-01).
+ * Se nenhum responder, devolve o último que funcionou (ou o primeiro), sem memorizar.
  */
-export function createAutomationUrlResolver(candidates: string[], fetchImpl: typeof fetch = automationFetch) {
+export function createAutomationUrlResolver(
+  candidates: string[],
+  fetchImpl: typeof fetch = automationFetch,
+  opts: { ttlMs?: number; now?: () => number } = {},
+): AutomationUrlResolver {
+  const ttl = opts.ttlMs ?? AUTOMATION_URL_TTL_MS;
+  const now = opts.now ?? Date.now;
   let active = candidates[0] ?? "http://127.0.0.1:8000";
-  return async function resolve(): Promise<string> {
+  let validUntil = 0;
+  let inflight: Promise<string> | null = null;
+
+  async function probe(): Promise<string> {
     for (const url of [active, ...candidates.filter((u) => u !== active)]) {
       try {
         const res = await fetchImpl(`${url}/api/v1/health`, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           active = url;
+          validUntil = now() + ttl;
           return url;
         }
       } catch {
@@ -180,5 +213,52 @@ export function createAutomationUrlResolver(candidates: string[], fetchImpl: typ
       }
     }
     return active;
+  }
+
+  const resolve = (async function resolve(): Promise<string> {
+    if (now() < validUntil) return active;
+    inflight ??= probe().finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }) as AutomationUrlResolver;
+  resolve.invalidate = () => {
+    validUntil = 0;
   };
+  return resolve;
+}
+
+/** Marca uma resposta 5xx para o breaker contá-la como falha sem perder a Response. */
+class UpstreamStatusFailure extends Error {
+  constructor(readonly response: Response) {
+    super(`HTTP ${response.status}`);
+  }
+}
+
+/**
+ * Executa uma chamada a uma automação sob o circuit breaker `breakerName` (GW-05). Rede, timeout
+ * e resposta 5xx contam como falha; 4xx do upstream NÃO conta (a Response volta normalmente).
+ * Com o circuito aberto lança `CircuitBreakerOpenError` (o servidor responde 503). Em erro de
+ * conexão chama `opts.invalidate` para o resolver de URL re-sondar.
+ */
+export async function callAutomation<T>(
+  breakerName: string,
+  fn: () => Promise<T>,
+  opts: { invalidate?: () => void; clientSignal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<T> {
+  const breaker = getCircuitBreaker(breakerName);
+  try {
+    return await breaker.execute(
+      async () => {
+        const result = await fn();
+        if (result instanceof Response && result.status >= 500) throw new UpstreamStatusFailure(result);
+        return result;
+      },
+      { clientSignal: opts.clientSignal, timeoutMs: opts.timeoutMs },
+    );
+  } catch (err) {
+    if (err instanceof UpstreamStatusFailure) return err.response as T;
+    if (!(err instanceof CircuitBreakerOpenError)) opts.invalidate?.();
+    throw err;
+  }
 }

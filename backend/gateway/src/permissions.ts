@@ -8,7 +8,7 @@
 
 import type { Role } from "./auth.js";
 
-export type PermissionArea = "financeiro" | "logistica" | "marketplace" | "producao" | "sistema" | "usuarios";
+export type PermissionArea = "financeiro" | "logistica" | "marketplace" | "marketing" | "producao" | "sistema" | "usuarios";
 
 export interface PermissionAction {
   /** Id da ação dentro da aba ("ver", "baixar"...). A chave é `${tab.id}:${action.id}`. */
@@ -43,6 +43,7 @@ const AREA_LABELS: Record<PermissionArea, string> = {
   financeiro: "Financeiro",
   logistica: "Logística",
   marketplace: "Marketplace",
+  marketing: "Marketing",
   producao: "Produção",
   sistema: "Sistema",
   usuarios: "Gestão de Usuários",
@@ -99,19 +100,25 @@ const TABS: PermissionTab[] = [
   // Marketplace
   tab("mkt_visao_geral", "Visão geral", "marketplace"),
   tab("dimensoes", "Padronização de dimensões", "marketplace", [
-    { id: "validar", label: "Validar" },
+    { id: "validar", label: "Confirmar envio das medidas do Tiny ao ML" },
     { id: "reenviar", label: "Reenviar" },
     { id: "executar", label: "Executar coleta" },
   ]),
   tab("fretes", "Fretes a combinar", "marketplace", [
     { id: "retentar", label: "Retentar" },
     { id: "executar", label: "Executar verificação" },
+    { id: "corrigir_tipo", label: "Corrigir tipo de frete (ME1/ME2 pela embalagem)" },
+  ]),
+  tab("email_marketing", "E-mail Marketing", "marketing", [
+    { id: "gerar", label: "Gerar rascunhos da semana" },
+    { id: "aprovar", label: "Aprovar e editar rascunho" },
   ]),
   // Produção
   tab("prod_visao_geral", "Visão geral", "producao"),
   // Sistema
-  tab("erros", "Erros & Falhas", "sistema", [{ id: "resolver", label: "Marcar como resolvido" }]),
   tab("saude", "Saúde do Sistema", "sistema"),
+  tab("roi", "ROI das automações", "sistema"),
+  tab("agentes_qwen", "Agentes Qwen", "sistema", [{ id: "resolver", label: "Marcar como resolvido" }]),
   tab("auditoria", "Log de Auditoria", "sistema"),
   tab("tokens_n8n", "Tokens n8n", "sistema", [{ id: "executar", label: "Executar renovação" }]),
   // Gestão de Usuários (só Gestor; sempre sobre usuários do perfil User)
@@ -300,6 +307,16 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
   { method: "POST", path: "/api/auth/register", access: PUBLIC, sample: "/api/auth/register" },
   { method: "POST", path: "/api/auth/login", access: PUBLIC, sample: "/api/auth/login" },
   { method: "POST", path: "/api/auth/logout", access: PUBLIC, sample: "/api/auth/logout" },
+  // Repasse do coletor de incidentes (sem sessão): token próprio conferido em routes/agentes-qwen.ts.
+  { method: "POST", path: "/api/agentes-qwen/estado", access: PUBLIC, sample: "/api/agentes-qwen/estado" },
+  { method: "GET", path: "/api/agentes-qwen/financeiro/pendentes", access: PUBLIC, sample: "/api/agentes-qwen/financeiro/pendentes" },
+  {
+    method: "GET",
+    path: "/api/agentes-qwen/financeiro/confirmadas-recentes",
+    access: PUBLIC,
+    sample: "/api/agentes-qwen/financeiro/confirmadas-recentes",
+  },
+  { method: "POST", path: "/api/agentes-qwen/financeiro/sugestoes", access: PUBLIC, sample: "/api/agentes-qwen/financeiro/sugestoes" },
 
   // ---- Livres para qualquer logado (fora do catálogo)
   { method: "GET", path: "/api/auth/me", access: FREE, sample: "/api/auth/me" },
@@ -326,11 +343,11 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
   { method: "POST", path: "/api/notifications/emit", access: { kind: "admin" }, sample: "/api/notifications/emit" },
   { method: "PUT", path: re("/api/admin/users/\\d+/role"), access: { kind: "admin" }, sample: "/api/admin/users/2/role" },
 
-  // ---- Incidentes: a regra depende da automação do incidente
+  // ---- Reportar erro (incidents.ts): a regra depende da automação reportada
   {
     method: "GET",
     path: "/api/incidents",
-    access: { kind: "scoped", note: "erros:ver vê todos; os demais só os das abas que veem (revisao_nfe:ver, contas_pagar:ver)" },
+    access: { kind: "scoped", note: "agentes_qwen:ver vê todos; os demais só os das abas que veem (AUTOMACOES_REPORTAVEIS)" },
     sample: "/api/incidents",
   },
   {
@@ -339,10 +356,22 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
     access: { kind: "scoped", note: "exige o ver da aba da automação reportada" },
     sample: "/api/incidents",
   },
-  { method: "POST", path: re("/api/incidents/[\\w-]+/resolve"), access: p("erros:resolver"), sample: "/api/incidents/abc/resolve" },
 
   // ---- Financeiro
+  { method: "GET", path: "/api/roi", access: p("roi:ver"), sample: "/api/roi" },
+  { method: "GET", path: "/api/agentes-qwen", access: p("agentes_qwen:ver"), sample: "/api/agentes-qwen" },
+  {
+    method: "POST",
+    path: re("/api/agentes-qwen/incidentes/\\d+/resolver"),
+    access: p("agentes_qwen:resolver"),
+    sample: "/api/agentes-qwen/incidentes/7/resolver",
+  },
   { method: "GET", path: "/api/overview", access: p("fin_visao_geral:ver"), sample: "/api/overview" },
+  // Visão geral por área: a aba "Visão geral" da área; cada item é filtrado pela aba de origem na rota.
+  { method: "GET", path: "/api/areas/financeiro/visao-geral", access: p("fin_visao_geral:ver"), sample: "/api/areas/financeiro/visao-geral" },
+  { method: "GET", path: "/api/areas/logistica/visao-geral", access: p("log_visao_geral:ver"), sample: "/api/areas/logistica/visao-geral" },
+  { method: "GET", path: "/api/areas/marketplace/visao-geral", access: p("mkt_visao_geral:ver"), sample: "/api/areas/marketplace/visao-geral" },
+  { method: "GET", path: "/api/areas/producao/visao-geral", access: p("prod_visao_geral:ver"), sample: "/api/areas/producao/visao-geral" },
   { method: "GET", path: "/api/accounts-payable/dashboard", access: p("contas_pagar:ver"), sample: "/api/accounts-payable/dashboard" },
   { method: "GET", path: "/api/reconciliation/status", access: p("contas_pagar:ver"), sample: "/api/reconciliation/status" },
   { method: "GET", path: "/api/reconciliation/estado", access: p("contas_pagar:ver"), sample: "/api/reconciliation/estado" },
@@ -352,6 +381,21 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
   { method: "POST", path: "/api/reconciliation/jobs/baixar", access: p("contas_pagar:baixar"), sample: "/api/reconciliation/jobs/baixar" },
   { method: "GET", path: re(`/api/reconciliation/jobs/${ID}`), access: p("contas_pagar:ver"), sample: "/api/reconciliation/jobs/j1" },
   { method: "GET", path: "/api/reconciliation/historico", access: p("contas_pagar:ver"), sample: "/api/reconciliation/historico" },
+  // Boletos DDA (Polp → Tiny → Inter): ler com a aba; decisões (rodar, vincular, criar conta, descartar) com "Dar baixa".
+  { method: "GET", path: "/api/dda/status", access: p("contas_pagar:ver"), sample: "/api/dda/status" },
+  { method: "GET", path: "/api/dda/boletos", access: p("contas_pagar:ver"), sample: "/api/dda/boletos" },
+  { method: "GET", path: "/api/dda/execucoes", access: p("contas_pagar:ver"), sample: "/api/dda/execucoes" },
+  { method: "GET", path: "/api/dda/categorias", access: p("contas_pagar:baixar"), sample: "/api/dda/categorias" },
+  { method: "GET", path: re(`/api/dda/jobs/[A-Za-z0-9_-]{1,64}`), access: p("contas_pagar:ver"), sample: "/api/dda/jobs/j1" },
+  { method: "POST", path: "/api/dda/executar", access: p("contas_pagar:baixar"), sample: "/api/dda/executar" },
+  { method: "POST", path: "/api/dda/validar", access: p("contas_pagar:baixar"), sample: "/api/dda/validar" },
+  { method: "POST", path: "/api/dda/criar-contas", access: p("contas_pagar:baixar"), sample: "/api/dda/criar-contas" },
+  {
+    method: "POST",
+    path: re(`/api/dda/boletos/${ID}/(vincular|criar|descartar|reabrir)`),
+    access: p("contas_pagar:baixar"),
+    sample: "/api/dda/boletos/0b6f1c2e-1a2b-4c3d-9e8f-123456789abc/vincular",
+  },
 
   { method: "GET", path: "/api/ml-reconciliation/status", access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/status" },
   { method: "POST", path: "/api/ml-reconciliation/tokens/sincronizar", access: p("conciliacao_ml:executar"), sample: "/api/ml-reconciliation/tokens/sincronizar" },
@@ -359,6 +403,10 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
   { method: "GET", path: "/api/ml-reconciliation/execucoes", access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/execucoes" },
   { method: "GET", path: re(`/api/ml-reconciliation/execucoes/${ID}`), access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/execucoes/e1" },
   { method: "POST", path: "/api/ml-reconciliation/jobs/baixar", access: p("conciliacao_ml:baixar"), sample: "/api/ml-reconciliation/jobs/baixar" },
+  { method: "GET", path: "/api/ml-reconciliation/tarifas", access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/tarifas" },
+  { method: "POST", path: "/api/ml-reconciliation/jobs/lancar-tarifas", access: p("conciliacao_ml:baixar"), sample: "/api/ml-reconciliation/jobs/lancar-tarifas" },
+  { method: "POST", path: "/api/ml-reconciliation/tarifas/conferir-apagados", access: p("conciliacao_ml:baixar"), sample: "/api/ml-reconciliation/tarifas/conferir-apagados" },
+  { method: "POST", path: "/api/ml-reconciliation/tarifas/marcar-refeitos", access: p("conciliacao_ml:baixar"), sample: "/api/ml-reconciliation/tarifas/marcar-refeitos" },
   { method: "GET", path: re(`/api/ml-reconciliation/jobs/${ID}`), access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/jobs/j1" },
   { method: "GET", path: "/api/ml-reconciliation/analises", access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/analises" },
   { method: "GET", path: re(`/api/ml-reconciliation/analises/${ML_ANALISE_ID}`), access: p("conciliacao_ml:ver"), sample: "/api/ml-reconciliation/analises/consolidado_norvia_campinas" },
@@ -367,6 +415,13 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
     path: re(`/api/ml-reconciliation/analises/${ML_ANALISE_ID}/arquivos/[a-z-]{1,32}`),
     access: p("conciliacao_ml:ver"),
     sample: "/api/ml-reconciliation/analises/consolidado_norvia_campinas/arquivos/vendas",
+  },
+  // SEC-06: a planilha de lançamentos marca os itens como exportados → POST + permissão de baixar.
+  {
+    method: "POST",
+    path: re(`/api/ml-reconciliation/analises/${ML_ANALISE_ID}/arquivos/lancamentos/exportar`),
+    access: p("conciliacao_ml:baixar"),
+    sample: "/api/ml-reconciliation/analises/consolidado_norvia_campinas/arquivos/lancamentos/exportar",
   },
 
   { method: "GET", path: "/api/danfe/status", access: p("revisao_nfe:ver"), sample: "/api/danfe/status" },
@@ -405,6 +460,24 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
   { method: "GET", path: re("/api/marketplace/fretes(/[A-Za-z0-9_-]+)*"), access: p("fretes:ver"), sample: "/api/marketplace/fretes/anuncios" },
   { method: "POST", path: "/api/marketplace/fretes/retentar", access: p("fretes:retentar"), sample: "/api/marketplace/fretes/retentar" },
   { method: "POST", path: "/api/marketplace/fretes/executar", access: p("fretes:executar"), sample: "/api/marketplace/fretes/executar" },
+  { method: "POST", path: "/api/marketplace/fretes/corrigir-tipo", access: p("fretes:corrigir_tipo"), sample: "/api/marketplace/fretes/corrigir-tipo" },
+
+  // ---- Marketing (proxy para automacoes-marketing)
+  { method: "GET", path: "/api/marketing/status", access: p("email_marketing:ver"), sample: "/api/marketing/status" },
+  { method: "GET", path: "/api/marketing/rascunhos", access: p("email_marketing:ver"), sample: "/api/marketing/rascunhos" },
+  { method: "GET", path: "/api/marketing/produtos", access: p("email_marketing:ver"), sample: "/api/marketing/produtos" },
+  { method: "GET", path: "/api/marketing/catalogo", access: p("email_marketing:ver"), sample: "/api/marketing/catalogo" },
+  { method: "GET", path: "/api/marketing/execucoes", access: p("email_marketing:ver"), sample: "/api/marketing/execucoes" },
+  { method: "GET", path: "/api/marketing/ambientes", access: p("email_marketing:ver"), sample: "/api/marketing/ambientes" },
+  { method: "GET", path: re("/api/marketing/ambientes/[A-Za-z0-9_-]{1,64}\\.jpg"), access: p("email_marketing:ver"), sample: "/api/marketing/ambientes/img1.jpg" },
+  { method: "GET", path: re("/api/marketing/rascunhos/[A-Za-z0-9-]{1,64}/carrossel/([1-9]|1[0-9]|20)"), access: p("email_marketing:ver"), sample: "/api/marketing/rascunhos/j1/carrossel/1" },
+  { method: "GET", path: re("/api/marketing/rascunhos/[A-Za-z0-9-]{1,64}/carrossel\\.zip"), access: p("email_marketing:ver"), sample: "/api/marketing/rascunhos/j1/carrossel.zip" },
+  { method: "POST", path: "/api/marketing/gerar-lote-semanal", access: p("email_marketing:gerar"), sample: "/api/marketing/gerar-lote-semanal" },
+  { method: "POST", path: "/api/marketing/ambientes/gerar", access: p("email_marketing:gerar"), sample: "/api/marketing/ambientes/gerar" },
+  { method: "POST", path: re("/api/marketing/rascunhos/[A-Za-z0-9-]{1,64}/aprovar"), access: p("email_marketing:aprovar"), sample: "/api/marketing/rascunhos/j1/aprovar" },
+  { method: "POST", path: re("/api/marketing/rascunhos/[A-Za-z0-9-]{1,64}/produto"), access: p("email_marketing:aprovar"), sample: "/api/marketing/rascunhos/j1/produto" },
+  { method: "POST", path: re("/api/marketing/ambientes/[A-Za-z0-9_-]{1,64}/aprovar"), access: p("email_marketing:aprovar"), sample: "/api/marketing/ambientes/img1/aprovar" },
+  { method: "POST", path: re("/api/marketing/ambientes/[A-Za-z0-9_-]{1,64}/recusar"), access: p("email_marketing:aprovar"), sample: "/api/marketing/ambientes/img1/recusar" },
 
   // ---- Logística (Contagem de Estoque)
   { method: "GET", path: "/api/stock-count/contagens", access: p("contagem_estoque:ver"), sample: "/api/stock-count/contagens" },

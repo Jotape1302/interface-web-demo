@@ -16,11 +16,13 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { NorviaLogo } from '@/components/ui/norvia-logo';
-import { DEMO_LOGIN_PROFILES } from '@/lib/demo-permissions';
+import { loadDemoPermissions } from '@/lib/demo-permissions-loader';
 import { isDemoLoginAllowed } from '@/lib/session-guard';
 
+type DemoLoginProfiles = Awaited<ReturnType<typeof loadDemoPermissions>>['DEMO_LOGIN_PROFILES'];
+
 export default function LoginPage() {
-  const { user, login, loginDemo, isDemoMode, register, isLoading } = useAuth();
+  const { user, login, loginDemo, register, isLoading } = useAuth();
   const router = useRouter();
 
   const [activeTab, setActiveTab] = useState<'login' | 'register'>('login');
@@ -41,13 +43,20 @@ export default function LoginPage() {
   const [isSubmittingReg, setIsSubmittingReg] = useState(false);
 
   const [isLocalDemo, setIsLocalDemo] = useState(false);
+  // Perfis do demo: o módulo das fixtures só é baixado em localhost (chunk separado).
+  const [demoProfiles, setDemoProfiles] = useState<DemoLoginProfiles>([]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       // Mesma regra do login demo (session-guard.ts): build demo (ex.: GitHub Pages) ou
       // localhost/127.0.0.1, mesmo sem NEXT_PUBLIC_DATA_MODE. Na VPS (build live, acessada
       // por domínio/IP de rede) nunca aparece.
-      setIsLocalDemo(isDemoLoginAllowed(process.env.NEXT_PUBLIC_DATA_MODE, window.location.hostname));
+      const permitido = isDemoLoginAllowed(process.env.NEXT_PUBLIC_DATA_MODE, window.location.hostname);
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
+      setIsLocalDemo(permitido);
+      if (permitido) {
+        void loadDemoPermissions().then((m) => setDemoProfiles(m.DEMO_LOGIN_PROFILES));
+      }
     }
   }, []);
 
@@ -57,20 +66,20 @@ export default function LoginPage() {
     }
   }, [user, isLoading, router]);
 
-  const handleLoginSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     setLoginError('');
     setIsSubmittingLogin(true);
     try {
       await login(loginIdentifier, loginPassword);
-    } catch (err: any) {
-      setLoginError(err.message || 'Falha ao autenticar.');
+    } catch (err) {
+      setLoginError((err instanceof Error && err.message) || 'Falha ao autenticar.');
     } finally {
       setIsSubmittingLogin(false);
     }
   };
 
-  const handleRegisterSubmit = async (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     setRegError('');
     setRegSuccess('');
@@ -86,8 +95,8 @@ export default function LoginPage() {
       setRegNome('');
       setRegEmail('');
       setRegPassword('');
-    } catch (err: any) {
-      setRegError(err.message || 'Falha ao solicitar cadastro.');
+    } catch (err) {
+      setRegError((err instanceof Error && err.message) || 'Falha ao solicitar cadastro.');
     } finally {
       setIsSubmittingReg(false);
     }
@@ -115,11 +124,11 @@ export default function LoginPage() {
         </div>
 
         {/* Card Principal */}
-        <div className="rounded-lg border border-border bg-card p-6 shadow-sm">
+        <div className="rounded-none border border-border bg-card p-6 shadow-sm">
           {/* Card de Acesso Rápido - build demo ou desenvolvimento local */}
           {isLocalDemo && (
             <>
-              <div className="mb-5 rounded-md border border-[var(--info-border)] bg-[var(--info-bg)] p-3.5 text-left">
+              <div className="mb-5 rounded-none border border-[var(--info-border)] bg-[var(--info-bg)] p-3.5 text-left">
                 <p className="mb-1 text-xs font-semibold text-[var(--info-strong)]">Ambiente de demonstração</p>
                 <p className="text-xs text-muted-foreground mb-3 leading-relaxed">
                   Dados fictícios, sem banco de dados nem APIs externas.
@@ -127,7 +136,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => loginDemo()}
-                  className="w-full flex items-center justify-center gap-2 rounded-md border border-border bg-card hover:bg-muted text-foreground py-2 text-sm font-medium transition cursor-pointer"
+                  className="w-full flex items-center justify-center gap-2 rounded-none border border-border bg-card hover:bg-muted text-foreground py-2 text-sm font-medium transition cursor-pointer"
                 >
                   <span>Entrar como administrador (demonstração)</span>
                   <ArrowRight size={14} />
@@ -137,7 +146,7 @@ export default function LoginPage() {
                     Entrar com outro perfil de demonstração
                   </summary>
                   <ul className="mt-2 grid gap-1.5">
-                    {DEMO_LOGIN_PROFILES.filter((p) => p.role !== 'admin').map((p) => (
+                    {demoProfiles.filter((p) => p.role !== 'admin').map((p) => (
                       <li key={p.username}>
                         <button
                           type="button"
@@ -168,7 +177,7 @@ export default function LoginPage() {
           )}
 
           {/* Navegação entre Abas */}
-          <div className="mb-5 flex rounded-md bg-muted p-1 border border-border">
+          <div className="mb-5 flex rounded-none bg-muted p-1 border border-border">
             <button
               type="button"
               onClick={() => {
@@ -205,46 +214,46 @@ export default function LoginPage() {
           {activeTab === 'login' && (
             <form onSubmit={handleLoginSubmit} className="space-y-4">
               {loginError && (
-                <div className="flex items-start gap-2.5 rounded-md border border-[var(--status-error-border)] bg-[var(--status-error-bg)] p-3 text-xs text-[var(--status-error-fg)]">
+                <div className="flex items-start gap-2.5 rounded-none border border-[var(--status-error-border)] bg-[var(--status-error-bg)] p-3 text-xs text-[var(--status-error-fg)]">
                   <AlertCircle size={15} className="shrink-0 mt-0.5" />
                   <span>{loginError}</span>
                 </div>
               )}
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1.5">
+                <label htmlFor="page-campo-224" className="block text-xs font-medium text-foreground mb-1.5">
                   Usuário ou E-mail
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <Mail size={14} />
                   </div>
-                  <input
+                  <input id="page-campo-224"
                     type="text"
                     required
                     value={loginIdentifier}
                     onChange={(e) => setLoginIdentifier(e.target.value)}
                     placeholder="Username/E-mail"
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1.5">
+                <label htmlFor="page-campo-243" className="block text-xs font-medium text-foreground mb-1.5">
                   Senha
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <Lock size={14} />
                   </div>
-                  <input
+                  <input id="page-campo-243"
                     type="password"
                     required
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   />
                 </div>
               </div>
@@ -253,13 +262,14 @@ export default function LoginPage() {
                 type="submit"
                 disabled={isSubmittingLogin}
                 aria-busy={isSubmittingLogin}
-                className="w-full rounded-md bg-[var(--cta)] hover:bg-[var(--cta-hover)] py-2 text-sm font-semibold text-[var(--cta-foreground)] transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 cursor-pointer"
+                className="w-full rounded-none bg-[var(--cta)] hover:bg-[var(--cta-hover)] py-2 text-sm font-semibold text-[var(--cta-foreground)] transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 cursor-pointer"
               >
                 {isSubmittingLogin ? 'Entrando…' : 'Entrar'}
               </button>
               {/* O gateway atrasa a resposta (até ~8 s) quando há muitas tentativas seguidas:
                   sem timeout no cliente, só avisamos que a espera é normal. */}
               {isSubmittingLogin && (
+                // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
                 <p className="text-center text-xs text-muted-foreground" role="status">
                   A verificação pode levar alguns segundos. Aguarde sem recarregar a página.
                 </p>
@@ -271,73 +281,73 @@ export default function LoginPage() {
           {activeTab === 'register' && (
             <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
               {regError && (
-                <div className="flex items-start gap-2.5 rounded-md border border-[var(--status-error-border)] bg-[var(--status-error-bg)] p-3 text-xs text-[var(--status-error-fg)]">
+                <div className="flex items-start gap-2.5 rounded-none border border-[var(--status-error-border)] bg-[var(--status-error-bg)] p-3 text-xs text-[var(--status-error-fg)]">
                   <AlertCircle size={15} className="shrink-0 mt-0.5" />
                   <span>{regError}</span>
                 </div>
               )}
 
               {regSuccess && (
-                <div className="flex items-start gap-2.5 rounded-md border border-[var(--status-success-border)] bg-[var(--status-success-bg)] p-3 text-xs text-[var(--status-success-fg)]">
+                <div className="flex items-start gap-2.5 rounded-none border border-[var(--status-success-border)] bg-[var(--status-success-bg)] p-3 text-xs text-[var(--status-success-fg)]">
                   <CheckCircle2 size={15} className="shrink-0 mt-0.5" />
                   <span>{regSuccess}</span>
                 </div>
               )}
 
-              <div className="rounded-md border border-border bg-muted p-2.5 text-xs leading-relaxed text-muted-foreground">
+              <div className="rounded-none border border-border bg-muted p-2.5 text-xs leading-relaxed text-muted-foreground">
                 <strong className="text-foreground">Aprovação necessária:</strong> a conta só fica ativa depois que um administrador aprovar.
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1">
+                <label htmlFor="page-campo-301" className="block text-xs font-medium text-foreground mb-1">
                   Nome completo
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <UserIcon size={14} />
                   </div>
-                  <input
+                  <input id="page-campo-301"
                     type="text"
                     required
                     value={regNome}
                     onChange={(e) => setRegNome(e.target.value)}
                     placeholder="Ex: Carlos Silva"
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1">
+                <label htmlFor="page-campo-320" className="block text-xs font-medium text-foreground mb-1">
                   E-mail corporativo
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <Mail size={14} />
                   </div>
-                  <input
+                  <input id="page-campo-320"
                     type="email"
                     required
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
                     placeholder="carlos.silva@norvia.example"
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1">
+                <label htmlFor="page-campo-339" className="block text-xs font-medium text-foreground mb-1">
                   Setor
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <Building2 size={14} />
                   </div>
-                  <select
+                  <select id="page-campo-339"
                     value={regSetor}
                     onChange={(e) => setRegSetor(e.target.value)}
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   >
                     {SETORES.map((s) => (
                       <option key={s} value={s}>
@@ -349,21 +359,21 @@ export default function LoginPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-foreground mb-1">
+                <label htmlFor="page-campo-361" className="block text-xs font-medium text-foreground mb-1">
                   Senha (mínimo 10 caracteres)
                 </label>
                 <div className="relative">
                   <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-muted-foreground">
                     <KeyRound size={14} />
                   </div>
-                  <input
+                  <input id="page-campo-361"
                     type="password"
                     required
                     minLength={10}
                     value={regPassword}
                     onChange={(e) => setRegPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full rounded-md border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
+                    className="w-full rounded-none border border-input bg-card py-2 pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground outline-none transition focus:border-ring focus:ring-1 focus:ring-ring"
                   />
                 </div>
               </div>
@@ -371,7 +381,7 @@ export default function LoginPage() {
               <button
                 type="submit"
                 disabled={isSubmittingReg}
-                className="w-full rounded-md bg-[var(--cta)] hover:bg-[var(--cta-hover)] py-2 text-sm font-semibold text-[var(--cta-foreground)] transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 cursor-pointer"
+                className="w-full rounded-none bg-[var(--cta)] hover:bg-[var(--cta-hover)] py-2 text-sm font-semibold text-[var(--cta-foreground)] transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 cursor-pointer"
               >
                 {isSubmittingReg ? 'Enviando…' : 'Solicitar cadastro'}
               </button>

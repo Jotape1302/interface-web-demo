@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isValidWorkflowId } from "./token-workflow";
 
-test("aceita só IDs alfanuméricos de 1 a 32 caracteres", () => {
+void test("aceita só IDs alfanuméricos de 1 a 32 caracteres", () => {
   assert.equal(isValidWorkflowId("8AtrRCYPsIyFv6s6"), true);
   assert.equal(isValidWorkflowId("a".repeat(32)), true);
   assert.equal(isValidWorkflowId("a".repeat(33)), false);

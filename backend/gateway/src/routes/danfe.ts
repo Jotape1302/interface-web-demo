@@ -1,6 +1,7 @@
+import type { ConfirmLancamentoItemInput } from "../contracts.js";
 import type { DanfeService } from "../danfe.js";
 import type { AuditAction, AuditService } from "../audit.js";
-import { parseJsonBody, sendError, type RequestContext } from "../http.js";
+import { parseJsonObject, sendError, type JsonObject, type RequestContext } from "../http.js";
 import { hasPermission } from "../permissions.js";
 
 // Automação de DANFE/NF-e (/api/danfe/*). A permissão da rota já foi checada em server.ts.
@@ -59,7 +60,7 @@ export function createDanfeRoutes(deps: { danfe?: DanfeService; audit?: AuditSer
 
     if (path === "/api/danfe/import-key" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         if (!body.chave) return send(422, { error: "Campo 'chave' é obrigatório" });
         const result = await danfe.importKey(String(body.chave), ctx);
         record("nfe_importada_chave", `NF-e ${body.chave}`);
@@ -106,7 +107,7 @@ export function createDanfeRoutes(deps: { danfe?: DanfeService; audit?: AuditSer
 
     if (path === "/api/danfe/archive" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         if (!body.chave) return send(422, { error: "Campo 'chave' é obrigatório" });
         const result = await danfe.archiveNota(String(body.chave), ctx);
         record("nfe_arquivada", `NF-e ${body.chave}`);
@@ -118,7 +119,7 @@ export function createDanfeRoutes(deps: { danfe?: DanfeService; audit?: AuditSer
 
     if (path === "/api/danfe/restore" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         if (!body.chave) return send(422, { error: "Campo 'chave' é obrigatório" });
         const result = await danfe.restoreNota(String(body.chave), ctx);
         record("nfe_restaurada", `NF-e ${body.chave}`);
@@ -130,7 +131,7 @@ export function createDanfeRoutes(deps: { danfe?: DanfeService; audit?: AuditSer
 
     if (path === "/api/danfe/failures/resolve" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         if (!body.error_file) return send(422, { error: "Campo 'error_file' é obrigatório" });
         const result = await danfe.resolveFailure(String(body.error_file), ctx);
         record("nfe_falha_resolvida", String(body.error_file));
@@ -141,15 +142,16 @@ export function createDanfeRoutes(deps: { danfe?: DanfeService; audit?: AuditSer
     }
 
     if (path === "/api/danfe/confirm-lancamento" && method === "POST") {
-      let body: any = {};
+      let body: JsonObject = {};
       try {
-        body = await parseJsonBody(request);
+        body = await parseJsonObject(request);
+        // Formato conferido pela automação (pydantic, 422 se inválido); aqui só repassa.
         const result = await danfe.confirmLancamento(
-          body.chave,
-          body.itens ?? [],
-          body.forma_pagamento,
-          body.meio_pagamento_nfe,
-          body.parcelas,
+          body.chave as string,
+          (body.itens ?? []) as ConfirmLancamentoItemInput[],
+          body.forma_pagamento as string,
+          body.meio_pagamento_nfe as string | undefined,
+          body.parcelas as number | undefined,
           ctx,
         );
         record(

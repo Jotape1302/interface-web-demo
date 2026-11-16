@@ -23,9 +23,12 @@ CREATE TABLE IF NOT EXISTS usuarios (
     aprovado_em DATETIME NULL,
     criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     atualizado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_usuarios_email (email),
+    -- (sem índice próprio em email: o UNIQUE já indexa; idx_usuarios_email era redundante)
     INDEX idx_usuarios_status (status),
-    INDEX idx_usuarios_role (role)
+    INDEX idx_usuarios_role (role),
+    -- Quem aprovou / alterou permissões: se esse usuário for excluído, o registro fica sem autor.
+    CONSTRAINT fk_usuarios_aprovado_por FOREIGN KEY (aprovado_por) REFERENCES usuarios(id) ON DELETE SET NULL,
+    CONSTRAINT fk_usuarios_perm_alterado_por FOREIGN KEY (permissoes_alterado_por) REFERENCES usuarios(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. Tabela de Permissões de Usuários
@@ -36,7 +39,7 @@ CREATE TABLE IF NOT EXISTS usuario_permissoes (
     permitido BOOLEAN NOT NULL DEFAULT TRUE,
     criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_usuario_recurso (usuario_id, recurso),
-    INDEX idx_perm_usuario (usuario_id),
+    -- (sem idx_perm_usuario: o UNIQUE (usuario_id, recurso) já serve de índice da FK)
     CONSTRAINT fk_permissoes_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -52,5 +55,11 @@ CREATE TABLE IF NOT EXISTS usuario_sessoes (
     criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_sessoes_usuario (usuario_id),
     INDEX idx_sessoes_ativo (ativo),
+    INDEX idx_sessoes_usuario_ativo_expira (usuario_id, ativo, expira_em),
+    INDEX idx_sessoes_expira (expira_em),
     CONSTRAINT fk_sessoes_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- SEM FK de propósito: auditoria_acoes.usuario_id (05) e conciliacao_baixas_historico.usuario_id
+-- (06) guardam quem fez a ação. O histórico deve sobreviver à exclusão do usuário (a linha
+-- guarda também usuario_nome), então não pode haver CASCADE nem SET NULL ali.

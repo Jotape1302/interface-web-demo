@@ -198,6 +198,7 @@ def test_scan_one_cnpj_saves_nsu_and_cooldown_on_cstat_656(tmp_path, monkeypatch
     result = _scan_one_cnpj(provider, set(), settings)
 
     assert result.status == "cooldown"
+    assert result.recusado is True
     assert result.erro is None
     assert result.ult_nsu_final == "000000000000450"
     assert result.cooldown_seconds_remaining == sefaz_scan.SCAN_COOLDOWN_SECONDS
@@ -222,6 +223,7 @@ def test_scan_one_cnpj_skips_when_in_cooldown(tmp_path, monkeypatch):
     result = _scan_one_cnpj(provider, set(), settings)
 
     assert result.status == "cooldown"
+    assert result.consultado is False
     assert result.cooldown_seconds_remaining > 0
     provider.consultar_distribuicao_nsu.assert_not_called()
 
@@ -370,7 +372,7 @@ def test_handle_doc_identifies_and_separates_campinas_and_curitiba():
     xml_campinas = """<?xml version="1.0" encoding="UTF-8"?>
     <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
       <NFe>
-        <infNFe Id="NFe35230927184930000107550010000001231000000120" versao="4.00">
+        <infNFe Id="NFe35230927184930000107550010000001231000000123" versao="4.00">
           <ide><nNF>101</nNF><dhEmi>2026-09-10T14:30:00-03:00</dhEmi></ide>
           <emit><CNPJ>98765432000109</CNPJ><xNome>FORNECEDOR LTDA</xNome></emit>
           <dest><CNPJ>27184930000107</CNPJ><xNome>NORVIA MATRIZ</xNome></dest>
@@ -382,7 +384,7 @@ def test_handle_doc_identifies_and_separates_campinas_and_curitiba():
     xml_curitiba = """<?xml version="1.0" encoding="UTF-8"?>
     <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
       <NFe>
-        <infNFe Id="NFe41230927184930000280550010000004561000000450" versao="4.00">
+        <infNFe Id="NFe41230927184930000280550010000004561000000456" versao="4.00">
           <ide><nNF>102</nNF><dhEmi>2026-09-10T14:30:00-03:00</dhEmi></ide>
           <emit><CNPJ>98765432000109</CNPJ><xNome>FORNECEDOR LTDA</xNome></emit>
           <dest><CNPJ>27184930000280</CNPJ><xNome>NORVIA ACABAMENTOS QUALQUER</xNome></dest>
@@ -434,3 +436,253 @@ def test_handle_doc_identifies_and_separates_campinas_and_curitiba():
     res_saida = CnpjScanResult(cnpj=prov_campinas.cnpj)
     _handle_doc(SefazDocEntry(nsu="4", schema="procNFe", xml_content=xml_emissao_propria_cliente_externo), prov_campinas, seen_keys, res_saida)
     assert len(res_saida.novas_notas) == 0
+
+
+def test_nova_tentativa_no_mesmo_dia_para_cnpj_recusado(tmp_path):
+    """10/11: 3 dos 4 CNPJs recusados (cStat 656) às 06h só eram consultados de novo no dia seguinte."""
+    cfg = settings.model_copy(update={"DATA_DIR": tmp_path})
+    ok = CnpjScanResult(cnpj="11111111000111", status="ok")
+    recusado = CnpjScanResult(cnpj="22222222000122", status="cooldown")
+    com_erro = CnpjScanResult(cnpj="33333333000133", status="erro", erro="timeout")
+    resumo = lambda *r: sefaz_scan.SefazScanSummary(started_at="", finished_at="", resultados=list(r))  # noqa: E731
+
+    assert sefaz_scan.segundos_ate_nova_tentativa(resumo(ok), cfg) is None
+    sefaz_scan.save_cnpj_cooldown(recusado.cnpj, sefaz_scan.SCAN_COOLDOWN_SECONDS, cfg)
+    espera = sefaz_scan.segundos_ate_nova_tentativa(resumo(ok, recusado), cfg)
+    assert sefaz_scan.SCAN_COOLDOWN_SECONDS < espera <= sefaz_scan.SCAN_COOLDOWN_SECONDS + sefaz_scan.MARGEM_RETENTATIVA_SECONDS
+    # Erro sem cooldown: tenta de novo em 10 min, mais a margem.
+    assert sefaz_scan.segundos_ate_nova_tentativa(resumo(com_erro), cfg) == 600 + sefaz_scan.MARGEM_RETENTATIVA_SECONDS
+
+
+def test_parcelas_do_xml_da_nfe():
+    from app.nfe_client import NFeXmlParser
+    com_dup = SAMPLE_PROC_NFE_XML.replace(
+        "<total>",
+        "<cobr><dup><nDup>001</nDup><dVenc>2026-10-10</dVenc><vDup>800.00</vDup></dup>"
+        "<dup><nDup>002</nDup><dVenc>2026-11-10</dVenc><vDup>800.00</vDup></dup>"
+        "<dup><nDup>003</nDup><dVenc>2026-12-10</dVenc><vDup>800.00</vDup></dup></cobr><total>",
+    )
+    chave = "35230912345678000123550010000001231000000123"
+    assert NFeXmlParser.parse(com_dup, chave).parcelas_nfe == 3
+    assert NFeXmlParser.parse(SAMPLE_PROC_NFE_XML, chave).parcelas_nfe is None
+
+
+def test_nsu_pulado_no_656_e_recuperado_por_cons_nsu(tmp_path, monkeypatch):
+    """10/11: a SEFAZ recusava (656 "Deve ser utilizado o ultNSU") e o cursor pulava sem receber
+    os documentos do intervalo. Eles vão para a fila e voltam por consNSU na rodada seguinte."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    settings.ensure_directories()
+    cnpj = "36592814000100"
+    sefaz_scan.save_nsu_checkpoint(cnpj, "000000000000100", settings)
+
+    provider = MagicMock()
+    provider.cnpj = cnpj
+    provider.consultar_distribuicao_nsu.return_value = DistNsuResult(
+        c_stat="656", x_motivo="Consumo Indevido", ult_nsu="000000000000103", max_nsu="000000000000000", docs=[])
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert result.status == "cooldown" and result.nsu_pendentes == 3
+    assert sefaz_scan.load_nsu_pendentes(cnpj, settings) == [101, 102, 103]
+    resumo = sefaz_scan.SefazScanSummary(started_at="", finished_at="", resultados=[result])
+    assert sefaz_scan.segundos_ate_nova_tentativa(resumo, settings) is not None
+
+    # Rodada seguinte: 101 traz uma nota, 102 não existe mais, 103 é recusado e fica na fila.
+    sefaz_scan.clear_cnpj_cooldown(cnpj, settings)
+    monkeypatch.setattr(sefaz_scan, "already_launched_in_tiny", lambda nfe: False)
+    monkeypatch.setattr(sefaz_scan.time, "sleep", lambda s: None)
+    nota = SAMPLE_PROC_NFE_XML.replace("12345678000195", cnpj)
+    respostas = {
+        "101": DistNsuResult(c_stat="138", x_motivo="ok", ult_nsu="101", max_nsu="103",
+                             docs=[SefazDocEntry(nsu="101", schema="procNFe_v4.00.xsd", xml_content=nota)]),
+        "102": DistNsuResult(c_stat="137", x_motivo="nenhum", ult_nsu="102", max_nsu="103", docs=[]),
+        "103": DistNsuResult(c_stat="656", x_motivo="Consumo Indevido", ult_nsu="103", max_nsu="103", docs=[]),
+    }
+    provider.consultar_nsu.side_effect = lambda nsu: respostas[nsu]
+    provider.consultar_distribuicao_nsu.reset_mock()
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert len(result.novas_notas) == 1 and result.nsu_recuperados == 2
+    assert result.status == "cooldown" and result.nsu_pendentes == 1
+    assert sefaz_scan.load_nsu_pendentes(cnpj, settings) == [103]
+    provider.consultar_distribuicao_nsu.assert_not_called()
+
+
+def test_envelope_cons_nsu():
+    provider = SefazA1Provider(cert_path="x.pfx", cert_password="x", cnpj="36592814000100", uf="SP")
+    xml = provider._build_dist_nsu_envelope("101", especifico=True)
+    assert "<consNSU>" in xml and "<NSU>000000000000101</NSU>" in xml and "<distNSU>" not in xml
+    assert "<ultNSU>000000000000101</ultNSU>" in provider._build_dist_nsu_envelope("101")
+
+
+def _doc_historico(cnpj, n):
+    data = f"2026-08-{n - 18:02d}" if n < 30 else f"2026-09-{(n - 29) % 28 + 1:02d}"
+    chave = f"3523091234567800012355001{n:09d}1000000123"
+    xml = (SAMPLE_PROC_NFE_XML.replace("12345678000195", cnpj).replace("2026-09-10", data)
+           .replace("35230912345678000123550010000001231000000123", chave))
+    return SefazDocEntry(nsu=f"{n:015d}", schema="procNFe_v4.00.xsd", xml_content=xml)
+
+
+def _sefaz_historico(cnpj, max_nsu, por_pagina=50):
+    """consNSU: 632 antes do NSU 20, um documento por NSU depois. distNSU: até `por_pagina`."""
+    def cons(nsu):
+        n = int(nsu)
+        if n < 20:
+            return DistNsuResult(c_stat="632", x_motivo="fora de prazo", ult_nsu=nsu, max_nsu=str(max_nsu), docs=[])
+        return DistNsuResult(c_stat="138", x_motivo="ok", ult_nsu=nsu, max_nsu=str(max_nsu), docs=[_doc_historico(cnpj, n)])
+
+    def dist(ult):
+        u = int(ult)
+        if u >= max_nsu:
+            return DistNsuResult(c_stat="137", x_motivo="nenhum", ult_nsu=f"{max_nsu:015d}", max_nsu=f"{max_nsu:015d}", docs=[])
+        fim = min(u + por_pagina, max_nsu)
+        return DistNsuResult(c_stat="138", x_motivo="ok", ult_nsu=f"{fim:015d}", max_nsu=f"{max_nsu:015d}",
+                             docs=[_doc_historico(cnpj, n) for n in range(u + 1, fim + 1)])
+    return cons, dist
+
+
+def test_historico_do_mais_antigo_ao_cursor(tmp_path, monkeypatch):
+    """10/11: a recuperação acha por busca binária (consNSU) o primeiro documento da data de corte e
+    anda para frente; desde 11/11 o avanço é por distNSU, 50 por página, em sequência até o fim da
+    fila, e o cursor da varredura fica nesse ponto (a SEFAZ exige continuar o último ultNSU)."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    settings.ensure_directories()
+    monkeypatch.setattr(sefaz_scan.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sefaz_scan, "already_launched_in_tiny", lambda nfe: False)
+    cnpj = "36592814000100"
+    sefaz_scan.save_nsu_checkpoint(cnpj, "000000000000150", settings)
+    assert sefaz_scan.iniciar_historico(cnpj, "2026-08-12", settings) == 150
+
+    provider = MagicMock()
+    provider.cnpj = cnpj
+    provider.consultar_nsu.side_effect, provider.consultar_distribuicao_nsu.side_effect = _sefaz_historico(cnpj, 150)
+
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert result.status == "ok" and result.nsu_pendentes == 0
+    assert not sefaz_scan.load_historico(cnpj, settings)
+    consultados = [int(c.args[0]) for c in provider.consultar_nsu.call_args_list]
+    assert len(consultados) <= 9  # só a busca binária (2026-08-12 = NSU 30)
+    dist = [int(c.args[0]) for c in provider.consultar_distribuicao_nsu.call_args_list]
+    assert dist == [29, 79, 129]  # de 30 a 150 em 3 páginas; já é o fim da fila, sem varredura normal
+    assert result.nsu_recuperados == len(consultados) + 121
+    assert len(result.novas_notas) >= 121
+    assert sefaz_scan.get_cnpj_cooldown_remaining_seconds(cnpj, settings) > 0
+
+
+def test_historico_em_lote_vai_ao_fim_da_fila_e_leva_o_cursor(tmp_path, monkeypatch):
+    """11/11: página antiga recusada (o Tiny consultou na última hora): a rodada segue por consNSU e
+    faz a varredura normal. Lote aceito: segue até o maxNSU, passando do cursor, e o cursor vai
+    junto. Lote interrompido: a próxima rodada continua do mesmo ponto, sem varredura normal."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    settings.ensure_directories()
+    monkeypatch.setattr(sefaz_scan.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sefaz_scan, "already_launched_in_tiny", lambda nfe: False)
+    cnpj = "27184930000107"
+    sefaz_scan.save_nsu_checkpoint(cnpj, "000000000000300", settings)
+    sefaz_scan.iniciar_historico(cnpj, "2026-08-12", settings)
+    h = sefaz_scan.load_historico(cnpj, settings)
+    h.update(fase="avanco", proximo=30)
+    sefaz_scan._save_historico(cnpj, h, settings)
+
+    cons, dist = _sefaz_historico(cnpj, 300, por_pagina=40)
+    estado = {"recusar_antiga": True, "max": 300}
+    chamadas = []
+
+    def dist_sefaz(ult):
+        chamadas.append(int(ult))
+        if estado["recusar_antiga"] and int(ult) < 300:
+            return DistNsuResult(c_stat="656", x_motivo="Deve ser utilizado o ultNSU", ult_nsu="000000000000300", max_nsu="", docs=[])
+        return _sefaz_historico(cnpj, estado["max"], por_pagina=40)[1](ult)
+
+    provider = MagicMock()
+    provider.cnpj = cnpj
+    provider.consultar_nsu.side_effect = cons
+    provider.consultar_distribuicao_nsu.side_effect = dist_sefaz
+
+    # 1ª rodada: página antiga recusada → consNSU (14, a recusa conta no limite) + varredura normal.
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert chamadas == [29, 300]
+    assert [int(c.args[0]) for c in provider.consultar_nsu.call_args_list] == list(range(30, 44))
+    assert sefaz_scan.load_historico(cnpj, settings)["proximo"] == 44
+
+    # 2ª rodada: lote aceito, mas para no limite de páginas: cursor intacto, sem varredura normal.
+    sefaz_scan.clear_cnpj_cooldown(cnpj, settings)
+    estado.update(recusar_antiga=False, max=420)
+    monkeypatch.setattr(sefaz_scan, "MAX_PAGINAS_HISTORICO_POR_RODADA", 3)
+    chamadas.clear()
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert chamadas == [43, 83, 123]
+    assert result.status == "ok" and result.nsu_pendentes > 0
+    assert sefaz_scan.load_historico(cnpj, settings)["proximo"] == 164
+    assert sefaz_scan.load_nsu_state(settings)[cnpj] == "000000000000300"
+
+    # 3ª rodada: continua de 164 até o maxNSU 420, passando do cursor; o cursor vai para 420.
+    sefaz_scan.clear_cnpj_cooldown(cnpj, settings)
+    monkeypatch.setattr(sefaz_scan, "MAX_PAGINAS_HISTORICO_POR_RODADA", 400)
+    chamadas.clear()
+    result = _scan_one_cnpj(provider, set(), settings)
+    assert chamadas == list(range(163, 420, 40))
+    assert sefaz_scan.load_historico(cnpj, settings) is None
+    assert sefaz_scan.load_nsu_state(settings)[cnpj] == "000000000000420"
+    assert result.status == "ok" and result.nsu_pendentes == 0
+
+
+def test_historico_para_no_cursor_de_quando_foi_ligado(tmp_path, monkeypatch):
+    """10/11: o que vem depois do cursor do início a varredura normal baixa (e os pulos do 656 vão
+    para a fila); a recuperação não volta a consultar esses NSUs. Sem "ate" (ligada antes), usa o
+    cursor menos a faixa da fila."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    settings.ensure_directories()
+    cnpj = "27184930000107"
+    sefaz_scan.save_nsu_checkpoint(cnpj, "000000000000050", settings)
+    sefaz_scan.iniciar_historico(cnpj, "2026-08-12", settings)
+    sefaz_scan.save_nsu_checkpoint(cnpj, "000000000000090", settings)
+    h = sefaz_scan.load_historico(cnpj, settings)
+    assert sefaz_scan.fim_historico(cnpj, h, settings) == 50
+    h.pop("ate")
+    sefaz_scan.enfileirar_nsu_pendentes(cnpj, 71, 90, settings)
+    assert sefaz_scan.fim_historico(cnpj, h, settings) == 70
+    h["fase"], h["proximo"] = "avanco", 70
+    sefaz_scan._passo_historico(h, 70, [], 70)
+    assert h["concluido"]
+
+
+def test_pendencias_em_disco_retomam_ao_subir(tmp_path, monkeypatch):
+    """11/11: depois de um rebuild, a fila de pulados/histórico em disco volta a ter rodada no fim
+    do cooldown, em vez de esperar a varredura das 06h."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    settings.ensure_directories()
+    a, b = MagicMock(cnpj="36592814000100"), MagicMock(cnpj="43820617000166")
+    with patch.object(sefaz_scan, "_resolve_providers", return_value=[a, b]):
+        assert sefaz_scan.segundos_ate_retomar_pendencias(settings) is None
+        sefaz_scan.enfileirar_nsu_pendentes(b.cnpj, 10, 12, settings)
+        sefaz_scan.save_cnpj_cooldown(b.cnpj, 1800, settings)
+        sefaz_scan.save_cnpj_cooldown(a.cnpj, 3000, settings)  # sem pendência: não conta
+        espera = sefaz_scan.segundos_ate_retomar_pendencias(settings)
+        assert 1790 + sefaz_scan.MARGEM_RETENTATIVA_SECONDS <= espera <= 1800 + sefaz_scan.MARGEM_RETENTATIVA_SECONDS
+
+
+def test_alerta_sem_varredura_conta_por_cnpj(monkeypatch):
+    """16/11 (#44): com o Tiny na mesma fila, sempre algum CNPJ levava 656 e o alerta global saía para os 4,
+    embora cada um conseguisse a varredura entre uma recusa e outra."""
+    monkeypatch.setattr(sefaz_scan, "_falhas_seguidas", {})
+    auditoria = MagicMock()
+    monkeypatch.setattr(sefaz_scan, "record_audit_error", auditoria)
+    resumo = lambda *r: sefaz_scan.SefazScanSummary(started_at="", finished_at="", resultados=list(r))  # noqa: E731
+    recusa = lambda c: CnpjScanResult(cnpj=c, status="cooldown", recusado=True)  # noqa: E731
+    ok = lambda c: CnpjScanResult(cnpj=c, status="ok")  # noqa: E731
+    pulado = lambda c: CnpjScanResult(cnpj=c, status="cooldown", consultado=False)  # noqa: E731
+
+    n = sefaz_scan.TENTATIVAS_ANTES_DO_ALERTA
+    for i in range(3 * n):
+        # A alterna recusa e varredura; B é sempre recusado, com rodadas puladas no meio (não zeram).
+        a = recusa("A") if i % 2 else ok("A")
+        b = pulado("B") if i % 7 == 3 else recusa("B")
+        sefaz_scan.registrar_cnpjs_sem_varredura(resumo(a, b))
+
+    cnpjs = [c.kwargs["emitente_cnpj"] for c in auditoria.call_args_list]
+    assert cnpjs and set(cnpjs) == {"B"}
+    # Erro conta; 656 que recuperou NSU pelo consNSU não conta.
+    monkeypatch.setattr(sefaz_scan, "_falhas_seguidas", {"C": n - 1, "D": n - 1})
+    assert sefaz_scan.registrar_cnpjs_sem_varredura(resumo(
+        CnpjScanResult(cnpj="C", status="erro", erro="timeout"),
+        CnpjScanResult(cnpj="D", status="cooldown", recusado=True, nsu_recuperados=1),
+    )) == ["C"]
+    assert "D" not in sefaz_scan._falhas_seguidas

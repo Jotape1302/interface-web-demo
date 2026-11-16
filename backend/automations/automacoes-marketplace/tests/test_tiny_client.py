@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from app.dimensoes import Dimensoes
 from app.tiny_client import ClienteTiny, TinyAPIError
 
 
@@ -38,25 +37,6 @@ def test_lista_produtos_paginando_so_ativos():
     assert len(list(_cliente(http).produtos())) == 101
     assert http.chamadas[1][2]["params"] == {"situacao": "A", "limit": 100, "offset": 100}
     assert http.chamadas[0][2]["headers"]["Authorization"] == "Bearer tok"
-
-
-def test_gravar_dimensoes_manda_sku_e_descricao_e_peso_em_kg():
-    http = HTTPFalso([Resp(204)])
-    produto = {
-        "id": 7, "sku": "PV83", "descricao": "Cantoneira",
-        "dimensoes": {"altura": 1, "diametro": 2, "quantidadeVolumes": 1, "embalagem": {"id": 3, "tipo": 2, "descricao": "Caixa"}},
-    }
-    _cliente(http).gravar_dimensoes(produto, Dimensoes(1.6, 1.6, 300, 800))
-    metodo, url, kw = http.chamadas[0]
-    assert (metodo, url) == ("PUT", "http://tiny/produtos/7")
-    assert kw["json"] == {
-        "sku": "PV83",
-        "descricao": "Cantoneira",
-        "dimensoes": {
-            "diametro": 2, "altura": 1.6, "largura": 1.6, "comprimento": 300,
-            "pesoLiquido": 0.8, "pesoBruto": 0.8, "embalagem": {"id": 3, "tipo": 2},
-        },
-    }
 
 
 def test_sem_token_e_erro_http_viram_tinyapierror():

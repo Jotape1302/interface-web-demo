@@ -12,17 +12,24 @@ seu `.review.json` está: `pending_review/`, `processed/` ou `archived/`. Arquiv
 confirmar uma nota nunca apaga o `.review.json` — só move para o diretório do novo
 estado — para permitir consultar o histórico completo (itens, categorias sugeridas)
 mais tarde, sem depender só do `.meta.json` de auditoria (que não guarda os itens).
+
+Sugestão do Qwen (classificador local no PC do TI, ver `update_qwen_suggestions`): campos
+`qwen_*` opcionais por item e por nota; `.review.json` antigos, sem eles, continuam válidos.
+A gravação é atômica (`write_json_atomic`): a tela nunca lê um JSON pela metade
+enquanto o coletor grava a sugestão.
 """
 import json
 import logging
 import shutil
-from dataclasses import asdict, dataclass, field
+import threading
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
+from app import json_store
 from app.nfe_client import NFeData, NFeDuplicate
 from app.nfe_items import NFeItem
 
@@ -39,6 +46,9 @@ class ReviewItem:
     quantidade: Decimal
     valor_unitario: Optional[Decimal]
     categoria_sugerida_id: str
+    qwen_categoria_id: Optional[str] = None
+    qwen_confianca: Optional[str] = None  # "alta" | "media" | "baixa"
+    qwen_motivo: Optional[str] = None
 
 
 @dataclass
@@ -51,6 +61,11 @@ class ReviewRecord:
     itens: List[ReviewItem] = field(default_factory=list)
     last_error: Optional[str] = None
     last_error_at: Optional[str] = None
+    qwen_modelo: Optional[str] = None
+    qwen_classificado_em: Optional[str] = None
+    # Gravados na confirmação (confirm-lancamento): cursor das confirmadas e histórico de pagamento.
+    confirmado_em: Optional[str] = None
+    forma_pagamento: Optional[str] = None
 
 
 def _decimal_or_none(v: Optional[str]) -> Optional[Decimal]:
@@ -72,6 +87,8 @@ def _nfe_data_to_dict(nfe_data: NFeData) -> Dict[str, Any]:
         "destinatario_cnpj": nfe_data.destinatario_cnpj,
         "destinatario_nome": nfe_data.destinatario_nome,
         "meio_pagamento_nfe": nfe_data.meio_pagamento_nfe,
+        "bandeira_cartao_nfe": nfe_data.bandeira_cartao_nfe,
+        "parcelas_nfe": nfe_data.parcelas_nfe,
         "numero_documento_custom": nfe_data.numero_documento_custom,
         "marcador_empresa": nfe_data.marcador_empresa,
         "marcador_caixa": nfe_data.marcador_caixa,
@@ -94,6 +111,8 @@ def _nfe_data_from_dict(data: Dict[str, Any]) -> NFeData:
         destinatario_cnpj=data.get("destinatario_cnpj"),
         destinatario_nome=data.get("destinatario_nome"),
         meio_pagamento_nfe=data.get("meio_pagamento_nfe"),
+        bandeira_cartao_nfe=data.get("bandeira_cartao_nfe"),
+        parcelas_nfe=data.get("parcelas_nfe"),
         numero_documento_custom=data.get("numero_documento_custom"),
         marcador_empresa=data.get("marcador_empresa"),
         marcador_caixa=data.get("marcador_caixa"),
@@ -118,6 +137,10 @@ def _record_payload(record: ReviewRecord) -> Dict[str, Any]:
         "staged_filename": record.file_path.name,
         "last_error": record.last_error,
         "last_error_at": record.last_error_at,
+        "qwen_modelo": record.qwen_modelo,
+        "qwen_classificado_em": record.qwen_classificado_em,
+        "confirmado_em": record.confirmado_em,
+        "forma_pagamento": record.forma_pagamento,
         "nfe_data": _nfe_data_to_dict(record.nfe_data),
         "itens": [
             {
@@ -129,6 +152,9 @@ def _record_payload(record: ReviewRecord) -> Dict[str, Any]:
                 "quantidade": str(ri.quantidade),
                 "valor_unitario": str(ri.valor_unitario) if ri.valor_unitario is not None else None,
                 "categoria_sugerida_id": ri.categoria_sugerida_id,
+                "qwen_categoria_id": ri.qwen_categoria_id,
+                "qwen_confianca": ri.qwen_confianca,
+                "qwen_motivo": ri.qwen_motivo,
             }
             for ri in record.itens
         ],
@@ -144,8 +170,7 @@ def write_record_json(record: ReviewRecord) -> Path:
     """
     settings.ensure_directories()
     json_path = _review_json_path_for(record.file_path)
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(_record_payload(record), f, indent=2, ensure_ascii=False)
+    json_store.write_json_atomic(json_path, _record_payload(record))
     return json_path
 
 
@@ -212,6 +237,9 @@ def _load_record(json_path: Path) -> Optional[ReviewRecord]:
             quantidade=Decimal(it["quantidade"]),
             valor_unitario=_decimal_or_none(it.get("valor_unitario")),
             categoria_sugerida_id=it.get("categoria_sugerida_id", ""),
+            qwen_categoria_id=it.get("qwen_categoria_id"),
+            qwen_confianca=it.get("qwen_confianca"),
+            qwen_motivo=it.get("qwen_motivo"),
         )
         for it in payload.get("itens", [])
     ]
@@ -225,6 +253,10 @@ def _load_record(json_path: Path) -> Optional[ReviewRecord]:
         itens=itens,
         last_error=payload.get("last_error"),
         last_error_at=payload.get("last_error_at"),
+        qwen_modelo=payload.get("qwen_modelo"),
+        qwen_classificado_em=payload.get("qwen_classificado_em"),
+        confirmado_em=payload.get("confirmado_em"),
+        forma_pagamento=payload.get("forma_pagamento"),
     )
 
 
@@ -275,6 +307,18 @@ def _apagar_entrada(json_path: Path, preservar: Optional[Path] = None) -> None:
                 alvo.unlink()
             except OSError as e:
                 logger.warning(f"Falha ao remover '{alvo.name}' da fila de revisão: {e}")
+
+
+def count_pending() -> int:
+    """
+    Quantas notas aguardam revisão, sem abrir os `.review.json` (o status da SEFAZ é lido a cada
+    poll do painel). `stage_for_review` mantém uma entrada por chave; duplicadas antigas, se houver,
+    somem na próxima `list_pending`. 12/11/2026: com o histórico de 90 dias da SEFAZ a fila cresceu,
+    e ler todos os arquivos só para contar passava dos 8 s do gateway com a conciliação ML rodando
+    (incidente #35).
+    """
+    settings.ensure_directories()
+    return sum(1 for _ in settings.PENDING_REVIEW_DIR.glob("*.review.json"))
 
 
 def list_pending() -> List[ReviewRecord]:
@@ -366,3 +410,35 @@ def archive_pending(chave: str) -> Optional[ReviewRecord]:
 
 def restore_archived(chave: str) -> Optional[ReviewRecord]:
     return _move_record(chave, settings.ARCHIVED_DIR, settings.PENDING_REVIEW_DIR)
+
+
+_qwen_lock = threading.Lock()
+
+
+def update_qwen_suggestions(
+    chave: str,
+    staged_at: str,
+    sugestoes: Dict[str, Tuple[str, str, str]],
+    modelo: str,
+    classificado_em: str,
+) -> str:
+    """
+    Grava a sugestão do Qwen (`item_id → (categoria_id, confianca, motivo)`) no `.review.json`
+    da nota, só se ela ainda estiver em `pending_review/` e for a MESMA versão que o Qwen
+    classificou (`staged_at` igual): a nota pode ter sido confirmada, arquivada ou estagiada de
+    novo com outros itens enquanto o PC do TI processava. Devolve "gravado", "nao_pendente" ou
+    "desatualizada". Não valida o catálogo: quem chama já rejeitou IDs fora de TINY_CATEGORIES.
+    """
+    with _qwen_lock:
+        record = get_pending(chave)
+        if record is None:
+            return "nao_pendente"
+        if record.staged_at != staged_at:
+            return "desatualizada"
+        for ri in record.itens:
+            if ri.item_id in sugestoes:
+                ri.qwen_categoria_id, ri.qwen_confianca, ri.qwen_motivo = sugestoes[ri.item_id]
+        record.qwen_modelo = modelo
+        record.qwen_classificado_em = classificado_em
+        write_record_json(record)
+        return "gravado"

@@ -291,7 +291,6 @@ def test_sefaz_a1_provider_res_nfe():
 def test_multi_sefaz_a1_provider_cascade_success():
     from unittest.mock import MagicMock
     from app.nfe_client import MultiSefazA1Provider, NFeProviderError, NFeData
-    import pytest
 
     prov1 = MagicMock()
     prov1.cnpj = "11111111000111"
@@ -321,18 +320,18 @@ def test_multi_sefaz_a1_provider_cascade_success():
 
 def test_multi_sefaz_a1_provider_all_failed():
     from unittest.mock import MagicMock
-    from app.nfe_client import MultiSefazA1Provider, NFeProviderError
+    from app.nfe_client import MultiSefazA1Provider, NFeNaoDestinadaError, NFeProviderError
     import pytest
 
     prov1 = MagicMock()
     prov1.cnpj = "11111111000111"
-    prov1.get_nfe_data.side_effect = NFeProviderError("SEFAZ retornou rejeição: cStat 137 - Nenhum documento localizado")
+    prov1.get_nfe_data.side_effect = NFeProviderError("SEFAZ retornou rejeição: cStat 137 - Nenhum documento localizado", c_stat="137")
 
     multi = MultiSefazA1Provider([prov1])
-    with pytest.raises(NFeProviderError) as exc_info:
+    with pytest.raises(NFeNaoDestinadaError) as exc_info:
         multi.get_nfe_data("35230912345678000123550010000001231000000123")
 
-    assert "não foi localizada em nenhum" in str(exc_info.value)
+    assert exc_info.value.c_stat == "137" and exc_info.value.cnpjs == ["11111111000111"]
 
 
 def test_collect_candidate_passwords():
@@ -434,7 +433,7 @@ def test_enrich_nfe_data_from_file_context_payment_markers():
 
     # 2. Norvia com marcador 'Caixa Visa Norvia'
     base_visa_norvia = NFeData(
-        chave="41260717360924000100650010011896631292803398",
+        chave="41260717360924000100650010011896631292803392",
         numero_nota="102",
         data_emissao=date(2026, 7, 16),
         emitente_nome="",
@@ -452,7 +451,7 @@ def test_enrich_nfe_data_from_file_context_payment_markers():
 
     # 3. Revesta com marcador 'Caixa Visa'
     base_visa_revesta = NFeData(
-        chave="41260717360924000100650010011896631292803398",
+        chave="41260717360924000100650010011896631292803393",
         numero_nota="103",
         data_emissao=date(2026, 7, 16),
         emitente_nome="",
@@ -470,7 +469,7 @@ def test_enrich_nfe_data_from_file_context_payment_markers():
 
     # 4. Revesta com marcador 'Caixa Elo' sem fornecedor explícito
     base_elo = NFeData(
-        chave="41260717360924000100650010011896631292803398",
+        chave="41260717360924000100650010011896631292803394",
         numero_nota="104",
         data_emissao=date(2026, 7, 16),
         emitente_nome="",
@@ -486,7 +485,7 @@ def test_enrich_nfe_data_from_file_context_payment_markers():
     # Verifica vencimento calculado para Elo (próximo dia 15)
     assert res_elo.duplicatas[0].vencimento == date(2026, 8, 15)
 
-    # 5. Revesta com marcador 'Caixa Elo' e fornecedor com número no nome ('SUPERMERCADO 77')
+    # 5. Revesta com marcador 'Caixa Elo' e fornecedor com número no nome ('SUPERMERCADO 88')
     base_supermercado = NFeData(
         chave="41260958203741000150651090001747321223392183",
         numero_nota="174732",
@@ -495,12 +494,12 @@ def test_enrich_nfe_data_from_file_context_payment_markers():
         emitente_cnpj="58203741000150",
         valor_total=Decimal("0.00")
     )
-    file_super = Path("NFC-e Revesta - Caixa Elo - SUPERMERCADO 77 - R$40,03.jpeg")
+    file_super = Path("NFC-e Revesta - Caixa Elo - SUPERMERCADO 88 - R$40,03.jpeg")
     res_super = enrich_nfe_data_from_file_context(base_supermercado, file_super)
 
     assert res_super.numero_documento_custom == "NFC-e Revesta"
     assert res_super.marcador_caixa == "Caixa Elo"
-    assert res_super.emitente_nome == "SUPERMERCADO 77"
+    assert res_super.emitente_nome == "SUPERMERCADO 88"
     assert res_super.valor_total == Decimal("40.03")
     assert res_super.duplicatas[0].valor == Decimal("40.03")
     assert res_super.duplicatas[0].vencimento == date(2026, 10, 15)
@@ -554,7 +553,7 @@ def test_enrich_nfe_data_pure_filename_and_internal_text():
 
     # Nome do arquivo exatamente no padrão puro: 'NFC-e Norvia - Clara.pdf'
     base = NFeData(
-        chave="41260717360924000100650010011896631292803398",
+        chave="41260717360924000100650010011896631292803399",
         numero_nota="505",
         data_emissao=date.today(),
         emitente_nome="",
@@ -603,7 +602,7 @@ def test_single_installment_when_enriching_mock_with_marcador():
     base_nfe = mock_prov.get_nfe_data("35230912345678000123550010000001231000000123")
     assert len(base_nfe.duplicatas) == 2
 
-    file_path = Path("NFC-e Revesta - Caixa Elo - SUPERMERCADO 77 - R$40,03.jpeg")
+    file_path = Path("NFC-e Revesta - Caixa Elo - SUPERMERCADO 88 - R$40,03.jpeg")
     enriched = enrich_nfe_data_from_file_context(base_nfe, file_path)
 
     # Deve consolidar em exatamente 1 parcela de R$ 40,03
@@ -631,7 +630,7 @@ def test_extract_fiscal_data_with_multiple_duplicatas():
     from app.nfe_client import extract_fiscal_data_from_text
 
     text = """
-    SUPERMERCADO 77 LTDA
+    SUPERMERCADO 88 LTDA
     CNPJ: 58.203.741/0001-50
     EMISSAO: 10/09/2026
     DADOS DA FATURA
@@ -641,7 +640,7 @@ def test_extract_fiscal_data_with_multiple_duplicatas():
     VALOR TOTAL: R$ 450,00
     """
     res = extract_fiscal_data_from_text(text)
-    assert res["emitente_nome"] == "SUPERMERCADO 77 LTDA"
+    assert res["emitente_nome"] == "SUPERMERCADO 88 LTDA"
     assert res["emitente_cnpj"] == "58203741000150"
     assert res["valor_total"] == Decimal("450.00")
     assert len(res["duplicatas"]) == 3
@@ -654,7 +653,7 @@ def test_enrich_preserves_multiple_real_duplicatas_with_card_marker():
     from app.nfe_client import NFeData, NFeDuplicate, enrich_nfe_data_from_file_context
 
     base_nfe = NFeData(
-        chave="41260958203741000150550010000001231000000122",
+        chave="41260958203741000150550010000001231000000123",
         numero_nota="123",
         data_emissao=date(2026, 7, 10),
         emitente_nome="DISTRIBUIDORA REAL LTDA",
@@ -681,7 +680,7 @@ def test_enrich_preserves_multiple_real_duplicatas_with_card_marker():
 def test_load_sefaz_providers_registers_filial_curitiba_from_matriz_cert(tmp_path):
     from unittest.mock import patch
     from app.config import Settings
-    from app.nfe_client import MultiSefazA1Provider, SefazA1Provider, load_sefaz_providers
+    from app.nfe_client import MultiSefazA1Provider, load_sefaz_providers
 
     certs_dir = tmp_path / "secrets"
     certs_dir.mkdir()
@@ -716,7 +715,7 @@ def test_nfe_xml_parser_identifies_curitiba_vs_campinas_by_cnpj():
     xml_campinas = """<?xml version="1.0" encoding="UTF-8"?>
     <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
       <NFe>
-        <infNFe Id="NFe35230927184930000107550010000001231000000120" versao="4.00">
+        <infNFe Id="NFe35230927184930000107550010000001231000000123" versao="4.00">
           <ide><nNF>123</nNF><dhEmi>2026-09-10T14:30:00-03:00</dhEmi></ide>
           <emit><CNPJ>98765432000109</CNPJ><xNome>FORNECEDOR SP LTDA</xNome></emit>
           <dest><CNPJ>27184930000107</CNPJ><xNome>NORVIA MATRIZ QUALQUER NOME</xNome></dest>
@@ -728,7 +727,7 @@ def test_nfe_xml_parser_identifies_curitiba_vs_campinas_by_cnpj():
     xml_curitiba = """<?xml version="1.0" encoding="UTF-8"?>
     <nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
       <NFe>
-        <infNFe Id="NFe41230927184930000280550010000004561000000450" versao="4.00">
+        <infNFe Id="NFe41230927184930000280550010000004561000000456" versao="4.00">
           <ide><nNF>456</nNF><dhEmi>2026-09-10T14:30:00-03:00</dhEmi></ide>
           <emit><CNPJ>98765432000109</CNPJ><xNome>FORNECEDOR PR LTDA</xNome></emit>
           <dest><CNPJ>27184930000280</CNPJ><xNome>NORVIA ACABAMENTOS FORNECEDOR SEM FILIAL NO NOME</xNome></dest>
@@ -737,11 +736,11 @@ def test_nfe_xml_parser_identifies_curitiba_vs_campinas_by_cnpj():
       </NFe>
     </nfeProc>"""
 
-    data_g = NFeXmlParser.parse(xml_campinas, "35230927184930000107550010000001231000000120")
+    data_g = NFeXmlParser.parse(xml_campinas, "35230927184930000107550010000001231000000123")
     assert data_g.destinatario_cnpj == "27184930000107"
     assert data_g.destinatario_nome == "NORVIA ACABAMENTOS LTDA (CAMPINAS)"
 
-    data_l = NFeXmlParser.parse(xml_curitiba, "41230927184930000280550010000004561000000450")
+    data_l = NFeXmlParser.parse(xml_curitiba, "41230927184930000280550010000004561000000456")
     assert data_l.destinatario_cnpj == "27184930000280"
     assert data_l.destinatario_nome == "NORVIA ACABAMENTOS LTDA (CURITIBA)"
 
@@ -752,7 +751,7 @@ def test_nfe_xml_parser_identifies_curitiba_vs_campinas_by_cnpj():
     "nome, esperado",
     [
         ("41260552740396000107550010000000241143751412.xml", None),  # XML salvo com a chave
-        ("invoice-2000017019020870.xml", None),  # nome de download de marketplace
+        ("invoice-2000074881215530.xml", None),  # nome de download de marketplace
         ("danfe.pdf", None),
         ("NFC-e Revesta - Caixa Elo.pdf", "NFC-e Revesta"),
         ("Recibo - Norvia.pdf", "Recibo"),

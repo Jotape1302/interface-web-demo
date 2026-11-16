@@ -16,7 +16,8 @@ const PAGE_BY_PATH: Record<string, PageId> = {
   '/admin/usuarios': 'admin-users',
   '/admin/auditoria': 'admin-audit',
   '/admin/saude': 'admin-health',
-  '/admin/erros': 'admin-errors',
+  '/admin/roi': 'admin-roi',
+  '/admin/agentes-qwen': 'admin-agentes-qwen',
   '/admin/tokens': 'admin-tokens',
   '/contas-a-pagar': 'accounts-payable',
   '/conciliacao-mercado-livre': 'ml-reconciliation',
@@ -25,6 +26,7 @@ const PAGE_BY_PATH: Record<string, PageId> = {
   '/contagem-estoque': 'stock-count',
   '/fretes-a-combinar': 'shipping-review',
   '/padronizacao-dimensoes': 'dimension-standardization',
+  '/email-marketing': 'email-marketing',
   '/producao': 'producao-overview',
 };
 

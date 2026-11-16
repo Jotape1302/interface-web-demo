@@ -76,6 +76,11 @@ Para evitar o travamento de conexões ou bloqueio de workers FastAPI em caso de 
 - **Tiny ERP v3 (`tiny_client.py`)**: `DEFAULT_TINY_TIMEOUT = (5.0, 20.0)` e `DEFAULT_TINY_QUERY_TIMEOUT = (10.0, 45.0)`
 - **Banco Inter PJ (`inter_client.py`)**: `DEFAULT_INTER_TIMEOUT = (5.0, 25.0)`
 
+**Retentativas (`app/http_retry.py`)**: uma política única para as chamadas HTTP de saída, com backoff
+exponencial, jitter e respeito ao `Retry-After` (teto de 60 s). 429 é repetido em qualquer método, porque o
+servidor recusou antes de processar. 5xx é repetido só em leitura (GET/HEAD/OPTIONS). Escrita (ex.: baixa no
+Tiny) **não** repete em 5xx: a releitura de conferência do chamador decide se a escrita entrou.
+
 ### 4. Trilha Estruturada de Auditoria (`app/audit.py`)
 - Emissão de logs estruturados em JSON (`log_audit_event`) para operações críticas (lançamento de notas, conciliação bancária, baixas de contas a pagar, invalidação de tokens), compatível com coletores modernos de telemetria.
 
@@ -115,11 +120,26 @@ Para evitar o travamento de conexões ou bloqueio de workers FastAPI em caso de 
   (dados de ML/Tiny vêm de terceiros — SEC-03); tarefas da conciliação ML só em `/api/v1/conciliacao-ml/jobs/{id}`
   e as da conciliação Inter só em `/api/v1/reconciliacao/jobs/{id}` (SEC-04).
 
+### Revisão de 2026-10-27 (commits 2e8f721..f90a6e3)
+
+- **Lote DANFE fora do event loop**: `process_batch_files` (`app/routers/danfe.py`) roda cada arquivo em
+  `asyncio.to_thread`. Antes, um OCR pesado travava `/health` e as demais rotas.
+- **Fuso**: `app/fuso.py` substitui offset fixo e `date.today()`/`datetime.now()` de negócio. A imagem tem
+  `TZ=America/Sao_Paulo` e `tzdata` (`requirements.txt`).
+- **Dinheiro**: a baixa ML mantém `valorPago`/saldo em `Decimal`. A conversão para o Tiny passa por um ponto só
+  (`_valor_para_tiny`, `ROUND_HALF_UP`), e `_baixar_parte` unifica produto e frete.
+- **Retentativa**: `app/http_retry.py` (seção 3). A baixa não repete às cegas.
+- **Conferência**: falha na releitura da conferência passa a ser logada.
+- **SEC-06**: exportação da planilha de lançamentos por POST (seção de Conciliação ML).
+
 ---
 
 ## 📁 Estrutura Interna de Módulos (`app/`)
 
-- `api.py`: Servidor FastAPI com rotas de upload, listagem de pendências, execução de baixas, conciliação e dados do dashboard financeiro.
+- `api.py`: Monta o FastAPI (chave interna, tratador de erro, CORS), as rotinas diárias de fundo (SEFAZ, dashboard, conciliação ML, tokens ML, contas a pagar) e inclui os routers.
+- `routers/`: Rotas por domínio — `health.py` (saúde), `danfe.py` (upload, SEFAZ/NSU, revisão e lançamento no Tiny), `financial_dashboard.py`, `reconciliacao.py` (Inter × Contas a Pagar), `conciliacao_ml.py` (ML × MP × Contas a Receber) e `jobs.py` (fila em memória das tarefas longas). Nos testes, o `patch` vai no módulo do router que usa o nome (ex.: `app.routers.danfe.TinyClient`).
+- `instancia_unica.py`: lock exclusivo em `DATA_DIR/.api.lock` na subida da API. A fila de tarefas, os caches e os locks das rotinas só valem num processo: uma segunda API no mesmo `DATA_DIR` (`--workers 2`, dois containers no mesmo volume) falha na subida em vez de duplicar rotinas e sobrepor gravações.
+- `healthcheck.py`: HEALTHCHECK do container (GET /health no modo API; no modo daemon, só o processo).
 - `audit.py`: Logger unificado para auditoria estruturada em formato JSON.
 - `sefaz_scan.py`: Rotina agendada ou sob demanda que consulta o WebService de Distribuição DFe da SEFAZ para localizar novas notas fiscais emitidas contra os CNPJs do grupo.
 - `scanner.py`: Scanner de alta precisão para leitura de chave de 44 dígitos em PDFs e imagens com OpenCV, Otsu e OCR Tesseract.
@@ -128,7 +148,10 @@ Para evitar o travamento de conexões ou bloqueio de workers FastAPI em caso de 
 - `categorization.py` & `category_history.py`: Motor heurístico que aprende as categorias de despesa preferidas por emitente.
 - `inter_client.py`: Cliente seguro da API v2 do Banco Inter com mTLS, extratos e boletos DDA.
 - `reconciliation.py`: Algoritmo de cruzamento entre saídas bancárias do Inter e títulos do Tiny ERP.
-- `tiny_client.py`: Conector com o Tiny ERP v2 e v3 para inclusão de títulos, consulta de saldos e baixa de títulos.
+- `tiny_client.py`: Fachada do conector Tiny ERP v2 e v3 para inclusão de títulos, consulta de saldos e baixa de títulos. Reexporta `app/tiny/base.py`, onde ficam a base HTTP, timeouts, throttles por processo/conta e a conversão de valores (`_valor_para_tiny`, arredondamento `ROUND_HALF_UP`).
+- `fuso.py`: Fuso de negócio `America/Sao_Paulo` (`ZoneInfo`). Hoje, vencimento e data da baixa são calculados aqui, não com `date.today()` nem offset fixo, porque o container roda em UTC.
+- `dinheiro.py`: Soma e comparação de valores em `Decimal`; serialização JSON com 2 casas (`dinheiro_json`, contrato numérico inalterado).
+- `http_retry.py`: Política de retentativa HTTP (ver seção 3).
 - `financial_dashboard.py`: Cálculo consolidado de indicadores financeiros e geração de insights de tesouraria.
 - `token_repository.py`: Repositório resiliente de tokens com retry transitório, cache em memória e grace period.
 - `ml_apis.py`: Clientes do Mercado Livre e do Mercado Pago (relatório de liberações, pedidos) e resolução dos tokens.
@@ -136,6 +159,41 @@ Para evitar o travamento de conexões ou bloqueio de workers FastAPI em caso de 
 - `contas_pagar_rotina.py`: Estado persistente das pendências de Contas a Pagar (`DATA_DIR/contas_pagar/estado.json`), mesclagem das prévias e conferência diária de baixas externas.
 - `internal_auth.py`: Validação do header `X-Internal-Key` enviado pelo gateway.
 - `boleto.py`, `nfe_items.py`, `tiny_categories.py`, `cert_status.py`, `json_store.py`: Linha digitável de boletos, itens da NF-e, categorias do Tiny, validade dos certificados e gravação atômica de estado em JSON.
+
+### Revisão de NF-e — sugestão do classificador Qwen (`/api/v1/danfe/qwen/*`)
+
+O Qwen 14B roda no PC do TI (repo `agentes-qwen`) e nunca é chamado daqui: o coletor da VPS
+(`scripts/coletor-incidentes`) leva as notas pelo túnel SSH reverso e traz as sugestões de volta.
+As três rotas exigem a `X-Internal-Key` e o gateway não as repassa ao painel.
+- `GET /api/v1/danfe/qwen/pendentes?limit=20`: notas em `pending_review/` sem classificação do Qwen e
+  com algum item sem histórico pelo código. Cada item traz `historico` (`categoria_id` + `nivel`) e
+  `classificar`; a resposta traz o catálogo fechado (`categorias`) para o JSON Schema do PC.
+- `POST /api/v1/danfe/qwen/sugestoes` (`chave`, `staged_at`, `modelo`, `itens[]` com `item_id`,
+  `categoria_id`, `confianca` alta/media/baixa, `motivo`): 422 com ID fora de `TINY_CATEGORIES` ou
+  item que a nota não tem, 404 se a nota saiu da revisão, 409 se foi estagiada de novo
+  (`staged_at` diferente). Grava `qwen_*` no `.review.json` (`update_qwen_suggestions`).
+- `GET /api/v1/danfe/qwen/confirmadas-recentes?cursor=&limit=200`: confirmadas em ordem de
+  `confirmado_em` (nas antigas, a data do `.review.json`), com a categoria final e o palpite do Qwen.
+  `fim=false` pede outra página com o `cursor` devolvido.
+
+Precedência da categoria na tela (`_sugestao_item`, decidida em 03/11/2026): histórico por código >
+por NCM > Qwen alta/média > histórico só do fornecedor > Qwen baixa > regra. A forma de pagamento
+sugerida (`forma_pagamento.py`) não usa LLM: o XML (tPag 17 pix, 15 boleto; cartão com tBand 02
+clara, 06 caixa_elo, 01 caixa_visa_norvia nas Norvia ou caixa_visa) e, sem isso, a última forma
+confirmada com o fornecedor; no painel o marcador do nome do arquivo continua acima das duas. O
+meio de pagamento da NFe (tPag) acompanha a forma: Pix 17, Boleto 15, cartões 03 (04 se o XML ou o
+último lançamento com o fornecedor indicar débito); sem forma conhecida, o tPag específico do XML ou o
+último meio lançado com o fornecedor (`meio_pagamento_nfe_historico` no pending-review). O
+`treino.sugestao` do confirm-lancamento leva origem, nível, confiança, motivo, modelo e as
+`alternativas` de cada fonte, para medir o acerto de cada uma.
+
+### Importação por chave — recusas da SEFAZ que não são defeito (`POST /api/v1/danfe/import-key`)
+
+Viram 422 com explicação e `logger.warning` (o coletor só abre incidente para ERROR):
+- cStat 640/137 em todos os CNPJs do pool: nenhuma empresa é destinatária (`NFeNaoDestinadaError`);
+- cStat 632: a nota tem mais de 90 dias e a SEFAZ não a entrega mais pela chave;
+- cStat 656: o CNPJ passou de 20 consultas por hora (desde 2026-11-04, incidente #16).
+Qualquer outra falha segue `logger.error` + 502. Os códigos vêm do `c_stat` da exceção, nunca do texto.
 
 ### Contas a Pagar — rotina diária e estado persistente (`/api/v1/reconciliacao/*`)
 
@@ -157,7 +215,12 @@ As pendências do cruzamento Extrato Inter × Contas a Pagar Tiny ficam salvas e
 
 ### Conciliação Mercado Livre (`/api/v1/conciliacao-ml/*`)
 
-Todo dia às `ML_RECONCILIATION_HOUR` (padrão 8h), para Norvia Campinas e Revesta, a rotina reanalisa a
+**Planilha de lançamentos (SEC-06)**: a planilha marca os itens como exportados, então sai só por
+`POST /api/v1/conciliacao-ml/analises/{analise_id}/arquivos/lancamentos/exportar` (corpo opcional
+`{"incluir_exportados": false}`). O `GET .../arquivos/lancamentos` responde `405` com `Allow: POST`. No gateway, a
+rota exige `conciliacao_ml:baixar`. As demais planilhas seguem por GET.
+
+Todo dia às `ML_RECONCILIATION_HOUR` (padrão 5h, horário de São Paulo), para Norvia Campinas e Revesta, a rotina reanalisa a
 **janela móvel de 60 dias** (de D-60 até ontem, `periodo_padrao`): baixa o relatório de liberações do
 Mercado Pago, busca as vendas do ML desde `ML_RECONCILIATION_VENDAS_DIAS` (padrão 60) dias antes do
 período, cruza com os pedidos e as contas a receber do Tiny (só leitura) e grava a análise.
@@ -207,7 +270,8 @@ CONTAS_PAGAR_ROTINA_HOUR=7                          # 0-23, horário do servidor
 CONTAS_PAGAR_ROTINA_DIAS=60                         # janela em dias para trás
 
 # Conciliação Mercado Livre
-ML_RECONCILIATION_HOUR=8
+ML_RECONCILIATION_HOUR=5
+ML_RECONCILIATION_PARALELO=true                     # empresas ao mesmo tempo (fila do Tiny por conta)
 ML_RECONCILIATION_VENDAS_DIAS=60                    # vendas buscadas antes do período (janela de 60 dias)
 ML_TOKENS_FILE=data/ml_tokens.json                  # leitura extra de ml_tokens.json (depois de DATA_DIR)
 ML_OAUTH_RENOVACAO_PROPRIA=false                    # true habilita renovação OAuth própria pelo financeiro
@@ -226,4 +290,4 @@ npm run test:nfe
 # Ou dentro da pasta, sem venv (requirements-dev.txt = requirements.txt + httpx do TestClient):
 uv run --python 3.11 --with-requirements requirements-dev.txt pytest tests/ -v
 ```
-*(426 testes unitários e de integração cobrindo SEFAZ, parser XML, Inter, conciliação, resiliência de tokens, auditoria estruturada e Tiny ERP).*
+*(457 testes coletados com `pytest --collect-only`, em 2026-10-27, cobrindo SEFAZ, parser XML, Inter, conciliação, resiliência de tokens, auditoria estruturada e Tiny ERP).*

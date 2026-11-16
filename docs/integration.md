@@ -57,7 +57,7 @@ Configurado via variáveis `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_N
 - **Tabela `conciliacao_baixas_historico`**: Registra cada baixa executada na conciliação Banco Inter × Tiny ERP (usuário, lote, empresa, documento, valores e status de retorno do Tiny).
 - **Tabela `inter_dda_boletos`**: Boletos capturados pelo DDA do Banco Inter das 4 filiais.
 - **Tabela `api_tokens`**: Tabela centralizada contendo os tokens OAuth v3 do Tiny ERP para cada uma das filiais (`norvia_campinas`, `norvia_curitiba`, `revesta`, `fabrilux`), rotacionados a cada 4 horas pelo n8n.
-- **Tabela `dimensoes_produtos` (banco `marketplace`)**: Medidas padronizadas validadas pela equipe de e-commerce.
+- **Tabela `dimensoes_produtos` (banco `marketplace`)**: histórico; não é mais gravada (desde 2026-10-26 as medidas vêm do cadastro do Tiny da mesma empresa).
 
 ### 4.2. n8n (Orquestração de Workflows)
 Configurado via `N8N_BASE_URL`, `N8N_API_KEY` e `N8N_WORKFLOW_IDS`:

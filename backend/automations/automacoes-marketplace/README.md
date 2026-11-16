@@ -10,50 +10,54 @@ sua tela em **Marketplace**:
 
 ## 1. Padronização de dimensões
 
-Medida do **produto real** (altura, largura, comprimento e peso), por **SKU**. Convenção:
-comprimento = maior lado, altura = menor.
+O **Tiny é a fonte da verdade** das medidas. Para cada anúncio do ML, pega o SKU e lê no Tiny
+**da mesma empresa** (`TINY_CONTA_POR_FILIAL`: ML Norvia → `norvia_campinas`, ML Revesta →
+`revesta`) altura, largura, comprimento e **peso bruto**. Medida de outra empresa não vale.
 
 Coleta diária às `DIMENSOES_HORA_COLETA` (6h) ou pelo botão da tela:
 
-- **Mercado Livre** primeiro (as duas contas): anúncios e SKUs — título, descrição e ficha
-  técnica do produto (`HEIGHT/WIDTH/LENGTH/THICKNESS/WEIGHT`…). A descrição só é relida quando
-  o anúncio muda. Anúncios sem SKU no ML aparecem numa lista à parte.
-- **Tiny** (`TINY_CONTAS`: Norvia Campinas e Revesta): nome, descrição e dimensões/peso do
-  cadastro, **só dos SKUs anunciados** (`DIMENSOES_SO_ANUNCIADOS`; o cadastro é lido um a um e
-  todos os produtos levariam horas). O cadastro só é relido quando muda.
-- Progresso na tela e no log (`[DIMENSOES] etapa: feitos/total`); os caches são gravados aos
-  poucos, então um restart no meio não perde o que já foi lido.
-- As medidas de cada fonte são comparadas (lados sem ordem, ±0,5 cm ou 3%; peso ±10 g ou 5%):
-  **alta** = todas as fontes com medida batem; **média** = a maioria bate ou só uma fonte;
-  **baixa** = conflito ou nenhuma medida. O peso conta junto (o ML exige peso).
-- **Tudo passa por revisão humana** na tela, com a medida de cada local e o valor sugerido.
+- **Mercado Livre** primeiro (as duas contas): anúncios, SKUs, os atributos de medida que a ficha
+  já usa (`HEIGHT/THICKNESS/WIDTH/LENGTH/WEIGHT/NET_WEIGHT`) e a embalagem (`SELLER_PACKAGE_*`).
+  Anúncios sem SKU no ML aparecem numa lista à parte.
+- **Tiny**: só os SKUs anunciados naquela conta; o cadastro só é relido quando `dataAlteracao`
+  muda (`cache_tiny`).
+- Progresso na tela e no log (`[DIMENSOES] etapa: feitos/total`).
+- Cada anúncio fica **igual**, **diferente** (a enviar), **sem medida** (Tiny sem lado ou peso
+  bruto) ou **fora do Tiny** (SKU não encontrado; Tiny que não respondeu não vira "não
+  encontrado"). Tolerância: 0,5 cm na ficha; lados ±0,5 cm ou 3% e peso ±10 g ou 5% na embalagem.
 
-Ao **validar** (em lote): grava em `dimensoes_produtos` (MariaDB) e, em segundo plano, envia:
+**Automático com confirmação**: a coleta não envia nada. Na tela, alguém seleciona os produtos
+a enviar e confirma em lote (sem editar medidas). O envio, em segundo plano, vai **só ao ML** e só
+com o que está diferente:
 
-- **Tiny**: `PUT /produtos/{id}` em todas as contas onde o SKU existe (dimensões em cm, peso
-  líquido e bruto em kg; `sku` e `descricao` vão como estão no cadastro, exigência da API).
-- **Mercado Livre**: ficha técnica (só os atributos de medida que o anúncio já usa) e as medidas
-  da **embalagem padrão** (`SELLER_PACKAGE_*`).
+- **Ficha técnica**: as medidas do Tiny nos atributos de medida que o anúncio já usa (`WEIGHT` =
+  peso bruto, `NET_WEIGHT` = peso líquido). Se o ML recusar a ficha, a embalagem vai sozinha.
+- **Embalagem** (`SELLER_PACKAGE_*`): as medidas do Tiny, com o peso bruto.
 
-O resultado fica por destino, com reenvio. Produto padronizado cuja ficha (Tiny ou ML) mudar
-depois volta como pendência **divergente do padrão**.
+**Nada é gravado no Tiny.** A tabela `dimensoes_produtos` não é mais usada (fica como histórico).
+O resultado fica por anúncio, com reenvio dos que falharam.
 
-**Embalagem padrão**: seção `EMBALAGEM_SECAO_CM` (5 x 7 cm) e o menor comprimento de
-`EMBALAGEM_COMPRIMENTOS_CM` (100, 200, 300 cm) que caiba o produto. Produto que não cabe não
-tem embalagem automática.
+**Embalagem**: altura, largura e comprimento do cadastro do Tiny, como estão (o ML só aceita
+inteiros: lado com fração sobe), com o peso bruto. Até 28/10/2026 era a padrão 5 x 7 x
+100/200/300 cm, que em boa parte dos anúncios voltava no ML para as medidas do cadastro.
 
 ## 2. Tipo de frete
 
-Todo dia às `FRETES_HORA_DIARIA` (7h), para cada conta do ML:
+Usa as medidas do Tiny da mesma empresa (última coleta da Padronização). Envio indicado pelo
+maior lado da embalagem: até `ME2_MAX_EMBALAGEM_CM` (200: embalagem de **1 m e 2 m**) é **ME2**; a de
+**3 m** é **ME1** (só nas contas de `ML_CONTAS_COM_ME1`; nas outras fica bloqueado).
 
-1. Sincroniza os anúncios e pega as **dimensões padronizadas** do SKU (sem padrão, o anúncio
-   não é alterado: aparece em "Sem dimensões padronizadas").
-2. Envio indicado pela embalagem padrão: **ME2** se o ML marca o anúncio com `me2_available` ou
-   se a embalagem cabe em `ME2_MAX_*`; senão **ME1** (só nas contas de `ML_CONTAS_COM_ME1`).
-3. Anúncio **a combinar**: envia as medidas da embalagem (com o peso do produto; o ML só aceita
-   inteiros) e troca para o envio indicado.
-4. Toda alteração é **conferida `FRETES_MINUTOS_CONFERENCIA` (10) minutos depois**. Se o ML
-   desfez, vai para o card **ML desfez**, com nova tentativa em lote.
+- **Rotina diária** (`FRETES_HORA_DIARIA`, 7h) e botão "Verificar agora": só os anúncios **a
+  combinar** — envia as medidas da embalagem (com o peso bruto; o ML só aceita inteiros) e troca
+  para o envio indicado. SKU sem medida/peso bruto no Tiny não é alterado.
+- **"Corrigir tipo de frete"** (botão, permissão `fretes:corrigir_tipo`, `POST
+  /api/v1/fretes/corrigir-tipo`): faz o mesmo e também troca os anúncios já em ME1/ME2 cujo tipo
+  não bate com a embalagem (ex.: 2 m em ME1). Anúncios no Full (`fulfillment`) ficam de fora.
+- Toda alteração é **conferida `FRETES_MINUTOS_CONFERENCIA` (10) minutos depois**. Se o ML
+  desfez, vai para o card **ML desfez**, com nova tentativa em lote.
+
+**Ordem recomendada** na primeira vez: coletar → confirmar o envio das medidas → "Corrigir tipo
+de frete". Depois disso a rotina diária cuida dos novos a combinar.
 
 Notificações (produtos a padronizar, frete desfeito, falha da rotina) vão pelo gateway só para
 os usuários do setor E-Commerce/Marketplace e para os admins.
@@ -92,9 +96,8 @@ No `docker-compose.yml` do servidor (fora do git):
 e no `environment` do gateway: `MARKETPLACE_API_URL=http://automacoes-marketplace:8001`.
 
 O `.env` precisa das variáveis `DB_*` (mesmo servidor MariaDB da automacoes-financeiro) para
-gravar `dimensoes_produtos` no banco **`marketplace`** (`DB_NAME`) e ler os tokens do Tiny em
-`financeiro.api_tokens` (`TINY_TOKENS_DB`). O banco `marketplace` precisa existir e o usuário
-precisa de acesso a ele (a tabela é criada sozinha):
+ler os tokens do Tiny em `financeiro.api_tokens` (`TINY_TOKENS_DB`). O banco `marketplace`
+(`DB_NAME`) guarda só a tabela antiga `dimensoes_produtos`, que não é mais gravada:
 
 ```sql
 CREATE DATABASE IF NOT EXISTS marketplace CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -119,6 +122,10 @@ com o mesmo uid (1000) no container, e o backup lê via `nsenter -U`.
 - **Circuit Breaker Dedicado**: Todas as chamadas repassadas pelo Gateway (`/api/marketplace/*` $\rightarrow$ `/api/v1/*`) são protegidas por uma instância do `CircuitBreaker("marketplace")`. Em caso de instabilidade, o Gateway aplica fail-fast imediato (0ms), poupando recursos e alertando os operadores.
 - **Rastreabilidade (`X-Request-Id`)**: O Gateway gera e repassa o identificador de correlação para as rotas do marketplace, facilitando o diagnóstico conjunto de logs.
 - **Health Check Nativo (`GET /health`)**: Expõe `{"status": "ok", "service": "automacoes-marketplace"}`, verificado continuamente pelo monitor de saúde do Gateway (`marketplaceEngineCheck`) a cada 5 minutos.
+- **Retentativas (`app/retry.py`)**: até 4 tentativas com backoff exponencial, jitter e `Retry-After` (teto de 60 s), nas chamadas ao ML e ao Tiny. 429 é repetido em qualquer método; 5xx e falha de rede só em leitura (GET). Um POST só é repetido no 429 (o servidor recusou antes de processar).
+- **Jobs órfãos no startup (`recuperar_orfaos`, `app/api.py`)**: se o serviço reiniciar no meio de uma coleta ou verificação, ela vira `interrompida` com aviso no histórico. Um envio que estava `enviando` vira `erro` no destino `interrompido` ("reenvie o produto"). Nada fica "em execução" para sempre.
+- **Limite de 200 itens**: `skus` e `anuncios` aceitam no máximo 200 por requisição (`app/api.py`, `max_length=200`). O gateway recusa com `400` as listas acima de 200 (SEC-08), porque cada item vira uma chamada ao ML.
+- **Fuso e tzdata**: datas de negócio em `America/Sao_Paulo` (`FUSO_SP` em `app/config.py`). A imagem tem `TZ` e `tzdata`.
 
 ---
 
@@ -131,4 +138,4 @@ npm run test:marketplace
 # Ou dentro de backend/automations/automacoes-marketplace:
 uv run --with-requirements requirements.txt pytest tests/ -q
 ```
-*(65 testes automatizados cobrindo API FastAPI, rotinas de fretes, padronização de dimensões e clientes ML/Tiny).*
+*(62 testes automatizados cobrindo API FastAPI, rotinas de fretes, padronização de dimensões e clientes ML/Tiny).*

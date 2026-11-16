@@ -1,7 +1,10 @@
+import logging
 from pathlib import Path
 from typing import Optional, Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("automacao_nfe.config")
 
 
 class Settings(BaseSettings):
@@ -93,6 +96,17 @@ class Settings(BaseSettings):
     INTER_NORVIA_CURITIBA_CLIENT_ID: Optional[str] = Field(default=None)
     INTER_NORVIA_CURITIBA_CLIENT_SECRET: Optional[str] = Field(default=None)
 
+    # Boletos do DDA (Polp Super DDA) → conta a pagar do Tiny → pagamento agendado no Inter → baixa.
+    POLP_API_URL: str = Field(default="https://api.polp.com.br/api/v1", description="API v1 da Polp (Super DDA)")
+    POLP_CLIENT_ID: Optional[str] = Field(default=None, description="x-api-client (Dashboard → API Credentials)")
+    POLP_CLIENT_SECRET: Optional[str] = Field(default=None, description="x-api-secret (Dashboard → API Credentials)")
+    DDA_ATIVO: bool = Field(default=False, description="Liga a rotina do DDA (busca, casamento e acompanhamento)")
+    DDA_INTERVALO_MINUTOS: int = Field(default=30, ge=5, le=720, description="Intervalo entre rodadas da rotina do DDA")
+    DDA_AGENDAR_NO_INTER: bool = Field(
+        default=False,
+        description="Agenda no Inter os boletos casados com conta do Tiny (com False, só casa e acompanha)",
+    )
+
     # Configurações do Banco de Dados MariaDB (Centralizador de api_tokens)
     DB_HOST: Optional[str] = Field(default=None, description="Host do MariaDB (ex: localhost, mariadb, 192.168.50.20)")
     DB_PORT: int = Field(default=3306, description="Porta de conexão do MariaDB")
@@ -126,7 +140,7 @@ class Settings(BaseSettings):
                         if clean_k:
                             mapping[clean_k] = str(v).strip()
                 except Exception:
-                    pass
+                    logger.warning("CNPJ_COMPANY_MAP não é um JSON válido; usando só o mapa padrão", exc_info=True)
             else:
                 for pair in raw.split(","):
                     if ":" in pair:
@@ -155,7 +169,7 @@ class Settings(BaseSettings):
                     for k, v in parsed.items():
                         mapping[str(k).strip()] = str(v).strip()
                 except Exception:
-                    pass
+                    logger.warning("TINY_CONTA_ORIGEM_MAP não é um JSON válido; ignorado", exc_info=True)
             else:
                 for pair in raw.split(","):
                     if ":" in pair:
@@ -201,16 +215,22 @@ class Settings(BaseSettings):
 
     # Conciliação Mercado Livre × Contas a Receber Tiny (app/ml_reconciliation*.py)
     ML_RECONCILIATION_HOUR: int = Field(
-        default=8,
-        description="Hora do dia (0-23, horário do servidor) da conciliação diária do Mercado Livre (liberações do dia anterior)"
+        default=5,
+        description="Hora do dia (0-23, horário de São Paulo) da conciliação diária do Mercado Livre (liberações do dia anterior). "
+        "5h desde 06/11/2026: a execução levava ~2h30 (chamadas ao Tiny) e às 8h só terminava às 10h"
+    )
+    ML_RECONCILIATION_PARALELO: bool = Field(
+        default=True,
+        description="Concilia as empresas ao mesmo tempo (cada uma tem a sua conta do Tiny, com fila de chamadas própria). "
+        "false volta a uma empresa depois da outra"
     )
     ML_RECONCILIATION_VENDAS_DIAS: int = Field(
         default=60,
         description="Quantos dias antes do início do período buscar pedidos do Mercado Livre (o dinheiro é liberado semanas depois da venda)"
     )
     ML_RECONCILIATION_RELATORIO_TIMEOUT_SECONDS: int = Field(
-        default=900,
-        description="Espera máxima pela geração do relatório de liberações do Mercado Pago (é assíncrono)"
+        default=5400,
+        description="Espera máxima pela geração do relatório de liberações do Mercado Pago (é assíncrono; já levou ~37 min e passou de 40 min em 30/10)"
     )
     ML_RECONCILIATION_MAX_ANALISES: int = Field(
         default=180,
@@ -261,6 +281,12 @@ class Settings(BaseSettings):
     ML_REVESTA_CATEGORIA_RECEBIMENTO_ID: Optional[int] = Field(default=None)
     ML_REVESTA_CATEGORIA_FRETE_ID: Optional[int] = Field(default=None)
     ML_CATEGORIA_FRETE_ID: Optional[int] = Field(default=None)
+    # Junto com a baixa, lança no caixa do Tiny (POST /caixa) as tarifas, envios e extras da venda
+    # (decisão do financeiro, 06/11/2026). False = só a planilha, como antes.
+    ML_LANCAR_CAIXA_NA_BAIXA: bool = Field(default=True)
+    # Tarifa de venda em partes no caixa, como a integração do Tiny (custo por vender, taxa de
+    # recebimento, custo por cobrar), lidas do pagamento no MP (12/11/2026). False = linha inteira.
+    ML_DIVIDIR_TARIFA_VENDA: bool = Field(default=True)
 
     # API Oficial da Receita Federal (SERPRO / Gateway gov.br)
     RECEITA_CONSUMER_KEY: Optional[str] = Field(default=None, description="Consumer Key da API Serpro/Receita Federal")
@@ -314,7 +340,7 @@ class Settings(BaseSettings):
             try:
                 directory.mkdir(parents=True, exist_ok=True)
             except Exception:
-                pass
+                logger.warning("Não foi possível criar o diretório %s", directory, exc_info=True)
 
 
 # Instância global de configuração

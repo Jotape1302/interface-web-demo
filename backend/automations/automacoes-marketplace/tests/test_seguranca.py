@@ -70,14 +70,14 @@ def test_retentar_usa_x_usuario_e_ignora_corpo(http, monkeypatch):
 def test_validar_usa_x_usuario(http, monkeypatch):
     recebido = {}
 
-    def validar(itens, usuario):
+    def confirmar(skus, usuario):
         recebido["usuario"] = usuario
-        return {"gravados": []}
+        return {"aceitos": [], "recusados": []}
 
-    monkeypatch.setattr(api_module.padronizacao, "validar", validar)
-    http.post("/api/v1/dimensoes/validar", json={"produtos": [{"sku": "P1"}], "usuario": "forjado"}, headers={"X-Usuario": "ana"})
+    monkeypatch.setattr(api_module.padronizacao, "confirmar", confirmar)
+    http.post("/api/v1/dimensoes/validar", json={"skus": ["P1"], "usuario": "forjado"}, headers={"X-Usuario": "ana"})
     assert recebido["usuario"] == "ana"
-    http.post("/api/v1/dimensoes/validar", json={"produtos": [{"sku": "P1"}], "usuario": "bruno"})
+    http.post("/api/v1/dimensoes/validar", json={"skus": ["P1"], "usuario": "bruno"})
     assert recebido["usuario"] == "bruno"
 
 

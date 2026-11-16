@@ -49,7 +49,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     INDEX idx_tokens_conta (conta_identificador)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Registro inicial para as 4 contas do Tiny ERP v3
+-- Registro inicial para as 4 contas do Tiny ERP v3.
+-- O seed é deliberado: as automações (token_repository.py, tiny_estoque.py) casam a linha
+-- pelo conta_identificador OU pelo empresa_cnpj, e o token/refresh entram depois (vazios aqui).
+-- CNPJ não é segredo.
 INSERT INTO api_tokens (servico, conta_identificador, empresa_cnpj, access_token, refresh_token, expira_em)
 VALUES 
     ('tiny_v3', 'fabrilux', '43820617000166', '', '', NOW()),

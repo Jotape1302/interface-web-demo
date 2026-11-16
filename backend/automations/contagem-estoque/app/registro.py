@@ -22,11 +22,12 @@ import shutil
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
-FUSO_SP = timezone(timedelta(hours=-3))
+FUSO_SP = ZoneInfo("America/Sao_Paulo")
 
 AGUARDANDO = "aguardando_confirmacao"
 CONFIRMADA = "confirmada"

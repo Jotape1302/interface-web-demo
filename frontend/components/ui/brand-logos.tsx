@@ -139,6 +139,7 @@ export function TinyLogo({ size = 18, className = '', style, alt = 'Tiny ERP', .
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/tiny_logo.jpg`}
       width={size}
@@ -163,6 +164,7 @@ export function InterLogo({ size = 18, className = '', style, alt = 'Banco Inter
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/inter_logo.png`}
       width={size}
@@ -187,6 +189,7 @@ export function N8nLogo({ size = 18, className = '', style, alt = 'n8n', ...prop
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/N8n_logo.png`}
       width={size}
@@ -211,6 +214,7 @@ export function MariaDbLogo({ size = 18, className = '', style, alt = 'MariaDB',
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/mariadb_logo.png`}
       width={size}
@@ -267,6 +271,7 @@ export function GoogleDriveLogo({ size = 18, className = '', style, alt = 'Googl
   }
 
   return (
+    // oxlint-disable-next-line next/no-img-element -- app estático (vinext), sem next/image: <img> é o elemento correto aqui
     <img
       src={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/imagens/Google_Drive_logo.png`}
       width={size}
@@ -288,7 +293,7 @@ export function BrandLogo({
   size = 18,
   className = '',
 }: {
-  name: 'tiny' | 'inter' | 'n8n' | 'mariadb' | 'google-drive' | 'drive' | string;
+  name: 'tiny' | 'inter' | 'n8n' | 'mariadb' | 'google-drive' | 'drive' | (string & {});
   size?: number;
   className?: string;
 }) {

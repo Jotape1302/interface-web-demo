@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+from typing import Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,6 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Filiais atendidas: cada uma é uma conta diferente do Mercado Livre (mesmas do antigo
 # sincronizador-anuncios-meli em Java).
 FILIAIS = ("revesta", "norvia")
+
+# Fuso das datas de negócio e do agendador (o container roda em UTC).
+FUSO_SP = ZoneInfo("America/Sao_Paulo")
 
 
 class Settings(BaseSettings):
@@ -40,20 +44,14 @@ class Settings(BaseSettings):
     DB_NAME: str = "marketplace"
     TINY_TOKENS_DB: str = "financeiro"
 
-    # Contas do Tiny usadas nos anúncios (conta_identificador em api_tokens). As outras empresas
-    # não anunciam no marketplace.
-    TINY_CONTAS: str = "norvia_campinas,revesta"
+    # Conta do Tiny (conta_identificador em api_tokens) de onde vêm as medidas e o peso bruto dos
+    # anúncios de cada conta do ML: cada anúncio lê o Tiny da própria empresa.
+    TINY_CONTA_POR_FILIAL: str = "norvia:norvia_campinas,revesta:revesta"
     TINY_API_URL: str = "https://api.tiny.com.br/public-api/v3"
     TINY_PAUSA_S: float = 0.6  # limite de requisições do Tiny
 
-    # Padronização de dimensões
+    # Padronização de dimensões (medidas do Tiny → anúncios do ML)
     DIMENSOES_HORA_COLETA: int = Field(default=6, description="Hora local da coleta diária das medidas")
-    # Só padroniza produtos anunciados no ML (o cadastro do Tiny é lido 1 a 1: todos levaria horas).
-    DIMENSOES_SO_ANUNCIADOS: bool = True
-    # Embalagem padrão (medida pelo e-commerce): seção fixa 5 x 7 cm e comprimento conforme o
-    # produto. Serve só para o tipo de envio (medidas de embalagem no ML).
-    EMBALAGEM_SECAO_CM: str = "5,7"
-    EMBALAGEM_COMPRIMENTOS_CM: str = "100,200,300"
 
     # Rotina diária
     FRETES_HORA_DIARIA: int = Field(default=7, description="Hora local da verificação diária")
@@ -61,22 +59,19 @@ class Settings(BaseSettings):
     # Pausa entre alterações de anúncios (limite de requisições do ML; o Java usava 2s).
     ML_PAUSA_ENTRE_ALTERACOES_S: float = 2.0
 
-    # Limites de tamanho do Mercado Envios 2 usados para indicar o tipo de envio pelas medidas.
-    ME2_MAX_LADO_CM: float = 100.0
-    ME2_MAX_SOMA_CM: float = 200.0
+    # Tipo de envio pelo maior lado da embalagem (medidas do Tiny): até este valor (1 m e 2 m) é
+    # ME2; acima (3 m) é ME1.
+    ME2_MAX_EMBALAGEM_CM: float = 200.0
 
     def access_token_env(self, filial: str) -> Optional[str]:
         return {"revesta": self.ML_REVESTA_ACCESS_TOKEN, "norvia": self.ML_NORVIA_ACCESS_TOKEN}.get(filial)
 
+    def tiny_por_filial(self) -> Dict[str, str]:
+        pares = (p.split(":", 1) for p in self.TINY_CONTA_POR_FILIAL.split(",") if ":" in p)
+        return {f.strip(): c.strip() for f, c in pares if f.strip() and c.strip()}
+
     def contas_tiny(self) -> List[str]:
-        return [c.strip() for c in self.TINY_CONTAS.split(",") if c.strip()]
-
-    def embalagem_secao(self) -> Tuple[float, float]:
-        a, b = (float(x) for x in self.EMBALAGEM_SECAO_CM.split(","))
-        return (min(a, b), max(a, b))
-
-    def embalagem_comprimentos(self) -> List[int]:
-        return sorted(int(x) for x in self.EMBALAGEM_COMPRIMENTOS_CM.split(",") if x.strip())
+        return list(dict.fromkeys(self.tiny_por_filial().values()))
 
     def banco_configurado(self) -> bool:
         return bool(self.DB_HOST and self.DB_USER)

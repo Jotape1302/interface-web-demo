@@ -5,7 +5,7 @@ import pytest
 
 from app.db import RepositorioMemoria
 from app.dimensoes import Dimensoes
-from app.estado import Estado, agora
+from app.estado import Estado
 
 
 class MLFalso:
@@ -17,10 +17,15 @@ class MLFalso:
         self.medidas_enviadas: List[tuple] = []
         self.trocas: List[tuple] = []
         self.atributos_enviados: List[tuple] = []
+        self.dimensoes_envio: List[tuple] = []
         self.descricoes_lidas: List[str] = []
         # Simula o ML aceitando o PUT e voltando para "a combinar" logo depois.
         self.reverter_troca = False
         self.recusar_ficha = False
+        # Simula o ML respondendo OK ao PUT de medidas sem guardar nada.
+        self.ignorar_envio = False
+        # Simula o ML respondendo OK ao PUT da ficha e mantendo os valores (ex.: ficha do catálogo).
+        self.ignorar_ficha = False
 
     def ids_dos_anuncios(self) -> List[str]:
         return list(self.itens)
@@ -42,6 +47,10 @@ class MLFalso:
         if self.recusar_ficha:
             raise MLAPIError("attribute not modifiable", 400)
         self.atributos_enviados.append((mlb, atributos))
+        if self.ignorar_envio or self.ignorar_ficha:
+            return
+        ids = {a["id"] for a in atributos}
+        self.itens[mlb]["attributes"] = [a for a in self.itens[mlb].get("attributes", []) if a["id"] not in ids] + list(atributos)
 
     def enviar_medidas(self, mlb: str, dims: Dimensoes) -> None:
         if not dims.peso:
@@ -49,6 +58,8 @@ class MLFalso:
 
             raise MLAPIError("The attributes [seller_package_weight] are all required", 400)
         self.medidas_enviadas.append((mlb, (dims.altura, dims.largura, dims.comprimento), dims.peso))
+        if self.ignorar_envio:
+            return
         dims = dims.para_ml()  # o ML real só aceita e guarda inteiros
         attrs = [a for a in self.itens[mlb].get("attributes", []) if not a["id"].startswith("SELLER_PACKAGE_")]
         attrs += [
@@ -59,6 +70,12 @@ class MLFalso:
         ]
         self.itens[mlb]["attributes"] = attrs
 
+    def enviar_dimensoes_envio(self, mlb: str, dims: Dimensoes, envio_atual: Dict[str, Any]) -> bool:
+        self.dimensoes_envio.append((mlb, dims.texto_ml(), envio_atual.get("mode")))
+        if not self.ignorar_envio:
+            self.itens[mlb]["shipping"]["dimensions"] = dims.texto_ml()
+        return True
+
     def trocar_envio(self, mlb: str, dims: Dimensoes, modo: str, envio_atual: Dict[str, Any]) -> None:
         self.trocas.append((mlb, modo, dict(envio_atual)))
         if not self.reverter_troca:
@@ -66,11 +83,10 @@ class MLFalso:
 
 
 class TinyFalso:
-    """Tiny em memória: produtos por id; registra as gravações de dimensões."""
+    """Tiny em memória: produtos por id; registra os cadastros lidos."""
 
     def __init__(self, produtos: List[Dict[str, Any]]) -> None:
         self.produtos_por_id = {p["id"]: copy.deepcopy(p) for p in produtos}
-        self.gravados: List[tuple] = []
         self.lidos: List[int] = []
 
     def produtos(self):
@@ -80,15 +96,6 @@ class TinyFalso:
     def produto(self, produto_id: int) -> Dict[str, Any]:
         self.lidos.append(produto_id)
         return copy.deepcopy(self.produtos_por_id[produto_id])
-
-    def gravar_dimensoes(self, produto: Dict[str, Any], dims: Dimensoes) -> None:
-        self.gravados.append((produto["id"], dims))
-        p = self.produtos_por_id[produto["id"]]
-        p["dimensoes"] = {
-            "altura": dims.altura, "largura": dims.largura, "comprimento": dims.comprimento,
-            "pesoLiquido": dims.peso / 1000 if dims.peso else None,
-        }
-        p["dataAlteracao"] = str(int(p.get("dataAlteracao", "1")) + 1)
 
 
 def item(
@@ -115,16 +122,21 @@ def item(
     }
 
 
-def produto_tiny(pid: int, sku: str, descricao: str, dims: Optional[Dict[str, Any]] = None, complementar: str = "") -> Dict[str, Any]:
-    return {"id": pid, "sku": sku, "descricao": descricao, "descricaoComplementar": complementar, "dimensoes": dims or {}}
+def produto_tiny(pid: int, sku: str, descricao: str, dims: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {"id": pid, "sku": sku, "descricao": descricao, "dimensoes": dims or {}}
 
 
-def gravar_padrao(repo: RepositorioMemoria, sku: str, a: float, l: float, c: float, peso: Optional[int] = 500) -> None:
-    repo.salvar({
-        "sku": sku, "descricao": sku, "altura_cm": a, "largura_cm": l, "comprimento_cm": c, "peso_g": peso,
-        "embalagem_comprimento_cm": None, "confiabilidade": "alta", "fontes": [], "envios": None,
-        "validado_por": "teste", "validado_em": agora(), "atualizado_em": agora(),
-    })
+def medidas(a: float, l: float, c: float, peso_bruto_kg: Optional[float] = 0.4, **extra: Any) -> Dict[str, Any]:
+    """Bloco `dimensoes` do cadastro do Tiny (cm e kg)."""
+    return {"altura": a, "largura": l, "comprimento": c, "pesoBruto": peso_bruto_kg, **extra}
+
+
+def padroes(por_filial: Dict[str, Dict[str, tuple]]):
+    """Fonte de medidas do Tiny para a Rotina: {filial: {sku: (a, l, c, peso_g)}}."""
+    return lambda: {
+        f: {sku: {"sku": sku, "altura_cm": a, "largura_cm": l, "comprimento_cm": c, "peso_g": p} for sku, (a, l, c, p) in skus.items()}
+        for f, skus in por_filial.items()
+    }
 
 
 @pytest.fixture
@@ -143,9 +155,8 @@ def _config_padrao(monkeypatch):
 
     monkeypatch.setattr(settings, "ML_CONTAS_COM_ME1", "norvia")
     monkeypatch.setattr(settings, "FRETES_MINUTOS_CONFERENCIA", 10)
-    monkeypatch.setattr(settings, "TINY_CONTAS", "norvia_campinas,revesta")
-    monkeypatch.setattr(settings, "EMBALAGEM_SECAO_CM", "5,7")
-    monkeypatch.setattr(settings, "EMBALAGEM_COMPRIMENTOS_CM", "100,200,300")
+    monkeypatch.setattr(settings, "TINY_CONTA_POR_FILIAL", "norvia:norvia_campinas,revesta:revesta")
+    monkeypatch.setattr(settings, "ME2_MAX_EMBALAGEM_CM", 200.0)
 
 
 @pytest.fixture(autouse=True)

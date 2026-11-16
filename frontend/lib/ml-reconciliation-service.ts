@@ -9,6 +9,10 @@ import type {
   MlExecutarPedido,
   MlJob,
   MlStatus,
+  MlTarifasJob,
+  MlConferirApagados,
+  MlMarcarRefeitos,
+  MlTarifasPendentes,
   MlTokenSyncResponse,
 } from './ml-reconciliation-contracts';
 import { resolveApiBaseUrl } from './contracts';
@@ -21,6 +25,8 @@ import { readApiError } from './api-errors';
 // Chamadas curtas: execução e baixa rodam como tarefas no backend (acompanhadas por getJob).
 const REQUEST_TIMEOUT_MS = 15000;
 const ANALISE_TIMEOUT_MS = 30000;
+// Lê o caixa do Tiny de cada dia com lançamento antigo: pode passar de um minuto.
+const CONFERIR_TIMEOUT_MS = 180000;
 
 function getAuthHeaders(): Record<string, string> {
   if (typeof window === 'undefined') return {};
@@ -69,13 +75,13 @@ export class MlReconciliationService {
     return (await res.json()) as T;
   }
 
-  private async postJson<T>(path: string, body: unknown, fallback: string, signal?: AbortSignal): Promise<T> {
+  private async postJson<T>(path: string, body: unknown, fallback: string, signal?: AbortSignal, ms = REQUEST_TIMEOUT_MS): Promise<T> {
     const res = await fetch(this.url(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(body),
       credentials: 'same-origin',
-      signal: this.signal(signal, REQUEST_TIMEOUT_MS),
+      signal: this.signal(signal, ms),
     });
     if (!res.ok) throw new Error(await errorMessage(res, fallback));
     return (await res.json()) as T;
@@ -114,13 +120,50 @@ export class MlReconciliationService {
       `/api/ml-reconciliation/analises/${encodeURIComponent(analiseId)}`,
       'Falha ao consultar a análise',
       signal,
-      ANALISE_TIMEOUT_MS,
+      CONFERIR_TIMEOUT_MS,
     );
   }
 
   /** Dispara a baixa no Tiny dos recebimentos selecionados. */
   startBaixa(analiseId: string, grupos: string[], signal?: AbortSignal): Promise<MlBaixaJob> {
     return this.postJson('/api/ml-reconciliation/jobs/baixar', { analise_id: analiseId, grupos }, 'Falha ao iniciar a baixa no Tiny', signal);
+  }
+
+  /** Vendas já baixadas com tarifas, envios ou extras fora do caixa do Tiny. */
+  getTarifas(empresa: string, incluirExportados: boolean, signal?: AbortSignal): Promise<MlTarifasPendentes> {
+    const qs = new URLSearchParams({ empresa, incluir_exportados: String(incluirExportados) });
+    return this.getJson(`/api/ml-reconciliation/tarifas?${qs}`, 'Falha ao consultar as tarifas pendentes', signal, ANALISE_TIMEOUT_MS);
+  }
+
+  /** Os lançamentos do padrão antigo apagados no Tiny voltam para as pendentes (lê o caixa de cada dia). */
+  conferirApagados(empresa: string, signal?: AbortSignal): Promise<MlConferirApagados> {
+    return this.postJson(
+      '/api/ml-reconciliation/tarifas/conferir-apagados',
+      { empresa },
+      'Falha ao conferir os lançamentos no caixa do Tiny',
+      signal,
+      CONFERIR_TIMEOUT_MS,
+    );
+  }
+
+  /** Lançamentos do padrão antigo refeitos à mão no Tiny: saem da lista e a conferência não os devolve. */
+  marcarRefeitos(empresa: string, chaves: string[], signal?: AbortSignal): Promise<MlMarcarRefeitos> {
+    return this.postJson(
+      '/api/ml-reconciliation/tarifas/marcar-refeitos',
+      { empresa, chaves },
+      'Falha ao marcar os lançamentos como refeitos à mão',
+      signal,
+    );
+  }
+
+  /** Lança no caixa do Tiny as tarifas das vendas selecionadas (tarefa no backend). */
+  startLancarTarifas(empresa: string, grupos: string[], incluirExportados: boolean, signal?: AbortSignal): Promise<MlTarifasJob> {
+    return this.postJson(
+      '/api/ml-reconciliation/jobs/lancar-tarifas',
+      { empresa, grupos, incluir_exportados: incluirExportados },
+      'Falha ao iniciar o lançamento das tarifas',
+      signal,
+    );
   }
 
   /** Andamento de uma tarefa. 404 vira `JobLostError` (API reiniciada ou tarefa expirada). */
@@ -146,16 +189,19 @@ export class MlReconciliationService {
     tipo: MlArquivoTipo,
     opcoes: { incluirExportados?: boolean } = {},
   ): Promise<MlExportacaoLancamentos | null> {
-    const query = opcoes.incluirExportados ? '?incluir_exportados=true' : '';
-    const res = await fetch(
-      this.url(`/api/ml-reconciliation/analises/${encodeURIComponent(analiseId)}/arquivos/${tipo}${query}`),
-      {
-        headers: getAuthHeaders(),
-        credentials: 'same-origin',
-        cache: 'no-store',
-        signal: AbortSignal.timeout(60000),
-      },
-    );
+    const lancamentos = tipo === 'lancamentos';
+    const base = `/api/ml-reconciliation/analises/${encodeURIComponent(analiseId)}/arquivos/${tipo}`;
+    // Planilha de lançamentos: POST (marca o que foi exportado); os demais tipos seguem GET.
+    const res = await fetch(this.url(lancamentos ? `${base}/exportar` : base), {
+      method: lancamentos ? 'POST' : 'GET',
+      headers: lancamentos
+        ? { 'Content-Type': 'application/json', ...getAuthHeaders() }
+        : getAuthHeaders(),
+      body: lancamentos ? JSON.stringify({ incluir_exportados: opcoes.incluirExportados === true }) : undefined,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(60000),
+    });
     if (res.status === 409) throw new LancamentosJaExportadosError(await errorMessage(res, 'Lançamentos já exportados'));
     if (!res.ok) throw new Error(await errorMessage(res, 'Falha ao gerar a planilha'));
     salvarArquivo(await res.blob(), nomeDoArquivo(res.headers.get('content-disposition'), `${tipo}.xlsx`));
@@ -238,6 +284,22 @@ class DemoMlReconciliationService extends MlReconciliationService {
 
   async downloadArquivo(): Promise<MlExportacaoLancamentos | null> {
     throw new Error('Download de planilhas indisponível no modo demonstração.');
+  }
+
+  getTarifas(empresa: string, incluirExportados: boolean): Promise<MlTarifasPendentes> {
+    return demoDelay({ empresa, incluir_exportados: incluirExportados, vendas: [], total_vendas: 0, total_linhas: 0, vendas_sem_leitura: 0 });
+  }
+
+  async conferirApagados(): Promise<MlConferirApagados> {
+    throw new Error('Conferência indisponível no modo demonstração.');
+  }
+
+  async marcarRefeitos(): Promise<MlMarcarRefeitos> {
+    throw new Error('Marcação indisponível no modo demonstração.');
+  }
+
+  async startLancarTarifas(): Promise<MlTarifasJob> {
+    throw new Error('Lançamento de tarifas indisponível no modo demonstração.');
   }
 }
 

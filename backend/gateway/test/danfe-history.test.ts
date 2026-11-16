@@ -18,7 +18,7 @@ function stubFetch(t: test.TestContext, history: unknown[]) {
 
 test("Histórico da DANFE em produção vem da auditoria real, sem duração inventada", async (t) => {
   stubFetch(t, [
-    { processed_at: "2026-09-28T12:00:00Z", audit_status: "success", chave_acesso: "41260943820617000166550010000123451000123451" },
+    { processed_at: "2026-09-28T12:00:00Z", audit_status: "success", chave_acesso: "41260943820617000166550010000123451000123456" },
     { processed_at: "2026-09-27T12:00:00Z", audit_status: "error", details: "Chave não localizada" },
     { processed_at: "2026-09-01T12:00:00Z", audit_status: "success" },
   ]);

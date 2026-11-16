@@ -75,6 +75,7 @@ function InputOTPSeparator({ ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot="input-otp-separator"
       className="[&_svg:not([class*='size-'])]:size-4 flex items-center"
+      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
       role="separator"
       {...props}
     >

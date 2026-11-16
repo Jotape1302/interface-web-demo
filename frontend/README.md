@@ -30,7 +30,8 @@ frontend/
 │   │   ├── producao/                  # Visão geral da área Produção e download do instalador de etiquetas
 │   │   └── page.tsx                   # Roteamento inteligente baseado nas permissões concedidas ao usuário
 │   │
-│   ├── components/                    # Design System: cards, tabelas, modais, gráficos e badges
+│   ├── components/                    # Design System: cards, tabelas, modais (ModalShell: Escape, foco preso e devolução de foco), gráficos e badges
+│   │   └── stock-count/               # Painel da contagem de estoque dividido em módulos (lista, modais, visor de fotos, hook use-stock-count)
 │   ├── login/                         # Tela de autenticação com tratamento de credenciais
 │   └── globals.css                    # Variáveis de cor, design tokens e utilitários Tailwind v4
 │
@@ -38,7 +39,7 @@ frontend/
 │   ├── api.ts                         # Cliente HTTP universal com suporte a demo/live
 │   ├── areas.ts                       # Mapeamento de áreas ("pastas") e controle RBAC de visibilidade
 │   ├── auth-context.tsx               # Provedor React Context para estado de autenticação e sessão
-│   ├── contracts.ts                   # Contratos de dados compartilhados com o gateway
+│   ├── contracts.ts                   # Reexporta os tipos de backend/gateway/src/contracts.ts (fonte única) + tipos só do frontend
 │   └── ...                            # Testes unitários com o executor nativo do Node.js
 │
 └── public/                            # Ativos estáticos e pacotes de instalação (downloads)
@@ -109,7 +110,7 @@ Acesse em: `http://localhost:3000`
 
 ### 2. Testes Automatizados
 ```bash
-# Testes unitários (executor nativo do Node via tsx, 142 testes), checagem de tipos e lint:
+# Testes unitários (executor nativo do Node via tsx, 171 testes; conferido em 2026-10-27), checagem de tipos e lint (oxlint, zerado e bloqueante no CI):
 npm test
 npm run typecheck
 npm run lint
@@ -121,8 +122,8 @@ npm run build
 ```
 Valida a compilação e exportação de todas as 17 rotas estáticas e páginas do sistema. O
 resultado publicado é **só** `dist/client/automacoes/` (export estático, sem source maps —
-`build.sourcemap: false` em `vite.config.ts`), copiado por `rsync` para `/var/www/automacoes`
-e servido pelo NGINX. `npm start` (`vinext start`) só serve o build localmente para conferência.
+`build.sourcemap: false` em `vite.config.ts`), gerado na própria VPS e copiado por `rsync` local
+para `/var/www/automacoes` (comandos no README da raiz), e servido pelo NGINX. `npm start` (`vinext start`) só serve o build localmente para conferência.
 
 O `vinext` fica em `devDependencies` (desde 2026-10-08, por causa do GHSA-vfj7-8cjw-p6xm no
 `braces`): é ferramenta de build e não roda em produção. Instale com `npm ci` **sem**

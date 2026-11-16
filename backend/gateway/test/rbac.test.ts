@@ -128,7 +128,7 @@ test("hasPermission: negado por padrão; admin passa; linha legada e chave de ge
   assert.equal(hasPermission({ user: { role: "gestor" }, permissions: ["usuarios:ver"] }, "usuarios:ver"), true);
   assert.equal(hasPermission({ user: { role: "admin" }, permissions: [] }, "revisao_nfe:forcar_varredura"), true);
   assert.deepEqual(effectivePermissions("admin", []), [...ALL_PERMISSION_KEYS]);
-  assert.deepEqual(effectivePermissions("user", ["accounts_payable", "usuarios:ver", "erros:ver"]), ["erros:ver"]);
+  assert.deepEqual(effectivePermissions("user", ["accounts_payable", "usuarios:ver", "saude:ver"]), ["saude:ver"]);
 });
 
 test("validateGrants: fora do catálogo, gestão de usuários em user e ação sem ver → erro", () => {
@@ -142,8 +142,8 @@ test("validateGrants: fora do catálogo, gestão de usuários em user e ação s
   assert.equal(validateGrants(["usuarios:ver"], "gestor").ok, true);
   assert.equal((validateGrants(["contas_pagar:baixar"], "user") as any).code, "action_requires_view");
   assert.equal((validateGrants("contas_pagar:ver", "user") as any).code, "invalid_grants");
-  // Saúde, Auditoria, Erros & Falhas e Tokens n8n podem ser dados a User.
-  assert.equal(validateGrants(["saude:ver", "auditoria:ver", "erros:ver", "erros:resolver", "tokens_n8n:ver", "tokens_n8n:executar"], "user").ok, true);
+  // Saúde, Auditoria, Agentes Qwen e Tokens n8n podem ser dados a User.
+  assert.equal(validateGrants(["saude:ver", "auditoria:ver", "agentes_qwen:ver", "agentes_qwen:resolver", "tokens_n8n:ver", "tokens_n8n:executar"], "user").ok, true);
 });
 
 // ------------------------------------------------------------------- rotas
@@ -297,7 +297,7 @@ test("Gestor cria só User dentro do teto; aprova cadastro com permissões; aç�
   const pend = ((await (await call(g.h, "GET", "/api/admin/users")).json()) as any[]).find((u) => u.email === "cad@norvia.example")!;
   assert.equal(pend.permissions_count.tabs, 0);
   assert.equal((await call(g.h, "POST", `/api/admin/users/${pend.id}/reject`)).status, 403, "sem usuarios:rejeitar_cadastro");
-  assert.equal((await call(g.h, "POST", `/api/admin/users/${pend.id}/approve`, { grants: ["erros:ver"] })).status, 403);
+  assert.equal((await call(g.h, "POST", `/api/admin/users/${pend.id}/approve`, { grants: ["saude:ver"] })).status, 403);
   const ap = await call(g.h, "POST", `/api/admin/users/${pend.id}/approve`, { grants: ["contas_pagar:ver"] });
   assert.equal(ap.status, 200);
   assert.deepEqual(((await ap.json()) as any).grants, ["contas_pagar:ver"]);
@@ -343,16 +343,16 @@ test("conflito de versão → 409 com o estado atual; expectedVersion obrigatór
   const { call, mk, admin } = await startApi(t);
   const u = await mk("user.a", "user");
   const st = (await (await call(admin, "GET", `/api/admin/users/${u.id}/permissions`)).json()) as any;
-  assert.equal((await call(admin, "PUT", `/api/admin/users/${u.id}/permissions`, { grants: ["erros:ver"] })).status, 400);
+  assert.equal((await call(admin, "PUT", `/api/admin/users/${u.id}/permissions`, { grants: ["saude:ver"] })).status, 400);
   assert.equal(
-    (await call(admin, "PUT", `/api/admin/users/${u.id}/permissions`, { grants: ["erros:ver"], expectedVersion: st.version })).status,
+    (await call(admin, "PUT", `/api/admin/users/${u.id}/permissions`, { grants: ["saude:ver"], expectedVersion: st.version })).status,
     200,
   );
   const stale = await call(admin, "PUT", `/api/admin/users/${u.id}/permissions`, { grants: ["saude:ver"], expectedVersion: st.version });
   assert.equal(stale.status, 409);
   const body = (await stale.json()) as any;
   assert.equal(body.code, "version_conflict");
-  assert.deepEqual(body.current.grants, ["erros:ver"]);
+  assert.deepEqual(body.current.grants, ["saude:ver"]);
   assert.equal(body.current.version, st.version + 1);
   assert.equal(body.current.updatedByName, "Autor");
   assert.ok(body.current.updatedAt);
@@ -593,4 +593,97 @@ test("B3: approve e reject sobre usuário que não está pending devolvem 409 no
   });
   assert.equal(secondApprove.status, 409);
   assert.equal(((await secondApprove.json()) as any).code, "not_pending");
+});
+
+// ------------------------------------------------------------------- ROI das automações
+
+import { createOverviewService, createDemoHistory } from "../src/overview.js";
+import { createRoiService, demoRoiSources, ROI_TAREFAS, economia, type RoiSources } from "../src/roi.js";
+
+test("catálogo: aba 'roi' de Sistema com só 'ver', e GET /api/roi exige roi:ver", () => {
+  const tab = PERMISSION_CATALOG.tabs.find((x) => x.id === "roi");
+  assert.equal(tab?.area, "sistema");
+  assert.deepEqual(tab?.actions.map((a) => a.key), ["roi:ver"]);
+  const rule = ROUTE_RULES.find((r) => r.path === "/api/roi");
+  assert.deepEqual(rule?.access, { kind: "perm", key: "roi:ver" });
+});
+
+test("ROI: conta única (manual − atual) e fonte com falha não derruba as outras", async () => {
+  assert.deepEqual(economia("accounts-payable", 120), { horas: 9, reais: 99 });
+  const fontes = demoRoiSources();
+  const quebrada: RoiSources = { ...fontes, fretes: async () => { throw new Error("segredo interno"); } };
+  const r = await createRoiService("live", quebrada, () => new Date("2026-10-23T12:00:00Z")).read();
+  assert.equal(r.automacoes.length, ROI_TAREFAS.length);
+  const fretes = r.automacoes.find((a) => a.id === "fretes")!;
+  assert.equal(fretes.fonte.status, "erro");
+  assert.equal(fretes.itens, null);
+  assert.ok(!JSON.stringify(r).includes("segredo"));
+  assert.equal(r.totais.parcial, true);
+  const ok = r.automacoes.filter((a) => a.fonte.status === "ok");
+  assert.equal(ok.length, ROI_TAREFAS.length - 1);
+  assert.equal(r.totais.reais, Math.round(ok.reduce((s, a) => s + a.reais!, 0) * 100) / 100);
+  assert.equal(r.valorHora, 11);
+  assert.deepEqual(r.naoMedidas, []);
+});
+
+test("GET /api/roi e corte de horas/R$ no overview e no painel de Contas a Pagar por roi:ver", async (t) => {
+  const demo = createDemo();
+  const dashboard = createDashboardService("demo", demo.database, demo.n8n);
+  const overview = createOverviewService("demo", [{ id: "accounts-payable", title: "CP", href: "/x", dashboard, history: createDemoHistory() }]);
+  const roi = createRoiService("demo", demoRoiSources());
+  const { call, mk } = await startApi(t, { extra: { dashboard, overview, roi } });
+  const sem = await mk("semroi", "user", ["fin_visao_geral:ver", "contas_pagar:ver"]);
+  const com = await mk("comroi", "user", ["fin_visao_geral:ver", "contas_pagar:ver", "roi:ver"]);
+
+  assert.equal((await call(sem.h, "GET", "/api/roi")).status, 403);
+  const rr = await call(com.h, "GET", "/api/roi");
+  assert.equal(rr.status, 200);
+  const rrCorpo = (await rr.json()) as any;
+  assert.equal(rrCorpo.automacoes.length, ROI_TAREFAS.length);
+  assert.deepEqual(rrCorpo.periodo, { de: null, ate: null });
+  const rp = await call(com.h, "GET", "/api/roi?de=2026-10-12&ate=2026-10-16");
+  assert.equal(rp.status, 200);
+  const corpo = (await rp.json()) as any;
+  assert.deepEqual(corpo.periodo, { de: "2026-10-12", ate: "2026-10-16" });
+  assert.equal(corpo.automacoes.find((a: any) => a.id === "etiquetas").itens, 25);
+  for (const q of ["de=2026-10-12", "ate=2026-10-16", "de=ontem&ate=hoje", "de=2026-10-17&ate=2026-10-16"]) {
+    const bad = await call(com.h, "GET", `/api/roi?${q}`);
+    assert.equal(bad.status, 400, q);
+    assert.equal(typeof ((await bad.json()) as any).error, "string");
+  }
+
+  for (const path of ["/api/overview", "/api/accounts-payable/dashboard"]) {
+    const s = await (await call(sem.h, "GET", path)).json() as any;
+    const c = await (await call(com.h, "GET", path)).json() as any;
+    const ms = path === "/api/overview" ? s.automations[0].dashboard.metrics : s.metrics;
+    const mc = path === "/api/overview" ? c.automations[0].dashboard.metrics : c.metrics;
+    assert.ok(!("hoursSaved" in ms) && !("estimatedSavings" in ms), `${path} sem roi:ver`);
+    assert.equal(ms.paidCount, mc.paidCount);
+    assert.equal(typeof mc.hoursSaved, "number");
+    assert.equal(typeof mc.estimatedSavings, "number");
+  }
+});
+
+test("SEC-09: Gestor não vê Admin/ROOT em GET /api/admin/users nem lê suas permissões; Admin vê todos", async (t) => {
+  const { call, mk, admin } = await startApi(t);
+  const g = await mk("gestor", "gestor", GESTOR_GRANTS);
+  const a2 = await mk("admin2", "admin");
+  const u = await mk("comum", "user", ["contas_pagar:ver"]);
+
+  const doAdmin = (await (await call(admin, "GET", "/api/admin/users")).json()) as any[];
+  assert.ok(doAdmin.some((x) => x.id === a2.id));
+  assert.ok(doAdmin.some((x) => x.role === "admin" && x.is_root), "o Admin enxerga o ROOT");
+
+  const doGestor = (await (await call(g.h, "GET", "/api/admin/users")).json()) as any[];
+  assert.ok(doGestor.length > 0);
+  assert.ok(doGestor.some((x) => x.id === u.id), "usuários comuns continuam visíveis");
+  assert.ok(doGestor.every((x) => x.role !== "admin" && !x.is_root), "nenhum Admin/ROOT na lista do Gestor");
+
+  for (const alvo of [a2.id, 1]) {
+    const r = await call(g.h, "GET", `/api/admin/users/${alvo}/permissions`);
+    assert.equal(r.status, 403, `alvo ${alvo}`);
+    assert.equal(((await r.json()) as any).code, "target_forbidden");
+    assert.equal((await call(admin, "GET", `/api/admin/users/${alvo}/permissions`)).status, 200);
+  }
+  assert.equal((await call(g.h, "GET", `/api/admin/users/${u.id}/permissions`)).status, 200);
 });

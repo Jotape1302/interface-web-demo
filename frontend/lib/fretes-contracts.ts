@@ -14,9 +14,11 @@ export interface Medidas {
 
 /**
  * conferindo = alteração enviada, aguardando a conferência de 10 min; bloqueado = a combinar que
- * a automação não pode trocar (sem dimensões padronizadas, não cabe na embalagem…).
+ * a automação não pode trocar (sem medidas no Tiny, não cabe na embalagem…); tipo_inconsistente =
+ * já em ME1/ME2, mas o tipo não bate com a embalagem (1 m/2 m é ME2, 3 m é ME1) — o botão
+ * "Corrigir tipo de frete" acerta.
  */
-export type SituacaoAnuncio = 'a_combinar' | 'bloqueado' | 'conferindo' | 'falha' | 'ok';
+export type SituacaoAnuncio = 'a_combinar' | 'bloqueado' | 'conferindo' | 'falha' | 'tipo_inconsistente' | 'ok';
 
 export type BloqueioFrete = 'sem_padrao' | 'sem_sku' | 'sem_embalagem' | 'sem_peso' | 'sem_me1';
 
@@ -30,10 +32,12 @@ export interface AnuncioFrete {
   permalink: string | null;
   thumbnail: string | null;
   modo_envio: string | null;
+  /** fulfillment (Full) fica fora da troca e da varredura. */
+  logistic_type?: string | null;
   tags_envio: string[];
-  /** Dimensões padronizadas do produto (dimensoes_produtos), se houver. */
+  /** Medidas do cadastro do Tiny da mesma empresa (com o peso bruto), se houver. */
   padrao: (Medidas & { sku: string }) | null;
-  /** Embalagem padrão (5 x 7 x 100/200/300) que vai ao ML. */
+  /** Embalagem que vai ao ML: as medidas do Tiny, com o peso bruto. */
   embalagem: Medidas | null;
   embalagem_ml: Medidas;
   envio_indicado: 'me1' | 'me2' | null;
@@ -59,7 +63,7 @@ export interface TrocaFrete {
   de: string | null;
   para: string | null;
   dims: Medidas | null;
-  origem: 'rotina' | 'manual';
+  origem: 'rotina' | 'manual' | 'varredura';
   usuario: string | null;
   feita_em: string;
   verificar_em: string | null;
@@ -71,14 +75,16 @@ export interface TrocaFrete {
 export interface ExecucaoFretes {
   iniciada_em: string;
   concluida_em: string;
-  origem: 'agendada' | 'manual';
+  origem: 'agendada' | 'manual' | 'varredura';
   status: 'ok' | 'parcial' | 'erro';
   resumo: {
     novos: number;
-    pendencias_novas: number;
+    pendencias_novas?: number;
     trocas: number;
+    /** Varredura: anúncios em ME1/ME2 com o tipo corrigido pela embalagem. */
+    corrigidos?: number;
     erros: string[];
-    contas: Record<string, { status: string; mensagem?: string; anuncios?: number }>;
+    contas: Record<string, { status: string; mensagem?: string; anuncios?: number; tipo_corrigido?: number }>;
   };
 }
 
@@ -96,7 +102,7 @@ export interface FretesStatus {
   desfeitos: number;
   /** Anúncios com alteração enviada, esperando a conferência de 10 min. */
   aguardando_conferencia: number;
-  /** Anúncios sem dimensões padronizadas (ou sem SKU): esperam a Padronização de dimensões. */
+  /** Anúncios sem medidas no Tiny (ou sem SKU): precisam do cadastro do Tiny completo. */
   sem_padrao: number;
   minutos_conferencia: number;
 }

@@ -11,10 +11,8 @@ Uso no servidor:
   python3 /app/scripts/inspect_sefaz_nsu.py --set-nsu 000000000000100 --cnpj 36592814000100
 """
 import argparse
-import json
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
 
 # Adiciona o diretório app ao path caso executado de scripts/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

@@ -27,12 +27,16 @@ estão na tabela viram pendência — nunca lançamento com categoria inventada.
 """
 from __future__ import annotations
 
+import dataclasses
 import io
+import itertools
 import re
 from dataclasses import asdict, dataclass, field, fields
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from app.fuso import FUSO_SP, agora_sp
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Empresas atendidas (as únicas com vendas no Mercado Livre)
@@ -63,7 +67,6 @@ EMPRESAS_ML: Dict[str, EmpresaML] = {
         conta_lancamento="Mercado Livre - NORVIA",
         conta_destino_id=702641458,
         categoria_recebimento_id=882461346,
-        categoria_frete_id=489820971,
     ),
     "revesta": EmpresaML(
         id="revesta",
@@ -74,7 +77,6 @@ EMPRESAS_ML: Dict[str, EmpresaML] = {
     ),
 }
 
-FUSO_SP = timezone(timedelta(hours=-3))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tipos de operação
@@ -166,6 +168,16 @@ _CAT_INTERMEDIACAO = "Intermediação de Negócios"
 _CAT_REEMBOLSO = "Reembolso de Intermediação de Negócios"
 _CAT_RECLAMACOES = "Receita Sobre Reclamações"
 
+# Categorias lançadas no caixa com o CONTATO DO CLIENTE da conta baixada, não o Mercado Livre: a
+# devolução é o reembolso que vai para o comprador (financeiro, 16/11/2026, venda 2000063691868271).
+# A "Receita Sobre Reclamações" (o ML nos devolvendo o valor) continua com EBAZAR.
+CATEGORIAS_CONTATO_CLIENTE = frozenset({_CAT_DEVOLUCAO})
+
+# Frete pago pelo comprador (linha "Recebimento de frete", parte do frete na baixa em duas partes e
+# frete fora da conta): ENTRADA em "Fretes sobre Vendas", não em "Receita de Fretes" (financeiro,
+# 11/11/2026: "é um recebimento, só que a categoria tinha que ser Fretes sobre Vendas").
+CATEGORIA_FRETE_RECEBIDO = "Fretes sobre Vendas"
+
 # Tipo de operação -> (categoria no Tiny, modelo do histórico). Categorias do notebook V3 (célula 9).
 MAPEAMENTO_LANCAMENTOS: Dict[str, Tuple[str, str]] = {
     "Tarifa de venda": (_CAT_INTERMEDIACAO, _HIST_TARIFAS),
@@ -182,7 +194,7 @@ MAPEAMENTO_LANCAMENTOS: Dict[str, Tuple[str, str]] = {
         "Ref ao cancelamento do frete sobre a venda {mlb}, operação {op}",
     ),
     TIPO_RECEBIMENTO_FRETE: (
-        "Receita de Fretes",
+        CATEGORIA_FRETE_RECEBIDO,
         "Ref ao frete sobre a venda {mlb}, operação {op}",
     ),
     "Devolução de recebimento": (_CAT_DEVOLUCAO, _HIST_DEVOLUCAO),
@@ -233,6 +245,17 @@ SIT_CONCILIADO = "CONCILIADO"
 SIT_APTO_BAIXA = "APTO PARA BAIXA"
 SIT_SEM_CLIENTE = "Não conciliado"
 SIT_NAO_LOCALIZADO = "NÃO LOCALIZADO"
+# Sem conta porque o pedido foi CANCELADO no Tiny (venda devolvida/cancelada: sem nota, sem conta).
+# Fluxo do financeiro (10/11/2026), só na baixa confirmada na tela: cria a conta a receber do
+# pedido, baixa como entrada e lança no caixa o estorno (devolução) e as tarifas da venda.
+SIT_VENDA_CANCELADA = "VENDA CANCELADA"
+SITUACAO_PEDIDO_CANCELADO = "2"  # Tiny v3: situação do pedido 2 = Cancelado
+# Pedido com nota fiscal no Tiny, mas nenhuma conta a receber (Revesta, 24–29/10/2026: a conta não foi
+# gerada na emissão). Financeiro, 16/11/2026: a baixa confirmada cria a conta do pedido e segue como
+# uma baixa comum (sem estorno).
+SIT_SEM_CONTA_RECEBER = "SEM CONTA A RECEBER"
+# Situações em que a baixa cria a conta a receber do pedido antes de baixar.
+SITUACOES_CONTA_A_CRIAR = (SIT_VENDA_CANCELADA, SIT_SEM_CONTA_RECEBER)
 SIT_VALOR_DIVERGENTE = "VALOR DIVERGENTE"
 SIT_ERRO_API = "ERRO API"
 SIT_ERRO_PROCESSAR = "ERRO AO PROCESSAR"
@@ -244,7 +267,33 @@ SIT_SALDO_DESCONHECIDO = "SALDO DESCONHECIDO"
 # "Custos de parcelamento" já descontado do valor da baixa (juros pagos pelo comprador, que o
 # Mercado Pago repassa e retém): não vira lançamento de caixa, senão a saída entraria duas vezes.
 SIT_DESCONTADO_NA_BAIXA = "DESCONTADO NA BAIXA"
+# "Recebimento de frete" pago pelo comprador que a conta do Tiny não inclui: sai da baixa e vira
+# lançamento de caixa (Fretes sobre Vendas). Transitória: gerar_lancamentos troca por LANÇAMENTO CRIADO.
+SIT_FRETE_NO_CAIXA = "FRETE NO CAIXA"
+# Grupo de análise anterior a 2026-10-21 (sem data da venda): a baixa cairia na data da liberação.
+SIT_SEM_DATA_VENDA = "SEM DATA DA VENDA"
+MSG_SEM_DATA_VENDA = (
+    "Data da venda não encontrada nas análises salvas nem no Mercado Pago: confira a venda antes de baixar à mão."
+)
 TIPO_CUSTO_PARCELAMENTO = "Custos de parcelamento"
+# Entrada de caixa (Intermediação) com o acréscimo do comprador, quando a linha de parcelamento já
+# saiu com o valor cheio e não dá mais para dividi-la (decisão do usuário, 09/11/2026).
+TIPO_ACRESCIMO_COMPRADOR = "Acréscimo do comprador no parcelamento"
+SUFIXO_ACRESCIMO = "|acrescimo"
+# Cupom pago pelo vendedor (COUPON_AMOUNT; `coupon_fee` com fee_payer=collector no pagamento).
+TIPO_CUPOM_VENDEDOR = "Desconto para a sua contraparte"
+TIPO_TARIFA_VENDA = "Tarifa de venda"
+# Partes da "Tarifa de venda" como a integração do próprio Tiny lança no caixa (decisão do usuário,
+# 12/11/2026, exceção à regra de usar só os valores do relatório): cobranças do pagamento no MP
+# (`charges_details`), todas na MESMA categoria da tarifa (Intermediação de Negócios). Venda
+# 2000028929380354: 6,74 = 4,88 (ml_sale_fee) + 0,18 (mp_financing_1x_fee) + 1,68 (mp_processing_fee).
+# Ordem = a do caixa do Tiny. Cobrança com outro nome nunca entra na divisão.
+PARTES_TARIFA_VENDA: Dict[str, str] = {
+    "ml_sale_fee": "Custo por vender no Mercado Livre",
+    "mp_financing_1x_fee": "Taxa de recebimento",
+    "mp_processing_fee": "Custo por cobrar no Mercado Pago",
+}
+SUFIXO_PARTE_TARIFA = "|parte:"
 
 SITUACOES_TINY_BAIXAVEIS = ("aberto", "parcial")
 
@@ -393,6 +442,7 @@ class Movimento:
     valor: Decimal
     linha_relatorio: int  # linha do relatório de liberações (1 = primeira de dados)
     data_hora: str = ""  # DATE do relatório como veio (com hora): parte da chave estável
+    data_venda: str = ""  # dd/mm/aaaa (São Paulo) da aprovação do pagamento: a data da baixa no Tiny
     ocorrencia: int = 0  # n-ésimo movimento com a mesma chave base neste relatório
     numero_movimento: str = ""  # Número do movimento no extrato/relatório
     id_operacao_original: str = ""  # Número da operação original quando cashback_{op}
@@ -407,6 +457,9 @@ class Movimento:
     saldo_tiny: Optional[Decimal] = None
     valor_pago_tiny: Optional[Decimal] = None
     situacao: str = ""
+    # Parte do valor (positiva) que saiu da baixa em vez de virar lançamento de caixa: o acréscimo
+    # do comprador dentro dos "Custos de parcelamento" (o lançamento fica só com o resto).
+    desconto_baixa: Decimal = Decimal("0")
 
     @property
     def id_venda(self) -> str:
@@ -489,6 +542,7 @@ def expandir_liberacoes(registros: Sequence[Dict[str, Any]]) -> List[Movimento]:
         base = dict(
             data=data_br(data_sp(reg.get("DATE") or reg.get("Data de pagamento"))),
             data_hora=_texto(reg.get("DATE")),
+            data_venda=data_br(data_sp(reg.get("TRANSACTION_APPROVAL_DATE"))),
             descricao_mp=descricao,
             id_pagamento=source_id,
             id_pedido=order_id,
@@ -575,6 +629,16 @@ class ItemComparativo:
     mlb: str = ""
 
 
+def data_venda_pedido(pedido: Dict[str, Any], id_pagamento: str = "") -> str:
+    """Data da venda pelo pedido do ML (relatório sem TRANSACTION_APPROVAL_DATE): aprovação do pagamento, senão o pedido."""
+    pagamentos = [pg or {} for pg in pedido.get("payments") or []]
+    pagamento = next((pg for pg in pagamentos if limpar_id(pg.get("id")) == id_pagamento), None)
+    for valor in ((pagamento or {}).get("date_approved"), pedido.get("date_closed"), pedido.get("date_created")):
+        if valor:
+            return data_br(data_sp(valor))
+    return ""
+
+
 def indice_pedidos_ml(pedidos: Iterable[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """(ID do pagamento -> pedido, ID do pedido / pacote -> pedido)."""
     por_pagamento: Dict[str, Dict[str, Any]] = {}
@@ -621,6 +685,40 @@ def indice_pedidos_tiny(pedidos: Iterable[Dict[str, Any]]) -> Dict[str, Tuple[st
     return indice
 
 
+def pagamentos_com_diferenca(movimentos: Sequence[Movimento]) -> List[str]:
+    """Pagamentos com "Diferença na liberação" negativa: candidatos a cupom pago pelo vendedor,
+    que o relatório deixa fora de COUPON_AMOUNT (a rotina confere no pagamento do Mercado Pago)."""
+    return list(dict.fromkeys(
+        m.id_pagamento for m in movimentos
+        if m.tipo_operacao == TIPO_DIFERENCA and m.valor < 0 and m.id_pagamento
+    ))
+
+
+def reclassificar_cupons(movimentos: List[Movimento], cupons: Dict[str, Decimal]) -> int:
+    """
+    "Diferença na liberação" negativa vira "Desconto para a sua contraparte" quando o cupom pago
+    pelo vendedor no pagamento (`cupons`: id do pagamento -> valor, do Mercado Pago) é EXATAMENTE
+    o valor da diferença. Assim a regra do cupom (`_explicar_excedente`) enxerga a linha.
+    """
+    trocadas = 0
+    for mov in movimentos:
+        cupom = cupons.get(mov.id_pagamento) if mov.id_pagamento else None
+        if mov.tipo_operacao != TIPO_DIFERENCA or mov.valor >= 0 or not cupom:
+            continue
+        if abs(-mov.valor - cupom) < _CENTAVO:
+            mov.tipo_operacao = TIPO_CUPOM_VENDEDOR
+            mov.descricao_mp = f"{mov.descricao_mp} (cupom do vendedor no pagamento)"
+            trocadas += 1
+    if trocadas:
+        # A ocorrência entra na chave: recalcula com o tipo novo.
+        contagem: Dict[Tuple, int] = {}
+        for mov in movimentos:
+            base_chave = (mov.id_pagamento, mov.data_hora or mov.data, mov.tipo_operacao, mov.valor.quantize(_CENTAVO))
+            mov.ocorrencia = contagem.get(base_chave, 0)
+            contagem[base_chave] = mov.ocorrencia + 1
+    return trocadas
+
+
 def cruzar_vendas(
     movimentos: List[Movimento],
     pedidos_ml: Iterable[Dict[str, Any]],
@@ -659,6 +757,8 @@ def cruzar_vendas(
             mov.id_pedido = limpar_id(pedido.get("id"))
             mov.id_pacote = limpar_id(pedido.get("pack_id")) or mov.id_pacote
             mov.mlb = extrair_mlb_pedido(pedido)
+            if not mov.data_venda:
+                mov.data_venda = data_venda_pedido(pedido, mov.id_pagamento)
             if not mov.id_final:
                 mov.id_final = mov.id_pacote or mov.id_pedido
 
@@ -750,10 +850,11 @@ class GrupoRecebimento:
     indices: List[int]
     chaves: List[str]
     valor_total: Decimal
-    data: str
+    data: str  # da liberação
     nome_cliente: str
     id_operacao: str = ""
     mlb: str = ""
+    data_venda: str = ""  # da venda (aprovação do pagamento): a data da baixa no Tiny
     situacao: str = ""
     mensagem: str = ""
     conta_id: Optional[int] = None
@@ -775,6 +876,61 @@ class GrupoRecebimento:
     valor_parcelamento: Decimal = Decimal("0")
     indices_parcelamento: List[int] = field(default_factory=list)
     parcelamento_descontado: bool = False
+    # Cupom pago pelo vendedor (positivo) e as linhas dele. O Tiny pode registrar o pedido já com o
+    # desconto: o bruto liberado passa da conta exatamente pelo cupom (ver `avaliar_conta`).
+    valor_cupom: Decimal = Decimal("0")
+    indices_cupom: List[int] = field(default_factory=list)
+    cupom_descontado: bool = False
+    # Cupom lido do pagamento no Mercado Pago (grupo da consolidada sem a linha do relatório): consultado uma vez.
+    cupom_consultado: bool = False
+    # Acréscimo pago pelo comprador no parcelamento (`charges_details` financing_transfer do payer, lido
+    # no Mercado Pago só para divergentes, uma vez). Fica dentro dos "Custos de parcelamento": quando o
+    # excedente é EXATAMENTE ele, sai da baixa e o resto do custo continua no caixa (linha dividida).
+    valor_acrescimo: Decimal = Decimal("0")
+    acrescimo_consultado: bool = False
+    acrescimo_descontado: bool = False
+    # A linha de parcelamento já saiu numa planilha ou já foi lançada no Tiny com o valor cheio: não é
+    # dividida; o acréscimo sai da baixa do mesmo jeito e entra no caixa como ENTRADA em Intermediação
+    # (`TIPO_ACRESCIMO_COMPRADOR`), o que deixa a categoria com o mesmo líquido da divisão.
+    acrescimo_bloqueado: bool = False
+    chaves_parcelamento: List[str] = field(default_factory=list)
+    # Pagamentos das linhas do grupo (produto e frete podem ter pagamentos diferentes).
+    ids_pagamento: List[str] = field(default_factory=list)
+    # Números de PEDIDO do ML quando a venda é identificada pelo pacote (pack_id): o Tiny pode ter
+    # gravado o pedido e não o pacote (11/11/2026, pacote 2000057678923331 = pedido 2000088621286074).
+    ids_pedido: List[str] = field(default_factory=list)
+    ids_pedido_lidos: bool = False  # grupo antigo: pedidos já procurados pelos pagamentos no MP
+    # Cópia das linhas de frete (JSON): a visão consolidada lança a Fretes sobre Vendas de um grupo que
+    # saiu da janela de 60 dias, quando a análise de origem já não gera lançamentos (ou saiu do disco).
+    movimentos_frete: List[Dict[str, Any]] = field(default_factory=list)
+    # Frete pago pelo comprador fora da conta do Tiny (a conta tem só os produtos): o valor sai da
+    # baixa e o "Recebimento de frete" vira lançamento de caixa em Fretes sobre Vendas.
+    frete_no_caixa: Decimal = Decimal("0")
+    # Linhas de "Recebimento de frete" que entram no grupo (as já exportadas ficam fora, I2).
+    indices_frete: List[int] = field(default_factory=list)
+    chaves_frete: List[str] = field(default_factory=list)
+    # Cópia dos lançamentos de caixa da venda (tarifas, envios, extras; JSON de `Lancamento`), com os
+    # valores do relatório: a baixa os lança no caixa do Tiny mesmo depois que o grupo sai da janela.
+    # `caixa_lido`: a cópia já foi feita (da análise ou do relatório do dia); vazia = nada a lançar.
+    lancamentos_caixa: List[Dict[str, Any]] = field(default_factory=list)
+    caixa_lido: bool = False
+    # Recebimento sem venda: o Mercado Pago já foi consultado e o pagamento não é de um pedido desta
+    # conta do Mercado Livre (publicidade, outra conta...). A consolidada não pergunta de novo.
+    venda_procurada: bool = False
+    # Venda cancelada/devolvida (SIT_VENDA_CANCELADA): pedido do Tiny de onde sai a conta a receber
+    # criada na baixa (cliente, número e valor do pedido).
+    pedido_tiny_id: Optional[int] = None
+    pedido_tiny_numero: str = ""
+    pedido_tiny_valor: Optional[Decimal] = None
+    cliente_tiny_id: Optional[int] = None
+
+    def chaves_para_registro(self) -> List[str]:
+        """Chaves gravadas no registro de baixas: o frete que foi para o caixa fica de fora, para
+        o lançamento dele continuar saindo nas rodadas seguintes até ser exportado."""
+        if not self.frete_no_caixa:
+            return list(self.chaves)
+        fora = set(self.chaves_frete)
+        return [c for c in self.chaves if c not in fora]
 
     def ja_baixado(self, baixas: Dict[str, str], legado: Optional[Set[str]] = None) -> bool:
         """Todos os recebimentos do grupo já estão no registro (chave nova ou antiga), ou chaves de produto já baixadas (I2)."""
@@ -795,6 +951,26 @@ class GrupoRecebimento:
     def apto_baixa(self) -> bool:
         return self.situacao == SIT_APTO_BAIXA and self.conta_id is not None
 
+    @property
+    def pode_baixar(self) -> bool:
+        """Apto ou "Erro na baixa" que pode ser marcado de novo (mesma regra do podeBaixar da tela)."""
+        return (
+            self.apto_baixa
+            or (self.situacao == SIT_ERRO_API and self.conta_id is not None)
+            or self.cancelada_pronta
+        )
+
+    @property
+    def cancelada_pronta(self) -> bool:
+        """Venda cancelada (ou faturada sem conta) com o pedido do Tiny lido: a baixa cria a conta antes de baixar."""
+        return (
+            self.situacao in SITUACOES_CONTA_A_CRIAR
+            and self.pedido_tiny_id is not None
+            and self.cliente_tiny_id is not None
+            and self.pedido_tiny_valor is not None
+            and self.pedido_tiny_valor > 0
+        )
+
 
 def obter_grupos(
     movimentos: Sequence[Movimento],
@@ -811,9 +987,12 @@ def obter_grupos(
     legado = prefixos_legado(baixas_feitas)
     por_venda: Dict[str, List[Movimento]] = {}
     parcelamento_por_venda: Dict[str, List[Movimento]] = {}
+    cupom_por_venda: Dict[str, List[Movimento]] = {}
     for mov in movimentos:
         if mov.tipo_operacao == TIPO_CUSTO_PARCELAMENTO and mov.id_venda and mov.valor < 0:
             parcelamento_por_venda.setdefault(mov.id_venda, []).append(mov)
+        if mov.tipo_operacao == TIPO_CUPOM_VENDEDOR and mov.id_venda and mov.valor < 0:
+            cupom_por_venda.setdefault(mov.id_venda, []).append(mov)
         if mov.tipo_operacao not in TIPOS_RECEBIMENTO:
             continue
         chave = mov.id_venda or f"__sem_id_{mov.indice}"
@@ -827,16 +1006,14 @@ def obter_grupos(
         mlb_item = next((m.mlb for m in itens if m.mlb), "")
         val_produtos = sum((m.valor for m in itens if m.tipo_operacao == TIPO_RECEBIMENTO), Decimal("0"))
         # I2: Linha de frete cuja chave já foi exportada não entra no valor do grupo
-        val_frete = sum(
-            (
-                m.valor
-                for m in itens
-                if m.tipo_operacao == TIPO_RECEBIMENTO_FRETE
-                and m.chave not in exportados
-                and not (m.prefixo_legado and any(k.startswith(m.prefixo_legado) for k in exportados))
-            ),
-            Decimal("0"),
-        )
+        fretes = [
+            m
+            for m in itens
+            if m.tipo_operacao == TIPO_RECEBIMENTO_FRETE
+            and m.chave not in exportados
+            and not (m.prefixo_legado and any(k.startswith(m.prefixo_legado) for k in exportados))
+        ]
+        val_frete = sum((m.valor for m in fretes), Decimal("0"))
         chaves_prod = [m.chave for m in itens if m.tipo_operacao == TIPO_RECEBIMENTO]
         pref_prod = [m.prefixo_legado for m in itens if m.tipo_operacao == TIPO_RECEBIMENTO]
         grupo = GrupoRecebimento(
@@ -851,20 +1028,42 @@ def obter_grupos(
             valor_produtos=val_produtos,
             valor_frete=val_frete,
             data=primeira.data,
+            data_venda=next((m.data_venda for m in itens if m.data_venda), ""),
             nome_cliente=primeira.nome_cliente,
             id_operacao=op_orig,
             mlb=mlb_item,
+            indices_frete=[m.indice for m in fretes],
+            chaves_frete=[m.chave for m in fretes],
+            ids_pagamento=list(dict.fromkeys(m.id_pagamento for m in itens if m.id_pagamento)),
+            ids_pedido=list(dict.fromkeys(m.id_pedido for m in itens if m.id_pedido and m.id_pedido != primeira.id_venda)),
+            movimentos_frete=[_para_json(asdict(m)) for m in fretes],
         )
         if primeira.id_venda:
             parc = parcelamento_por_venda.get(primeira.id_venda, [])
             grupo.valor_parcelamento = -sum((m.valor for m in parc), Decimal("0"))
             grupo.indices_parcelamento = [m.indice for m in parc]
+            grupo.chaves_parcelamento = [m.chave for m in parc]
+            cupom = cupom_por_venda.get(primeira.id_venda, [])
+            grupo.valor_cupom = -sum((m.valor for m in cupom), Decimal("0"))
+            grupo.indices_cupom = [m.indice for m in cupom]
         if grupo.ja_baixado(baixas_feitas, legado):
             datas = [baixas_feitas[c] for c in grupo.chaves if c in baixas_feitas]
             datas += [v for k, v in baixas_feitas.items() if any(k.startswith(p) for p in grupo.prefixos_legado)]
             grupo.situacao = SIT_CONCILIADO
             grupo.baixado_em = max(datas) if datas else ""
             grupo.mensagem = "Já baixado no Tiny por esta automação em outra execução."
+            # Frete que foi para o caixa na baixa (fora do registro) e ainda não saiu numa planilha.
+            no_caixa = [m for m in fretes if not ja_baixado(m.chave, m.prefixo_legado, baixas_feitas, legado)]
+            if no_caixa:
+                grupo.frete_no_caixa = sum((m.valor for m in no_caixa), Decimal("0"))
+                grupo.valor_frete -= grupo.frete_no_caixa
+                grupo.valor_total -= grupo.frete_no_caixa
+                grupo.indices_frete = [m.indice for m in no_caixa]
+                grupo.chaves_frete = [m.chave for m in no_caixa]
+                grupo.mensagem += (
+                    f" Frete de R$ {grupo.frete_no_caixa.quantize(_CENTAVO)} fora da conta do Tiny: "
+                    "vai para os lançamentos de caixa (Fretes sobre Vendas)."
+                )
         grupos.append(grupo)
     return grupos
 
@@ -899,6 +1098,37 @@ def selecionar_contas_da_venda(contas: Sequence[Dict[str, Any]], id_venda: str, 
         (c for c in contas if historico_cita_venda(str(c.get("historico") or ""), id_venda, id_operacao)),
         key=numero_parcela,
     )
+
+
+def numeros_da_venda(grupo: "GrupoRecebimento") -> List[str]:
+    """Números com que o Tiny pode ter gravado a venda: o da venda (pacote ou pedido) e os pedidos do pacote."""
+    return [n for n in dict.fromkeys([grupo.id_venda, *grupo.ids_pedido]) if n]
+
+
+def contas_que_citam(contas: Sequence[Dict[str, Any]], grupo: "GrupoRecebimento") -> List[Dict[str, Any]]:
+    """Contas que citam a venda por qualquer dos números dela (`numeros_da_venda`), na ordem."""
+    for numero in numeros_da_venda(grupo) or [""]:
+        achadas = selecionar_contas_da_venda(contas, numero, grupo.id_operacao)
+        if achadas:
+            return achadas
+    return []
+
+
+def contas_por_numeros(contas_da_venda: "ContasDaVenda", grupo: "GrupoRecebimento") -> List[Dict[str, Any]]:
+    """Busca pela nota/vencimento (`contas_da_venda`) com cada número da venda, até achar."""
+    for numero in numeros_da_venda(grupo):
+        achadas = selecionar_contas_da_venda(contas_da_venda(numero), numero, grupo.id_operacao)
+        if achadas:
+            return achadas
+    return []
+
+
+def pedido_por_numeros(pedido_da_venda: "PedidoDaVenda", grupo: "GrupoRecebimento") -> Optional[Dict[str, Any]]:
+    for numero in numeros_da_venda(grupo):
+        pedido = pedido_da_venda(numero)
+        if pedido:
+            return pedido
+    return None
 
 
 def selecionar_conta(contas: Sequence[Dict[str, Any]], id_venda: str, id_operacao: str = "") -> Optional[Dict[str, Any]]:
@@ -974,17 +1204,254 @@ def aplicar_conta_ao_grupo(grupo: GrupoRecebimento, conta: Dict[str, Any]) -> No
     aplicar_contas_ao_grupo(grupo, [conta])
 
 
-def _restaurar_parcelamento(grupo: GrupoRecebimento) -> None:
+def _restaurar_descontos(grupo: GrupoRecebimento) -> None:
     """Volta o grupo ao valor bruto (a avaliação pode rodar de novo: análise, visão consolidada, baixa)."""
     if grupo.parcelamento_descontado:
         grupo.valor_produtos += grupo.valor_parcelamento
         grupo.valor_total += grupo.valor_parcelamento
         grupo.parcelamento_descontado = False
+    if grupo.cupom_descontado:
+        grupo.valor_produtos += grupo.valor_cupom
+        grupo.valor_total += grupo.valor_cupom
+        grupo.cupom_descontado = False
+    if grupo.acrescimo_descontado:
+        grupo.valor_produtos += grupo.valor_acrescimo
+        grupo.valor_total += grupo.valor_acrescimo
+        grupo.acrescimo_descontado = False
+    if grupo.frete_no_caixa:
+        grupo.valor_frete += grupo.frete_no_caixa
+        grupo.valor_total += grupo.frete_no_caixa
+        grupo.frete_no_caixa = Decimal("0")
+
+
+def chaves_frete_legado(grupo: GrupoRecebimento) -> List[str]:
+    """Chaves das linhas de frete do grupo. Grupos anteriores a 2026-11-04 não têm `chaves_frete`:
+    o tipo de operação faz parte da chave (`v2|pagamento|data|tipo|valor|n`)."""
+    if grupo.chaves_frete:
+        return list(grupo.chaves_frete)
+    return [c for c in grupo.chaves if f"|{TIPO_RECEBIMENTO_FRETE}|" in c]
+
+
+def movimento_de_json(dados: Dict[str, Any]) -> Movimento:
+    return _de_json(Movimento, dados)
+
+
+def lancamento_de_json(dados: Dict[str, Any]) -> "Lancamento":
+    return _de_json(Lancamento, dados)
+
+
+def lancamentos_da_venda(analise_movimentos: Sequence[Movimento], lancamentos: Sequence["Lancamento"], id_venda: str) -> List["Lancamento"]:
+    """Lançamentos de caixa gerados de linhas da venda (pela chave do movimento)."""
+    por_chave = {m.chave: m for m in analise_movimentos if m.chave}
+    return [l for l in lancamentos if l.chave and l.chave in por_chave and por_chave[l.chave].id_venda == id_venda]
 
 
 def avaliar_conta(grupo: GrupoRecebimento) -> None:
     """Situação do grupo pela conta localizada: apta, já baixada no Tiny ou valor acima do saldo."""
-    _restaurar_parcelamento(grupo)
+    _avaliar_conta(grupo)
+    if grupo.situacao == SIT_APTO_BAIXA and not grupo.data_venda:
+        # A baixa vai na data da venda; sem ela, cairia na data da liberação.
+        grupo.situacao, grupo.mensagem = SIT_SEM_DATA_VENDA, MSG_SEM_DATA_VENDA
+
+
+def avaliar_conta_sem_parte(grupo: GrupoRecebimento, parte: str) -> None:
+    """
+    avaliar_conta quando a parte `parte` ("prod" ou "frete") já foi baixada numa tentativa anterior
+    (ex.: o produto entrou e o frete falhou): o saldo do Tiny já não a inclui, então ela fica fora da
+    comparação com o saldo e volta ao grupo em seguida (a análise continua com o valor cheio).
+    """
+    _restaurar_descontos(grupo)
+    campo = "valor_produtos" if parte == "prod" else "valor_frete"
+    retirado = getattr(grupo, campo)
+    setattr(grupo, campo, Decimal("0"))
+    grupo.valor_total -= retirado
+    try:
+        avaliar_conta(grupo)
+    finally:
+        setattr(grupo, campo, getattr(grupo, campo) + retirado)
+        grupo.valor_total += retirado
+
+
+def _explicar_excedente(grupo: GrupoRecebimento, em_aberto: Decimal, tolerancia: Decimal) -> bool:
+    """
+    Recebido acima do saldo explicado EXATAMENTE por componentes da própria venda (nunca por
+    aproximação). Deixa o grupo apto e devolve True; senão não mexe em nada.
+    - custos de parcelamento (juros do comprador) e cupom pago pelo vendedor: o Tiny tem o preço
+      sem eles; saem da baixa e a linha vira DESCONTADO NA BAIXA (fora dos lançamentos de caixa);
+    - acréscimo do comprador (lido no pagamento do Mercado Pago): só a parte que o comprador pagou
+      dos custos de parcelamento sai da baixa; a linha é dividida e o resto continua no caixa;
+    - frete pago pelo comprador fora da conta: sai da baixa e vira lançamento de caixa (Receita de
+      Fretes). Só com a venda intacta no Tiny (nada pago em nenhuma conta/parcela e todas em
+      aberto): com pagamento parcial o excedente pode ser outra coisa. A venda que o Tiny dividiu em
+      parcelas (liberação do ML em partes) também vale, desde que todas estejam intactas.
+    """
+    excedente = grupo.valor_total - em_aberto
+    parc = grupo.valor_parcelamento if grupo.valor_parcelamento > 0 else Decimal("0")
+    cupom = grupo.valor_cupom if grupo.valor_cupom > 0 else Decimal("0")
+    # O acréscimo é parte do parcelamento: menor que ele (igual = a regra do parcelamento inteiro).
+    acr = grupo.valor_acrescimo if Decimal("0") < grupo.valor_acrescimo < parc else Decimal("0")
+    frete_ok = (
+        grupo.valor_frete > 0
+        and (grupo.conta_valor_pago or Decimal("0")) <= 0
+        and all(c.get("situacao") in SITUACOES_TINY_BAIXAVEIS for c in grupo.contas_vinculadas)
+        and (grupo.conta_valor is None or abs(grupo.conta_valor - em_aberto) < _CENTAVO)
+    )
+    frete = grupo.valor_frete if frete_ok else Decimal("0")
+    valores = {"parc": parc, "acr": acr, "cupom": cupom, "frete": frete}
+    # Menos componentes primeiro (o caso mais simples que fecha é o que vale). Parcelamento e
+    # acréscimo saem da mesma linha: nunca juntos.
+    combinacoes = [
+        ("parc",), ("acr",), ("cupom",), ("frete",),
+        ("parc", "cupom"), ("acr", "cupom"), ("parc", "frete"), ("acr", "frete"), ("cupom", "frete"),
+        ("parc", "cupom", "frete"), ("acr", "cupom", "frete"),
+    ]
+    for combo in combinacoes:
+        if any(not valores[c] for c in combo):
+            continue
+        descontos = sum((valores[c] for c in combo if c != "frete"), Decimal("0"))
+        if descontos > grupo.valor_produtos:
+            continue
+        if abs(excedente - descontos - (frete if "frete" in combo else 0)) >= tolerancia:
+            continue
+        bruto = grupo.valor_total
+        partes = []
+        if "parc" in combo:
+            grupo.parcelamento_descontado = True
+            partes.append(f"R$ {parc.quantize(_CENTAVO)} de custos de parcelamento (juros do comprador)")
+        if "acr" in combo:
+            grupo.acrescimo_descontado = True
+            if grupo.acrescimo_bloqueado:
+                partes.append(
+                    f"R$ {acr.quantize(_CENTAVO)} de acréscimo pago pelo comprador no parcelamento (a linha de "
+                    f"R$ {parc.quantize(_CENTAVO)} já saiu com o valor cheio: o acréscimo entra no caixa como "
+                    "entrada em Intermediação)"
+                )
+            else:
+                partes.append(
+                    f"R$ {acr.quantize(_CENTAVO)} de acréscimo pago pelo comprador no parcelamento (os outros "
+                    f"R$ {(parc - acr).quantize(_CENTAVO)} dos custos de parcelamento vão para o caixa)"
+                )
+        if "cupom" in combo:
+            grupo.cupom_descontado = True
+            partes.append(f"R$ {cupom.quantize(_CENTAVO)} de cupom pago pelo vendedor (o Tiny tem o preço com desconto)")
+        grupo.valor_produtos -= descontos
+        grupo.valor_total -= descontos
+        if "frete" in combo:
+            grupo.frete_no_caixa = frete
+            grupo.valor_total -= frete
+            grupo.valor_frete = Decimal("0")
+            partes.append(
+                f"R$ {frete.quantize(_CENTAVO)} de frete pago pelo comprador, fora da conta do Tiny "
+                "(vai para os lançamentos de caixa, Fretes sobre Vendas)"
+            )
+        grupo.situacao = SIT_APTO_BAIXA
+        grupo.mensagem = (
+            f"Recebido R$ {bruto.quantize(_CENTAVO)} inclui " + "; ".join(partes)
+            + f": baixa de R$ {grupo.valor_total.quantize(_CENTAVO)}, igual ao saldo."
+        )
+        return True
+    return False
+
+
+def adicionar_entradas_acrescimo(lancamentos: List["Lancamento"], movimentos: Sequence[Movimento], grupos: Iterable[GrupoRecebimento]) -> None:
+    """Entrada do acréscimo (linha de parcelamento já exportada) na lista da análise, para a planilha."""
+    por_indice = {m.indice: m for m in movimentos}
+    for g in grupos:
+        if not (g.acrescimo_descontado and g.acrescimo_bloqueado):
+            continue
+        chaves = {por_indice[i].chave for i in g.indices_parcelamento if i in por_indice}
+        da_venda = [l for l in lancamentos if l.chave in chaves]
+        lancamentos.extend(l for l in ajustar_lancamentos_parcelamento(da_venda, g) if l.tipo_operacao == TIPO_ACRESCIMO_COMPRADOR)
+
+
+def pagamentos_do_grupo(grupo: GrupoRecebimento) -> List[str]:
+    """
+    Pagamentos do Mercado Pago das linhas do grupo. Grupo salvo antes de `ids_pagamento` existir:
+    tira das chaves das linhas ("v2|<pagamento>|..." ou "<pagamento>|..."). Antes (11/11/2026,
+    venda 2000096447709203) ia só o `id_operacao`, que é o pagamento da PRIMEIRA linha: com o frete
+    numa liberação à parte, o acréscimo do comprador era lido no pagamento do frete (sem acréscimo)
+    e o do produto ficava de fora.
+    """
+    if grupo.ids_pagamento:
+        return list(grupo.ids_pagamento)
+    ids: List[str] = []
+    for chave in grupo.chaves:
+        partes = chave.split("|")
+        pid = partes[1] if partes[0] == "v2" and len(partes) > 1 else partes[0]
+        if pid.isdigit() and pid not in ids:
+            ids.append(pid)
+    return ids or ([grupo.id_operacao] if grupo.id_operacao else [])
+
+
+def precisa_acrescimo(grupo: GrupoRecebimento) -> bool:
+    """Divergente com custos de parcelamento e recebido acima do saldo, ainda sem ler o acréscimo
+    do comprador no Mercado Pago. Grupo antigo (sem `ids_pagamento`) lido com acréscimo zero lê de
+    novo: a leitura pode ter ido só ao pagamento da primeira linha (ver `pagamentos_do_grupo`)."""
+    return (
+        grupo.situacao == SIT_VALOR_DIVERGENTE
+        and (not grupo.acrescimo_consultado or (not grupo.ids_pagamento and grupo.valor_acrescimo <= 0))
+        and grupo.valor_parcelamento > 0
+        and grupo.conta_saldo is not None
+        and grupo.valor_total > grupo.conta_saldo
+    )
+
+
+def aplicar_acrescimo(grupo: GrupoRecebimento, valor: Decimal, bloqueadas: Iterable[str] = ()) -> None:
+    """Grava o acréscimo lido do pagamento e reavalia. `bloqueadas`: chaves já exportadas/lançadas."""
+    grupo.acrescimo_consultado = True
+    grupo.valor_acrescimo = valor if valor > 0 else Decimal("0")
+    grupo.acrescimo_bloqueado = bool(set(grupo.chaves_parcelamento) & set(bloqueadas))
+    if grupo.valor_acrescimo > 0:
+        avaliar_conta(grupo)
+
+
+def ajustar_lancamentos_parcelamento(lancamentos: Sequence["Lancamento"], grupo: GrupoRecebimento) -> List["Lancamento"]:
+    """
+    Lançamentos de caixa da venda conforme o que saiu da baixa (idempotente; devolve cópias):
+    - parcelamento descontado inteiro: a linha sai da lista;
+    - acréscimo descontado com a linha dividida: os "Custos de parcelamento" ficam só com o resto;
+    - acréscimo descontado com a linha já exportada/lançada cheia (`acrescimo_bloqueado`): a linha
+      fica cheia e entra uma ENTRADA em Intermediação com o acréscimo (chave da linha + "|acrescimo");
+    - sem acréscimo descontado: a linha volta ao valor cheio e a entrada sai.
+    Vale para as cópias guardadas no grupo (`lancamentos_caixa`), feitas antes de a regra valer.
+    """
+    dividir = grupo.acrescimo_descontado and not grupo.acrescimo_bloqueado
+    entrada = grupo.acrescimo_descontado and grupo.acrescimo_bloqueado
+    resto = grupo.valor_acrescimo if dividir else Decimal("0")
+    saida: List[Lancamento] = []
+    base: Optional[Lancamento] = None
+    for l in lancamentos:
+        if l.tipo_operacao == TIPO_ACRESCIMO_COMPRADOR:
+            continue  # refeita abaixo, se for o caso
+        if l.tipo_operacao != TIPO_CUSTO_PARCELAMENTO:
+            saida.append(l)
+            continue
+        if grupo.parcelamento_descontado:
+            continue
+        cheio = l.valor + l.desconto_baixa
+        desconto = min(resto, cheio)
+        resto -= desconto
+        if desconto >= cheio and cheio > 0:
+            continue
+        ajustado = dataclasses.replace(l, valor=cheio - desconto, desconto_baixa=desconto)
+        base = base or ajustado
+        saida.append(ajustado)
+    if entrada and base is not None and grupo.valor_acrescimo > 0:
+        saida.append(dataclasses.replace(
+            base,
+            tipo="C",
+            fluxo="RECEBIMENTO",
+            valor=grupo.valor_acrescimo,
+            desconto_baixa=Decimal("0"),
+            tipo_operacao=TIPO_ACRESCIMO_COMPRADOR,
+            historico=base.historico.replace(f" - {TIPO_CUSTO_PARCELAMENTO}", f" - {TIPO_ACRESCIMO_COMPRADOR}"),
+            chave=chave_lancamento(base) + SUFIXO_ACRESCIMO,
+        ))
+    return saida
+
+
+def _avaliar_conta(grupo: GrupoRecebimento) -> None:
+    _restaurar_descontos(grupo)
     if grupo.conta_situacao not in SITUACOES_TINY_BAIXAVEIS:
         grupo.situacao = f"STATUS: {grupo.conta_situacao.upper() or 'DESCONHECIDO'}"
         grupo.mensagem = "Conta já não está em aberto no Tiny: não requer baixa."
@@ -998,23 +1465,7 @@ def avaliar_conta(grupo: GrupoRecebimento) -> None:
         grupo.mensagem = "O Tiny não informou o saldo nem o valor da conta: confira antes de baixar à mão."
         return
     tolerancia = Decimal("0.05") if len(grupo.contas_vinculadas) > 1 else _CENTAVO
-    parcelamento = grupo.valor_parcelamento or Decimal("0")
-    if (
-        grupo.valor_total - em_aberto >= tolerancia
-        and parcelamento > 0
-        and parcelamento <= grupo.valor_produtos
-        and abs(grupo.valor_total - parcelamento - em_aberto) < tolerancia
-    ):
-        # Parcelado com juros: o excedente é exatamente o custo de parcelamento repassado ao MP.
-        bruto = grupo.valor_total
-        grupo.valor_produtos -= parcelamento
-        grupo.valor_total -= parcelamento
-        grupo.parcelamento_descontado = True
-        grupo.situacao = SIT_APTO_BAIXA
-        grupo.mensagem = (
-            f"Recebido R$ {bruto.quantize(_CENTAVO)} inclui R$ {parcelamento.quantize(_CENTAVO)} de custos de "
-            f"parcelamento (juros do comprador): baixa de R$ {grupo.valor_total.quantize(_CENTAVO)}, igual ao saldo."
-        )
+    if grupo.valor_total - em_aberto >= tolerancia and _explicar_excedente(grupo, em_aberto, tolerancia):
         return
     if grupo.valor_total - em_aberto >= tolerancia:
         grupo.situacao = SIT_VALOR_DIVERGENTE
@@ -1039,18 +1490,105 @@ def avaliar_conta(grupo: GrupoRecebimento) -> None:
         )
 
 
+def pedido_cancelado(pedido: Optional[Dict[str, Any]]) -> bool:
+    return bool(pedido) and str(pedido.get("situacao")) == SITUACAO_PEDIDO_CANCELADO
+
+
+def pedido_com_nota(pedido: Optional[Dict[str, Any]]) -> bool:
+    """Pedido não cancelado e com nota fiscal emitida (a conta a receber deveria existir)."""
+    if not pedido or pedido_cancelado(pedido):
+        return False
+    nota = pedido.get("notaFiscal") if isinstance(pedido.get("notaFiscal"), dict) else {}
+    return bool((nota or {}).get("id") or pedido.get("idNotaFiscal"))
+
+
+def _ler_pedido_no_grupo(grupo: GrupoRecebimento, pedido: Dict[str, Any], situacao: str) -> None:
+    cliente = pedido.get("cliente") if isinstance(pedido.get("cliente"), dict) else {}
+    valor = _decimal_ou_none(pedido.get("valorTotalPedido") if pedido.get("valorTotalPedido") is not None else pedido.get("valorTotal"))
+    grupo.situacao = situacao
+    grupo.pedido_tiny_id = int(pedido["id"]) if pedido.get("id") else None
+    grupo.pedido_tiny_numero = str(pedido.get("numeroPedido") or "")
+    grupo.pedido_tiny_valor = valor
+    grupo.cliente_tiny_id = int(cliente["id"]) if (cliente or {}).get("id") else None
+
+
+def marcar_sem_conta_receber(grupo: GrupoRecebimento, pedido: Dict[str, Any]) -> None:
+    """Pedido com nota fiscal e nenhuma conta da venda: a baixa cria a conta do pedido."""
+    _ler_pedido_no_grupo(grupo, pedido, SIT_SEM_CONTA_RECEBER)
+    if grupo.cancelada_pronta:
+        grupo.mensagem = (
+            f"Pedido nº {grupo.pedido_tiny_numero} com nota fiscal no Tiny, mas sem conta a receber. "
+            f"A baixa cria a conta de R$ {grupo.pedido_tiny_valor.quantize(_CENTAVO)}, baixa e lança as tarifas da venda."
+        )
+    else:
+        grupo.mensagem = (
+            f"Pedido nº {grupo.pedido_tiny_numero or '?'} com nota fiscal e sem conta a receber, mas sem cliente "
+            "ou valor no pedido: lance à mão."
+        )
+
+
+def marcar_venda_cancelada(grupo: GrupoRecebimento, pedido: Dict[str, Any]) -> None:
+    """Pedido cancelado no Tiny e nenhuma conta da venda: a baixa cria a conta do pedido."""
+    _ler_pedido_no_grupo(grupo, pedido, SIT_VENDA_CANCELADA)
+    if grupo.cancelada_pronta:
+        grupo.mensagem = (
+            f"Pedido nº {grupo.pedido_tiny_numero} cancelado no Tiny (venda devolvida/cancelada), sem conta a receber. "
+            f"A baixa cria a conta de R$ {grupo.pedido_tiny_valor.quantize(_CENTAVO)}, baixa como entrada e lança "
+            "no caixa o estorno e as tarifas da venda."
+        )
+    else:
+        grupo.mensagem = (
+            f"Pedido nº {grupo.pedido_tiny_numero or '?'} cancelado no Tiny, mas sem cliente ou valor no pedido: "
+            "lance à mão."
+        )
+
+
+TIPOS_ESTORNO = ("Devolução de recebimento", "Devolução por Compra Garantida", "Contestação de pagamento")
+
+
+def simular_conta_cancelada(grupo: GrupoRecebimento) -> GrupoRecebimento:
+    """Cópia do grupo avaliada contra a conta que a baixa vai criar (valor do pedido, em aberto):
+    as mesmas regras de sempre (frete fora da conta, parcelamento, cupom) decidem se fecha."""
+    copia = dataclasses.replace(
+        grupo,
+        contas_vinculadas=[],
+        chaves=list(grupo.chaves),
+        indices=list(grupo.indices),
+    )
+    aplicar_conta_ao_grupo(copia, {
+        "id": 0, "situacao": "aberto", "valor": str(grupo.pedido_tiny_valor),
+        "saldo": str(grupo.pedido_tiny_valor), "valorPago": "0", "historico": historico_conta_cancelada(grupo),
+    })
+    avaliar_conta(copia)
+    return copia
+
+
+def historico_conta_cancelada(grupo: GrupoRecebimento) -> str:
+    """Histórico no padrão das contas do Tiny; cita a venda para as próximas análises a acharem."""
+    return f"Ref. ao pedido de venda nº {grupo.pedido_tiny_numero}, {grupo.nome_cliente} - OC nº {grupo.id_venda}"
+
+
 ListarContasCliente = Callable[[str], List[Dict[str, Any]]]
+# Contas a receber da venda achadas pelo pedido do Tiny -> nota fiscal -> contas da nota.
+ContasDaVenda = Callable[[str], List[Dict[str, Any]]]
+# Pedido completo do Tiny pela venda do ML (None = não achado).
+PedidoDaVenda = Callable[[str], Optional[Dict[str, Any]]]
 
 
 def localizar_contas(
     grupos: Sequence[GrupoRecebimento],
     listar_contas_cliente: Optional[ListarContasCliente],
     progresso: Optional[Callable[[str, int, int], None]] = None,
+    contas_da_venda: Optional[ContasDaVenda] = None,
+    pedido_da_venda: Optional[PedidoDaVenda] = None,
 ) -> None:
     """
     Preenche a conta do Tiny e a situação de cada grupo (só leitura, nenhuma baixa).
     `listar_contas_cliente(nome)` devolve as contas a receber do cliente em todas as situações;
-    None = Tiny indisponível (sem token).
+    None = Tiny indisponível (sem token). Sem conta que cite a venda pelo nome (o filtro nomeCliente
+    do Tiny não acha clientes como "Instituto Exemplo Sa (centro de Pesquisas, ..." — 06/11),
+    `contas_da_venda(id_venda)` busca pela nota fiscal do pedido; o histórico continua tendo que
+    citar a venda.
     """
     cache: Dict[str, List[Dict[str, Any]]] = {}
     erros: Dict[str, str] = {}
@@ -1079,16 +1617,36 @@ def localizar_contas(
                 cache[nome] = listar_contas_cliente(nome)
             except Exception as e:  # erro de API: o grupo fica marcado e a análise segue
                 erros[nome] = str(e)
-        if nome in erros:
+        contas = [] if nome in erros else contas_que_citam(cache[nome], grupo)
+        if not contas and contas_da_venda and grupo.id_venda:
+            try:
+                contas = contas_por_numeros(contas_da_venda, grupo)
+            except Exception as e:
+                grupo.situacao = SIT_ERRO_PROCESSAR
+                grupo.mensagem = (erros[nome] + "; " if nome in erros else "") + f"busca pela nota fiscal do pedido falhou: {e}"
+                continue
+        if not contas and nome in erros:
             grupo.situacao = SIT_ERRO_PROCESSAR
             grupo.mensagem = erros[nome]
             continue
-
-        contas = selecionar_contas_da_venda(cache[nome], grupo.id_venda, grupo.id_operacao)
+        if not contas and pedido_da_venda and grupo.id_venda:
+            try:
+                pedido = pedido_por_numeros(pedido_da_venda, grupo)
+            except Exception:
+                pedido = None  # fica "não localizado"; a próxima análise tenta de novo
+            if pedido_cancelado(pedido):
+                marcar_venda_cancelada(grupo, pedido)
+                continue
+            if pedido_com_nota(pedido):
+                marcar_sem_conta_receber(grupo, pedido)
+                continue
         if not contas:
             grupo.situacao = SIT_NAO_LOCALIZADO
-            ref_txt = f"{grupo.id_venda}" + (f" ou operação {grupo.id_operacao}" if grupo.id_operacao and grupo.id_operacao != grupo.id_venda else "")
-            grupo.mensagem = f"Nenhuma conta de {nome} cita a venda {ref_txt} no histórico."
+            ref_txt = " / ".join(numeros_da_venda(grupo)) + (f" ou operação {grupo.id_operacao}" if grupo.id_operacao and grupo.id_operacao != grupo.id_venda else "")
+            grupo.mensagem = (
+                f"Nenhuma conta de {nome} cita a venda {ref_txt} no histórico"
+                + (" (busca pelo nome e pela nota fiscal do pedido)." if contas_da_venda else ".")
+            )
             continue
         aplicar_contas_ao_grupo(grupo, contas)
         avaliar_conta(grupo)
@@ -1101,6 +1659,13 @@ def refletir_grupos_nas_linhas(movimentos: List[Movimento], grupos: Iterable[Gru
             mov = por_indice.get(idx)
             if mov is None:
                 continue
+            if grupo.frete_no_caixa and mov.tipo_operacao == TIPO_RECEBIMENTO_FRETE and (
+                idx in grupo.indices_frete or not grupo.indices_frete
+            ):
+                # Fica com a situação do lançamento de caixa (criado ou pendente), não a da baixa.
+                if mov.situacao not in (SIT_LANCAMENTO_CRIADO, SIT_VERIFICAR):
+                    mov.situacao = SIT_FRETE_NO_CAIXA
+                continue
             mov.situacao = grupo.situacao
             mov.id_conta_receber = str(grupo.conta_id) if grupo.conta_id else ""
             mov.status_conta_tiny = grupo.conta_situacao
@@ -1109,8 +1674,25 @@ def refletir_grupos_nas_linhas(movimentos: List[Movimento], grupos: Iterable[Gru
             mov.valor_pago_tiny = grupo.conta_valor_pago
             if grupo.mlb and not mov.mlb:
                 mov.mlb = grupo.mlb
-        if grupo.parcelamento_descontado:
-            for idx in grupo.indices_parcelamento:
+        descontadas = (grupo.indices_parcelamento if grupo.parcelamento_descontado else []) + (
+            grupo.indices_cupom if grupo.cupom_descontado else []
+        )
+        # Acréscimo do comprador: a linha de parcelamento é dividida (o resto vai para o caixa).
+        # Linha já exportada/lançada cheia: não divide (o acréscimo vira entrada de caixa).
+        dividir = grupo.acrescimo_descontado and not grupo.acrescimo_bloqueado
+        resto = grupo.valor_acrescimo if dividir else Decimal("0")
+        for idx in grupo.indices_parcelamento:
+            mov = por_indice.get(idx)
+            if mov is None:
+                continue
+            mov.desconto_baixa = min(resto, abs(mov.valor))
+            resto -= mov.desconto_baixa
+            if mov.desconto_baixa and mov.desconto_baixa >= abs(mov.valor):
+                descontadas = descontadas + [idx]
+            elif mov.desconto_baixa:
+                mov.id_conta_receber = str(grupo.conta_id) if grupo.conta_id else ""
+        if descontadas:
+            for idx in descontadas:
                 mov = por_indice.get(idx)
                 if mov is not None:
                     mov.situacao = SIT_DESCONTADO_NA_BAIXA
@@ -1137,6 +1719,29 @@ class Lancamento:
     tipo_operacao: str
     chave: str = ""  # chave do movimento: registra o que já foi exportado para o Tiny (ML-5)
     fluxo: str = ""  # "RECEBIMENTO" (entrada) ou "PAGAMENTO" (saída)
+    desconto_baixa: Decimal = Decimal("0")  # parte do movimento que saiu da baixa (acréscimo do comprador)
+
+
+def dividir_tarifa_venda(valor: Decimal, cobrancas: Sequence[Tuple[str, Decimal]]) -> List[Tuple[str, str, Decimal]]:
+    """
+    Partes da tarifa de venda (nome da cobrança no MP, rótulo, valor) tiradas das cobranças do
+    pagamento. Só divide quando há UMA combinação de 2 ou mais cobranças conhecidas
+    (`PARTES_TARIFA_VENDA`) que soma EXATAMENTE a linha do relatório; qualquer dúvida (nome repetido,
+    soma diferente, mais de uma combinação) devolve [] e a tarifa vai inteira, como antes.
+    """
+    conhecidas = [(n, Decimal(v).quantize(_CENTAVO)) for n, v in cobrancas if n in PARTES_TARIFA_VENDA and Decimal(v) > 0]
+    if len({n for n, _ in conhecidas}) != len(conhecidas):
+        return []
+    alvo = Decimal(valor).quantize(_CENTAVO)
+    achadas = []
+    for k in range(2, len(conhecidas) + 1):
+        for combo in itertools.combinations(conhecidas, k):
+            if sum((v for _, v in combo), Decimal("0")) == alvo:
+                achadas.append(combo)
+    if len(achadas) != 1:
+        return []
+    ordem = list(PARTES_TARIFA_VENDA)
+    return [(n, PARTES_TARIFA_VENDA[n], v) for n, v in sorted(achadas[0], key=lambda c: ordem.index(c[0]))]
 
 
 def chave_lancamento(l: Lancamento) -> str:
@@ -1288,7 +1893,9 @@ def gerar_lancamentos(movimentos: List[Movimento], conta_lancamento: str) -> Res
 
     for mov in movimentos:
         tipo = mov.tipo_operacao
-        if tipo in TIPOS_IGNORAR_LANCAMENTO or mov.situacao == SIT_DESCONTADO_NA_BAIXA:
+        if mov.situacao == SIT_FRETE_NO_CAIXA:
+            mov.situacao = ""  # frete fora da conta do Tiny: lançado como Fretes sobre Vendas
+        elif tipo in TIPOS_IGNORAR_LANCAMENTO or mov.situacao == SIT_DESCONTADO_NA_BAIXA:
             continue
         if mov.situacao == SIT_ANULADA:
             resultado.total_anuladas += 1
@@ -1355,7 +1962,7 @@ def gerar_lancamentos(movimentos: List[Movimento], conta_lancamento: str) -> Res
                 categoria=categoria,
                 historico=historico,
                 tipo=tipo_cd,
-                valor=abs(mov.valor),
+                valor=abs(mov.valor) - mov.desconto_baixa,
                 contato=contato,
                 cnpj=cnpj,
                 conta=conta_lancamento,
@@ -1363,6 +1970,7 @@ def gerar_lancamentos(movimentos: List[Movimento], conta_lancamento: str) -> Res
                 tipo_operacao=tipo,
                 chave=mov.chave,
                 fluxo=fluxo,
+                desconto_baixa=mov.desconto_baixa,
             )
         )
         mov.situacao = SIT_LANCAMENTO_CRIADO
@@ -1423,6 +2031,11 @@ def analisar(
     exportados: Optional[Dict[str, str]] = None,
     progresso: Optional[Callable[[str, int, int], None]] = None,
     avisos: Optional[List[str]] = None,
+    cupons_vendedor: Optional[Dict[str, Decimal]] = None,
+    contas_da_venda: Optional[ContasDaVenda] = None,
+    pedido_da_venda: Optional[PedidoDaVenda] = None,
+    acrescimo_do_grupo: Optional[Callable[[GrupoRecebimento], Optional[Decimal]]] = None,
+    bloqueadas: Iterable[str] = (),
 ) -> Analise:
     avisos = list(avisos or [])
     if listar_contas_cliente is None:
@@ -1431,22 +2044,37 @@ def analisar(
     if progresso:
         progresso("Cruzando vendas do Mercado Livre com as liberações do Mercado Pago", 0, 0)
     movimentos = expandir_liberacoes(liberacoes)
+    if cupons_vendedor:
+        reclassificar_cupons(movimentos, cupons_vendedor)
     comparativo = cruzar_vendas(movimentos, pedidos_ml, pedidos_tiny)
 
     grupos = obter_grupos(movimentos, baixas_feitas, exportados=exportados)
-    localizar_contas(grupos, listar_contas_cliente, progresso)
+    localizar_contas(
+        grupos, listar_contas_cliente, progresso,
+        contas_da_venda=contas_da_venda if listar_contas_cliente else None,
+        pedido_da_venda=pedido_da_venda if listar_contas_cliente else None,
+    )
+    if acrescimo_do_grupo:
+        # Só os divergentes com parcelamento consultam o pagamento (None = consulta falhou: tenta de novo depois).
+        bloqueadas = set(bloqueadas)
+        for g in grupos:
+            if precisa_acrescimo(g):
+                valor = acrescimo_do_grupo(g)
+                if valor is not None:
+                    aplicar_acrescimo(g, valor, bloqueadas)
     refletir_grupos_nas_linhas(movimentos, grupos)
 
     if progresso:
         progresso("Gerando lançamentos de caixa", 0, 0)
     lancamentos = gerar_lancamentos(movimentos, empresa.conta_lancamento)
+    adicionar_entradas_acrescimo(lancamentos.lancamentos, movimentos, grupos)
 
     return Analise(
         id=analise_id,
         empresa_id=empresa.id,
         empresa_nome=empresa.nome,
         conta_lancamento=empresa.conta_lancamento,
-        criada_em=datetime.now().astimezone().isoformat(timespec="seconds"),
+        criada_em=agora_sp().isoformat(timespec="seconds"),
         periodo_de=periodo[0].isoformat(),
         periodo_ate=periodo[1].isoformat(),
         origem=origem,
@@ -1539,10 +2167,12 @@ def grupo_json(g: GrupoRecebimento) -> Dict[str, Any]:
         "id_operacao": g.id_operacao,
         "mlb": g.mlb,
         "data": g.data,
+        "data_venda": g.data_venda,
         "nome_cliente": g.nome_cliente,
         "valor_total": _num(g.valor_total),
         "valor_produtos": _num(g.valor_produtos),
         "valor_frete": _num(g.valor_frete),
+        "frete_no_caixa": _num(g.frete_no_caixa),
         "quantidade_movimentos": len(g.indices),
         "quantidade_parcelas": len(g.contas_vinculadas) if g.contas_vinculadas else 1,
         "contas_vinculadas": g.contas_vinculadas or [],
@@ -1556,6 +2186,9 @@ def grupo_json(g: GrupoRecebimento) -> Dict[str, Any]:
         "conta_saldo": _num(g.conta_saldo),
         "conta_valor_pago": _num(g.conta_valor_pago),
         "baixado_em": g.baixado_em,
+        "pedido_tiny_numero": g.pedido_tiny_numero,
+        "pedido_tiny_valor": _num(g.pedido_tiny_valor),
+        "pode_baixar": g.pode_baixar,
     }
 
 
@@ -1578,7 +2211,8 @@ def resumo(analise: Analise) -> Dict[str, Any]:
     por_situacao: Dict[str, int] = {}
     for g in grupos:
         por_situacao[g.situacao] = por_situacao.get(g.situacao, 0) + 1
-    aptos = [g for g in grupos if g.apto_baixa]
+    # Venda cancelada também é baixável (cria a conta antes), mas tem atalho próprio na tela.
+    aptos = [g for g in grupos if g.pode_baixar and g.situacao != SIT_VENDA_CANCELADA]
     lanc = analise.lancamentos.lancamentos
     casamentos: Dict[str, int] = {}
     for c in analise.comparativo:

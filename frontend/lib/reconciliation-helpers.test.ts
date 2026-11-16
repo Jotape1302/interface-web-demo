@@ -100,7 +100,7 @@ const match: ReconciliationMatch = {
   conta_pagar_id: 987654,
   numero_documento: "NF 4521/1",
   fornecedor_nome: "Portobello S.A.",
-  fornecedor_cnpj: "83475913000191",
+  fornecedor_cnpj: "43577380000134",
   data_vencimento: "2026-09-20",
   valor_tiny: 1250,
   inter_transacao_id: "TX-001",

@@ -11,6 +11,7 @@ from telegram import Update
 
 from app.bot import build_application
 from app.config import BotSettings, DetectorSettings, TinySettings
+from app.tiny_estoque import exigir_processo_unico
 
 
 def setup_logging(settings: BotSettings) -> None:
@@ -37,6 +38,7 @@ def iniciar_api(logger: logging.Logger) -> None:
     """API interna numa thread: o bot (run_polling) ocupa a thread principal."""
     import uvicorn
 
+    exigir_processo_unico()  # a trava de ajuste do Tiny é por processo: nada de mais de um worker
     porta = TinySettings().API_PORT
     servidor = uvicorn.Server(uvicorn.Config("app.api:app", host="0.0.0.0", port=porta, log_level="warning"))
     # O uvicorn só instala tratadores de sinal na thread principal; aqui quem para o processo é o bot.

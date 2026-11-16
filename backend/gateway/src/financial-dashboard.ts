@@ -1,4 +1,5 @@
-import { actorHeaders, automationFetch, financeiroCandidateUrls, upstreamError, type ActorContext } from "./automation-http.js";
+import { nextDailyRunSaoPaulo, saoPauloParts } from "./overview.js";
+import { actorHeaders, automationFetch, callAutomation, createAutomationUrlResolver, financeiroCandidateUrls, upstreamError, type ActorContext } from "./automation-http.js";
 import type { FinancialDashboardResponse, FinancialDashboardStatus } from "./contracts.js";
 
 /**
@@ -28,13 +29,15 @@ const DEMO_MONTH_NAMES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago"
 function buildDemoFluxoCaixa(now: Date): FinancialDashboardResponse["fluxo_caixa_mensal"] {
   const months = [];
   for (let i = 12; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    // Mês-calendário no fuso de São Paulo (GW-11), sem depender do TZ do processo.
+    const sp = saoPauloParts(now);
+    const d = new Date(Date.UTC(sp.year, sp.month - 1 - i, 1));
     const seasonal = 1 + 0.12 * Math.sin(i / 2);
     const receita = Math.round(185000 * seasonal + i * 900);
     const despesa = Math.round(142000 * seasonal + (12 - i) * 600);
     months.push({
-      mes: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-      label: `${DEMO_MONTH_NAMES[d.getMonth()]}/${String(d.getFullYear()).slice(2)}`,
+      mes: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`,
+      label: `${DEMO_MONTH_NAMES[d.getUTCMonth()]}/${String(d.getUTCFullYear()).slice(2)}`,
       receita,
       despesa,
       saldo: receita - despesa,
@@ -56,10 +59,10 @@ function buildDemoDespesasPorCategoria(fraction: number): FinancialDashboardResp
     ["484437787", "Combustível", "4.Despesas Operacionais", 2100],
     ["484437483", "Material de Escritório", "4.Despesas Operacionais", 950],
   ];
+  const total = raw.reduce((acc, [, , , v]) => acc + Math.round(v * fraction), 0);
   return raw.map(([categoria_id, categoria_nome, grupo, base], idx) => {
     const valor = Math.round(base * fraction);
     const valor_anterior = Math.round(valor * (0.85 + (idx % 3) * 0.08));
-    const total = raw.reduce((acc, [, , , v]) => acc + Math.round(v * fraction), 0);
     return {
       categoria_id,
       categoria_nome,
@@ -101,9 +104,7 @@ export function createFinancialDashboardService(
     const now = new Date();
     return {
       async readStatus(): Promise<FinancialDashboardStatus> {
-        const next = new Date(now);
-        next.setDate(next.getDate() + (now.getHours() >= 4 ? 1 : 0));
-        next.setHours(4, 0, 0, 0);
+        const next = nextDailyRunSaoPaulo(now, 4);
         return {
           last_sync_started_at: new Date(now.getTime() - 3 * 3600000).toISOString(),
           last_sync_finished_at: new Date(now.getTime() - 3 * 3600000 + 210000).toISOString(),
@@ -235,36 +236,14 @@ export function createFinancialDashboardService(
   }
 
   // MODO LIVE: comunica com a API Python do automacao-nfe (mesmo motor da NF-e & DANFE).
-  const candidateUrls = financeiroCandidateUrls(pythonApiUrl);
-
-  let activePythonUrl = candidateUrls[0] || "http://127.0.0.1:8000";
-
-  async function resolvePythonUrl(): Promise<string> {
-    try {
-      const res = await automationFetch(`${activePythonUrl}/api/v1/health`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return activePythonUrl;
-    } catch {
-      // URL ativa falhou, tenta outros candidatos
-    }
-    for (const url of candidateUrls) {
-      if (url === activePythonUrl) continue;
-      try {
-        const res = await automationFetch(`${url}/api/v1/health`, { signal: AbortSignal.timeout(2000) });
-        if (res.ok) {
-          activePythonUrl = url;
-          return activePythonUrl;
-        }
-      } catch {
-        // tenta o próximo candidato
-      }
-    }
-    return activePythonUrl;
-  }
+  const resolvePythonUrl = createAutomationUrlResolver(financeiroCandidateUrls(pythonApiUrl));
+  const fetchFin = (url: string, init?: RequestInit): Promise<Response> =>
+    callAutomation("financeiro", () => automationFetch(url, init), { invalidate: resolvePythonUrl.invalidate });
 
   return {
     async readStatus(): Promise<FinancialDashboardStatus> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/financial-dashboard/status`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/financial-dashboard/status`, {
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -272,7 +251,7 @@ export function createFinancialDashboardService(
     },
     async sync(actor?: ActorContext, opts?: { force?: boolean }): Promise<FinancialDashboardStatus> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/financial-dashboard/sync${opts?.force ? "?force=true" : ""}`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/financial-dashboard/sync${opts?.force ? "?force=true" : ""}`, {
         method: "POST",
         headers: actorHeaders(actor, { asUser: true }),
         signal: AbortSignal.timeout(15000),
@@ -284,7 +263,7 @@ export function createFinancialDashboardService(
       const baseUrl = await resolvePythonUrl();
       const query = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
       if (company) query.set("company", company);
-      const res = await automationFetch(`${baseUrl}/api/v1/financial-dashboard?${query.toString()}`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/financial-dashboard?${query.toString()}`, {
         signal: AbortSignal.timeout(10000),
       });
       if (res.status === 404) {

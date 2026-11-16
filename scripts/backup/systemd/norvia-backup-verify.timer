@@ -1,0 +1,11 @@
+[Unit]
+Description=Norvia - teste de restauração mensal (dia 1, 04:30)
+
+[Timer]
+# Depois do backup diário das 02:30.
+OnCalendar=*-*-01 04:30:00
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

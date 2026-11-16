@@ -1,5 +1,8 @@
 import type { Pool } from "mariadb";
 import type { Config } from "./config.js";
+import type { RoiPeriodo } from "./contracts.js";
+import { noPeriodo, periodoSql } from "./periodo.js";
+import type { DbRow } from "./database.js";
 
 /**
  * SKU informado pelo painel para contagens que o bot registrou sem produto (origem "sem_produto").
@@ -72,6 +75,8 @@ export interface StockSkuService {
   excluir(registroId: string, usuario: { id?: number | null; nome?: string | null } | null): Promise<void>;
   /** Todos os SKUs informados, por id do registro (a tabela é pequena: uma linha por contagem sem SKU). */
   listar(): Promise<Map<string, SkuManual>>;
+  /** Quantas contagens foram lançadas no Tiny (status `lancado`); usado pelo ROI. */
+  contarLancadas(periodo?: RoiPeriodo): Promise<number>;
   informar(registroId: string, sku: string, usuario: { id?: number | null; nome?: string | null } | null): Promise<SkuManual>;
 }
 
@@ -82,14 +87,15 @@ export function normalizarSku(valor: unknown): string | null {
   return sku;
 }
 
-export function createStockSkuService(config: Config, pool: Pool | undefined): StockSkuService {
+export function createStockSkuService(config: Pick<Config, "timeoutMs">, pool: Pool | undefined): StockSkuService {
   // Modo demo e testes (sem banco): guarda em memória.
   const memoria = new Map<string, SkuManual>();
   const excluidasMemoria = new Set<string>();
   const conferenciasMemoria = new Map<string, Conferencia>();
   const enviosMemoria = new Map<string, EnvioTiny>();
+  const lancadasMemoria = new Map<string, string>(); // registro_id -> 1º lançamento (ROI)
 
-  async function query<T = any>(sql: string, values: unknown[] = []): Promise<T[]> {
+  async function query<T = DbRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     const conn = await pool!.getConnection();
     try {
       return (await conn.query({ sql, timeout: config.timeoutMs }, values)) as T[];
@@ -98,10 +104,10 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
     }
   }
 
-  const mapRow = (r: any): SkuManual => ({
+  const mapRow = (r: DbRow): SkuManual => ({
     registro_id: String(r.registro_id),
     sku: String(r.sku),
-    usuario_nome: r.usuario_nome ?? null,
+    usuario_nome: (r.usuario_nome as string | null | undefined) ?? null,
     informado_em: r.informado_em instanceof Date ? r.informado_em.toISOString() : String(r.informado_em),
   });
 
@@ -160,9 +166,23 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         `);
         await query(`ALTER TABLE contagem_estoque_tiny ADD COLUMN IF NOT EXISTS produto VARCHAR(255) NULL AFTER sku`);
+        // Data do 1º lançamento com sucesso (2026-10-27): um reenvio sobrescreve status e
+        // enviado_em, mas não apaga a entrada que já foi ao Tiny — é o que o ROI conta.
+        await query(`ALTER TABLE contagem_estoque_tiny ADD COLUMN IF NOT EXISTS lancado_em DATETIME NULL`);
+        await query(`UPDATE contagem_estoque_tiny SET lancado_em = enviado_em WHERE status = 'lancado' AND lancado_em IS NULL`);
       } catch (err) {
         console.error("[stock-sku] falha ao criar as tabelas da contagem de estoque:", err);
       }
+    },
+
+    async contarLancadas(periodo) {
+      if (!pool) return [...lancadasMemoria.values()].filter((em) => noPeriodo(em, periodo)).length;
+      const f = periodoSql("lancado_em", periodo);
+      const [row] = await query<{ total: number | bigint }>(
+        `SELECT COUNT(*) AS total FROM contagem_estoque_tiny WHERE ${["lancado_em IS NOT NULL", ...f.where].join(" AND ")}`,
+        f.values,
+      );
+      return Number(row?.total ?? 0);
     },
 
     async listar() {
@@ -191,7 +211,7 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
               Number(r.unidades_por_fardo ?? UNIDADES_POR_FARDO_PADRAO),
               Number(r.unidades_soltas ?? 0),
             ),
-            usuario_nome: r.usuario_nome ?? null,
+            usuario_nome: (r.usuario_nome as string | null | undefined) ?? null,
             conferida_em: r.conferida_em instanceof Date ? r.conferida_em.toISOString() : String(r.conferida_em),
           } satisfies Conferencia,
         ]),
@@ -243,14 +263,14 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
             registro_id: String(r.registro_id),
             status: r.status === "lancado" || r.status === "sem_entrada" ? r.status : "erro",
             sku: String(r.sku),
-            produto: r.produto ?? null,
+            produto: (r.produto as string | null | undefined) ?? null,
             unidades: Number(r.unidades),
             saldo_anterior: num(r.saldo_anterior),
             entrada: num(r.entrada),
             id_lancamento: num(r.id_lancamento),
-            deposito: r.deposito ?? null,
-            mensagem: r.mensagem ?? null,
-            usuario_nome: r.usuario_nome ?? null,
+            deposito: (r.deposito as string | null | undefined) ?? null,
+            mensagem: (r.mensagem as string | null | undefined) ?? null,
+            usuario_nome: (r.usuario_nome as string | null | undefined) ?? null,
             enviado_em: r.enviado_em instanceof Date ? r.enviado_em.toISOString() : String(r.enviado_em),
           } satisfies EnvioTiny,
         ]),
@@ -260,14 +280,17 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
     async salvarEnvioTiny(envio, usuarioId) {
       if (!pool) {
         enviosMemoria.set(envio.registro_id, envio);
+        if (envio.status === "lancado" && !lancadasMemoria.has(envio.registro_id)) lancadasMemoria.set(envio.registro_id, envio.enviado_em);
         return;
       }
       await query(
         `INSERT INTO contagem_estoque_tiny
            (registro_id, status, sku, produto, unidades, saldo_anterior, entrada, id_lancamento, deposito, mensagem,
-            usuario_id, usuario_nome, enviado_em)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
-         ON DUPLICATE KEY UPDATE status = VALUES(status), sku = VALUES(sku), produto = VALUES(produto),
+            usuario_id, usuario_nome, enviado_em, lancado_em)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), IF(? = 'lancado', UTC_TIMESTAMP(), NULL))
+         ON DUPLICATE KEY UPDATE
+           lancado_em = COALESCE(lancado_em, IF(VALUES(status) = 'lancado', UTC_TIMESTAMP(), NULL)),
+           status = VALUES(status), sku = VALUES(sku), produto = VALUES(produto),
            unidades = VALUES(unidades),
            saldo_anterior = VALUES(saldo_anterior), entrada = VALUES(entrada), id_lancamento = VALUES(id_lancamento),
            deposito = VALUES(deposito), mensagem = VALUES(mensagem), usuario_id = VALUES(usuario_id),
@@ -285,6 +308,7 @@ export function createStockSkuService(config: Config, pool: Pool | undefined): S
           envio.mensagem?.slice(0, 500) ?? null,
           usuarioId,
           envio.usuario_nome,
+          envio.status,
         ],
       );
     },

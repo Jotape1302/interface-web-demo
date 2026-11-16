@@ -68,9 +68,37 @@ const PAYMENT_METHOD_BY_MARCADOR: Record<string, string> = {
  * senão o padrão da empresa. Antes só o padrão da empresa valia, e "NFC-e Norvia - Cartão
  * Clara - ..." aparecia (e era lançada) como "Caixa Visa".
  */
-export function suggestPaymentMethodForNote(marcadorCaixa: string | null | undefined, destinatarioCnpj: string | null): string {
+export function suggestPaymentMethodForNote(
+  marcadorCaixa: string | null | undefined,
+  destinatarioCnpj: string | null,
+  sugeridaPelaAutomacao?: string | null,
+): string {
   const id = marcadorCaixa ? PAYMENT_METHOD_BY_MARCADOR[marcadorCaixa.trim().toLowerCase()] : undefined;
-  return id ?? suggestPaymentMethod(destinatarioCnpj);
+  if (id) return id;
+  // XML da nota (tPag/tBand) ou último pagamento ao fornecedor, resolvido pela automação.
+  if (sugeridaPelaAutomacao && PAYMENT_METHOD_OPTIONS.some((o) => o.id === sugeridaPelaAutomacao)) return sugeridaPelaAutomacao;
+  return suggestPaymentMethod(destinatarioCnpj);
+}
+
+const CONFIANCA_LABEL: Record<string, string> = { alta: "alta", media: "média", baixa: "baixa" };
+
+/** Ícone e texto (title nativo) da origem da categoria pré-selecionada de um item. */
+export function origemSugestaoCategoria(item: Pick<
+  DanfeReviewItem,
+  "categoria_sugerida_origem" | "categoria_sugerida_nivel" | "categoria_sugerida_confianca" | "categoria_sugerida_motivo"
+>): { icone: "historico" | "qwen" | "regra"; titulo: string } {
+  if (item.categoria_sugerida_origem === "qwen") {
+    const confianca = CONFIANCA_LABEL[item.categoria_sugerida_confianca ?? ""] ?? "não informada";
+    const motivo = item.categoria_sugerida_motivo?.trim();
+    return { icone: "qwen", titulo: `Sugerido pelo Qwen (confiança ${confianca})${motivo ? `: ${motivo}` : ""}` };
+  }
+  if (item.categoria_sugerida_origem === "historico") {
+    const base = "Sugerido pelo histórico: ";
+    if (item.categoria_sugerida_nivel === "codigo") return { icone: "historico", titulo: `${base}mesmo produto já lançado com este fornecedor` };
+    if (item.categoria_sugerida_nivel === "ncm") return { icone: "historico", titulo: `${base}mesmo NCM já lançado com este fornecedor` };
+    return { icone: "historico", titulo: `${base}categoria mais usada nas notas anteriores deste fornecedor` };
+  }
+  return { icone: "regra", titulo: "Sugerido automaticamente pela descrição/NCM" };
 }
 
 export function suggestPaymentMethod(destinatarioCnpj: string | null): string {
@@ -82,8 +110,8 @@ export function suggestPaymentMethod(destinatarioCnpj: string | null): string {
 
 // "Meio de Pagamento da NFe" — campo nativo do Tiny (Contas a Pagar > Pagamento), segue o
 // código padrão da NF-e (tag <tPag>). Espelha PAYMENT_METHOD_NFE_LABELS em tiny_client.py.
-// Pré-selecionado a partir do que o fornecedor declarou na própria nota quando disponível
-// (entry.nfe_data.meio_pagamento_nfe); o funcionário sempre pode ajustar antes de confirmar.
+// Pré-selecionado pela forma de pagamento (suggestMeioPagamentoNfe) e acompanha a troca de forma
+// até o funcionário mudar o meio na mão.
 export const PAYMENT_METHOD_NFE_OPTIONS: Array<{ code: string; label: string }> = [
   { code: "01", label: "Dinheiro" },
   { code: "02", label: "Cheque" },
@@ -103,6 +131,40 @@ export const PAYMENT_METHOD_NFE_OPTIONS: Array<{ code: string; label: string }> 
   { code: "99", label: "Outros" },
 ];
 
+// Meio de pagamento que cada forma implica: o meio acompanha a forma escolhida, em vez de copiar o
+// tPag do XML (que muitas vezes vem "99 Outros" numa compra paga com o cartão da empresa).
+const MEIO_NFE_POR_FORMA: Record<string, string> = {
+  pix: "17",
+  boleto: "15",
+  clara: "03",
+  caixa_visa: "03",
+  caixa_visa_norvia: "03",
+  caixa_elo: "03",
+};
+
+const meioValido = (code: string | null | undefined): string =>
+  code && PAYMENT_METHOD_NFE_OPTIONS.some((o) => o.code === code) ? code : "";
+
+/**
+ * "Meio de pagamento da NFe" pré-selecionado a partir da forma de pagamento. Cartão: débito (04)
+ * quando o XML diz, ou, sem o XML dizer, quando foi o último lançado com o fornecedor. Sem forma
+ * conhecida (ex.: "Sem marcador"): o XML, se for específico; senão o último do fornecedor.
+ */
+export function suggestMeioPagamentoNfe(
+  formaPagamento: string,
+  meioDoXml: string | null | undefined,
+  meioDoHistorico?: string | null,
+): string {
+  const doXml = meioValido(meioDoXml);
+  const doHistorico = meioValido(meioDoHistorico);
+  const xmlEspecifico = doXml && doXml !== "99" ? doXml : "";
+  const daForma = MEIO_NFE_POR_FORMA[formaPagamento];
+  if (!daForma) return xmlEspecifico || doHistorico || doXml;
+  if (daForma !== "03") return daForma;
+  if (xmlEspecifico === "03" || xmlEspecifico === "04") return xmlEspecifico;
+  return doHistorico === "04" ? "04" : "03";
+}
+
 export interface GroupPreview {
   categoriaId: string;
   categoriaNome: string;
@@ -112,6 +174,12 @@ export interface GroupPreview {
 
 /** Máximo de parcelas no lançamento (mesmo limite do backend). */
 export const MAX_PARCELAS = 12;
+
+/** Parcelas pré-selecionadas na revisão: as duplicatas do XML da NF-e (cobr/dup), senão 1. */
+export function parcelasDaNota(parcelasNfe: number | null | undefined): number {
+  const n = Math.floor(Number(parcelasNfe));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, MAX_PARCELAS) : 1;
+}
 
 /**
  * Valor em N parcelas iguais, em centavos; a diferença do arredondamento vai na última.

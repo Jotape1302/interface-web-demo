@@ -40,3 +40,10 @@ export class UpstreamError extends PublicError {
     this.name = "UpstreamError";
   }
 }
+
+/** Aviso estruturado (JSON em uma linha) para falhas tratadas que não podem ficar silenciosas (GW-14). */
+export function logWarn(event: string, err: unknown): void {
+  console.warn(
+    JSON.stringify({ event, message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() }),
+  );
+}

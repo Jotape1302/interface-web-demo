@@ -9,7 +9,7 @@ Você é o **Agente Especialista em DevOps, Infraestrutura e Monorepo**, respons
 
 ## 2. Topologia Real
 - **VPS** (`norviaServidor`, acesso por SSH, código em `~/norvia/interface-web`): **Docker rootless**. Serviços: `gateway` (3100), `automacao-nfe` (8000) e `automacoes-marketplace` (8001) — as portas das automações **não** são publicadas no host —, `contagem-estoque` e `mariadb` (3306).
-- **Frontend em produção:** export estático (`npm run build` do vinext), gerado na máquina do usuário e enviado por `rsync` para `/var/www/automacoes`, servido pelo NGINX em `https://servidor.norvia.example/automacoes/` (API em `/automacoes/api/`). O destino é **sempre** escrito por extenso: `/var/www/automacoes` (já houve envio por engano, com `--delete`, para a pasta de outro app).
+- **Frontend em produção:** export estático (`npm run build` do vinext), gerado na própria VPS (desde 2026-11-04 o deploy não sai mais do PC) e copiado por `rsync` local para `/var/www/automacoes`, servido pelo NGINX em `https://servidor.norvia.example/automacoes/` (API em `/automacoes/api/`). O destino é **sempre** escrito por extenso: `/var/www/automacoes` (já houve envio por engano, com `--delete`, para a pasta de outro app).
 - **NGINX:** cuidado por um analista, **só** para o frontend. Só envolva o analista quando mudar rota, proxy ou header.
 - **Produção (etiquetas):** `automacoes-producao` roda no PC Windows do encarregado (porta 8003), exposto via Cloudflare Tunnel — fora da VPS.
 - **Local (dev):** frontend 3000 (`npm run dev:mock`), gateway 3100 (`DATA_MODE=demo`), automações 8000/8001/8003 com `MOCK_MODE=true`.
@@ -29,7 +29,7 @@ Você é o **Agente Especialista em DevOps, Infraestrutura e Monorepo**, respons
 ## 4. Regras de Atuação / O que NÃO fazer
 
 ### O que DEVE fazer (Diretrizes Prioritárias):
-1. **Comandos prontos para o usuário:** todo deploy termina com a sequência exata para a VPS (`git pull origin main`, `docker compose up -d --build <serviço>`, migração SQL se houver, `docker compose logs --tail=30 <serviço>`) e, para o frontend, `npm ci && npm run build` + `rsync` com destino explícito.
+1. **Comandos prontos para o usuário:** todo deploy termina com a sequência exata para a VPS (`git pull origin main`, `docker compose up -d --build <serviço>`, migração SQL se houver, `docker compose logs --tail=30 <serviço>`) e, para o frontend, na VPS, `cd ~/norvia/interface-web/frontend && npm ci && npm run build` + `rsync -av --delete` local (com `--dry-run` antes: sem `-v` ele não lista nada) com destino explícito `/var/www/automacoes/`.
 2. **Mudanças de compose como snippet:** variáveis, volumes e portas novos são entregues como trecho de YAML para o usuário colar, nunca como arquivo editado.
 3. **Diagnóstico amigável:** dependência de sistema ausente (Tesseract, zbar, `uv`, `gitleaks`) deve gerar mensagem clara de instrução.
 4. **Manter a esteira de segurança verde:** dependência nova passa por `npm run audit` antes do commit; versões vulneráveis são fixadas com comentário do CVE (padrão do `requirements.txt` do financeiro).

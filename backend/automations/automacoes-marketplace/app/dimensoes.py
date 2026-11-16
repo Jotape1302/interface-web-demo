@@ -1,11 +1,9 @@
 """
-Medidas de produto: de onde vêm (títulos, descrições e fichas técnicas do ML e do Tiny), como
-se comparam (confiabilidade da padronização), a embalagem padrão e o tipo de envio indicado.
+Medidas de produto: a ficha técnica e a embalagem dos anúncios do ML, as medidas do cadastro do
+Tiny (fonte das medidas e do peso bruto), a embalagem e o tipo de envio indicado.
 
-A padronização é da medida do PRODUTO real (altura, largura, comprimento e peso). A embalagem é
-padrão da empresa (seção 5 x 7 cm, comprimento 100/200/300 cm conforme o produto) e só serve ao
-tipo de envio (medidas de embalagem no ML). Convenção: comprimento = maior lado, largura = o do
-meio, altura = o menor (título e ficha não dizem qual é qual; o conjunto de lados é o que importa).
+A embalagem que vai ao ML é a do cadastro do Tiny (altura, largura, comprimento e peso bruto),
+a mesma que a integração do Tiny manda; o maior lado decide o tipo de envio (até 2 m: ME2; maior: ME1).
 """
 import math
 import re
@@ -98,121 +96,6 @@ def _sem_zeros(v: Optional[float]) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
-# Título do anúncio
-# ---------------------------------------------------------------------------------------------
-
-_NUMERO = r"(\d+(?:[.,]\d+)?)"
-# A unidade pode vir colada no "x" ("16mmx16mmx3m"): basta não ser seguida de outra letra.
-_UNIDADE = r"(mm|cm|m)(?![a-wyzA-WYZ])"
-_X = r"\s*[xX×]\s*"
-# "60x40x15cm", "60 x 40 x 15 cm", "1,20m x 0,80m x 5cm", "60x40x15" (sem unidade = cm)
-_TRES_MEDIDAS = re.compile(
-    rf"(?<![\d.,]){_NUMERO}\s*(?:{_UNIDADE})?{_X}{_NUMERO}\s*(?:{_UNIDADE})?{_X}{_NUMERO}\s*(?:{_UNIDADE})?",
-    re.IGNORECASE,
-)
-# "60x40cm", "2,40 x 0,10 m" — só com unidade, para não confundir com "Kit 2x1".
-_DUAS_MEDIDAS = re.compile(rf"(?<![\d.,]){_NUMERO}\s*(?:{_UNIDADE})?{_X}{_NUMERO}\s*{_UNIDADE}", re.IGNORECASE)
-# Comprimento avulso em metros depois das duas medidas: "Cantoneira 16x16mm 3m", "... 2 Metros".
-_METROS = re.compile(r"(?<![\d.,xX×])(\d+(?:[.,]\d+)?)\s*(?:m|metros?)(?![a-zA-Z])", re.IGNORECASE)
-
-_PESO = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(kg|g)(?![a-zA-Z])", re.IGNORECASE)
-
-_PARA_CM = {"mm": 0.1, "cm": 1.0, "m": 100.0}
-
-
-def _em_cm(valor: str, unidade: Optional[str], unidade_padrao: str) -> float:
-    fator = _PARA_CM[(unidade or unidade_padrao).lower()]
-    return round(float(valor.replace(",", ".")) * fator, 2)
-
-
-def dimensoes_do_titulo(titulo: str) -> Dimensoes:
-    """
-    Medidas escritas no título. A ordem do título não diz qual é altura, largura ou
-    comprimento; como o tipo de envio e a comparação com o ML só dependem do conjunto de
-    lados, gravamos na ordem em que aparecem. Com só duas medidas, a altura fica vazia.
-    """
-    texto = titulo or ""
-    dims = Dimensoes()
-
-    m = _TRES_MEDIDAS.search(texto)
-    if m:
-        v1, u1, v2, u2, v3, u3 = m.groups()
-        # A unidade escrita no fim vale para os números sem unidade antes dela ("60x40x15cm").
-        padrao = (u3 or u2 or u1 or "cm").lower()
-        dims.altura = _em_cm(v1, u1, padrao)
-        dims.largura = _em_cm(v2, u2, padrao)
-        dims.comprimento = _em_cm(v3, u3, padrao)
-    else:
-        m2 = _DUAS_MEDIDAS.search(texto)
-        if m2:
-            v1, u1, v2, u2 = m2.groups()
-            padrao = (u2 or u1).lower()
-            metros = _METROS.search(texto, m2.end())
-            if metros:
-                dims.altura = _em_cm(v1, u1, padrao)
-                dims.largura = _em_cm(v2, u2, padrao)
-                dims.comprimento = _em_cm(metros.group(1), "m", "m")
-            else:
-                dims.largura = _em_cm(v1, u1, padrao)
-                dims.comprimento = _em_cm(v2, u2, padrao)
-    p = _PESO.search(texto)
-    if p:
-        dims.peso = _gramas(p.group(1), p.group(2))
-    return dims
-
-
-def _gramas(valor: str, unidade: Optional[str]) -> Optional[int]:
-    n = float(valor.replace(",", "."))
-    if not unidade:  # sem unidade: número pequeno é kg ("Peso: 1,2"), grande é g ("Peso: 850")
-        unidade = "kg" if n < 50 else "g"
-    g = n * (1000 if unidade.lower() == "kg" else 1)
-    return int(round(g)) if g > 0 else None
-
-
-_ROTULO = re.compile(
-    r"\b(altura|largura|comprimento|profundidade|espessura|di[aâ]metro|peso(?:\s+l[ií]quido|\s+bruto)?)"
-    r"(?:\s*\([^)]*\))?\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|m|kg|g)?(?![a-zA-Z])",
-    re.IGNORECASE,
-)
-
-
-def dimensoes_de_texto(texto: str) -> Dimensoes:
-    """
-    Medidas numa descrição (ML ou Tiny): primeiro as rotuladas ("Altura: 10 cm", "Comprimento
-    3m", "Espessura: 2mm", "Peso: 1,2 kg"); o que faltar, pelo padrão de título (60x40x15cm).
-    """
-    texto = re.sub(r"<[^>]+>", " ", texto or "")  # descrição do Tiny vem em HTML
-    lados: Dict[str, float] = {}
-    peso: Optional[int] = None
-    for rotulo, valor, unidade in _ROTULO.findall(texto):
-        r = _sem_acento(rotulo.lower())
-        if r.startswith("peso"):
-            if peso is None and (not unidade or unidade.lower() in ("kg", "g")):
-                peso = _gramas(valor, unidade)
-            continue
-        if unidade and unidade.lower() in ("kg", "g"):
-            continue
-        chave = {"altura": "altura", "largura": "largura", "comprimento": "comprimento"}.get(r, "extra_" + r)
-        if chave not in lados:
-            lados[chave] = _em_cm(valor, unidade, "cm")
-    principais = [lados.get("altura"), lados.get("largura"), lados.get("comprimento")]
-    extras = [v for k, v in lados.items() if k.startswith("extra_")]
-    for i, v in enumerate(principais):  # espessura/profundidade/diâmetro completam o que faltar
-        if v is None and extras:
-            principais[i] = extras.pop(0)
-    dims = Dimensoes(*principais, peso)
-    if not dims.completas():
-        do_padrao = dimensoes_do_titulo(texto)
-        if do_padrao.completas():
-            dims = Dimensoes(*do_padrao.lados, dims.peso or do_padrao.peso)
-    return dims
-
-
-def _sem_acento(t: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
-
-
-# ---------------------------------------------------------------------------------------------
 # Atributos do anúncio no ML
 # ---------------------------------------------------------------------------------------------
 
@@ -296,16 +179,34 @@ def ficha_ml(item: Dict[str, Any]) -> Dimensoes:
     )
 
 
-def ficha_tiny(produto: Dict[str, Any]) -> Dimensoes:
-    """Dimensões do cadastro do Tiny (cm; peso em kg → g). Peso líquido é o do produto."""
+def valores_ficha(item: Dict[str, Any], ids: Iterable[str]) -> Dict[str, Optional[float]]:
+    """Valor atual de cada atributo de medida da ficha (cm; os de peso em g), None se vazio."""
+    por_id = _atributos(item)
+    return {
+        attr_id: (_valor_atributo(por_id[attr_id], "g" if "WEIGHT" in attr_id else "cm") if attr_id in por_id else None)
+        for attr_id in ids
+    }
+
+
+def medidas_tiny(produto: Dict[str, Any]) -> Dimensoes:
+    """
+    Medidas do cadastro do Tiny (cm) com o PESO BRUTO (kg → g): é o que vai para os anúncios do
+    ML. Sem diâmetro no lugar da altura: só os três lados que o cadastro traz.
+    """
     d = produto.get("dimensoes") or {}
-    peso_kg = _num(d.get("pesoLiquido")) or _num(d.get("pesoBruto"))
+    peso_kg = _num(d.get("pesoBruto"))
     return Dimensoes(
-        altura=_num(d.get("altura")) or _num(d.get("diametro")),
+        altura=_num(d.get("altura")),
         largura=_num(d.get("largura")),
         comprimento=_num(d.get("comprimento")),
         peso=int(round(peso_kg * 1000)) if peso_kg else None,
     )
+
+
+def peso_liquido_tiny(produto: Dict[str, Any]) -> Optional[int]:
+    """Peso líquido do cadastro do Tiny em g (atributo NET_WEIGHT do ML), se houver."""
+    peso_kg = _num((produto.get("dimensoes") or {}).get("pesoLiquido"))
+    return int(round(peso_kg * 1000)) if peso_kg else None
 
 
 def dimensoes_de_texto_ml(texto: Optional[str]) -> Dimensoes:
@@ -334,21 +235,8 @@ def embalagem_no_ml(item: Dict[str, Any]) -> Dimensoes:
 
 
 # ---------------------------------------------------------------------------------------------
-# Padronização: comparação entre fontes e confiabilidade
+# Comparação e embalagem
 # ---------------------------------------------------------------------------------------------
-
-# Ordem de preferência quando dois grupos empatam: ficha técnica > título > descrição.
-PRIORIDADE_FONTE = {"tiny_ficha": 0, "ml_ficha": 1, "tiny_titulo": 2, "ml_titulo": 3, "tiny_descricao": 4, "ml_descricao": 5}
-ORDEM_CONFIABILIDADE = {"baixa": 0, "media": 1, "alta": 2}
-
-
-def normalizada(d: Dimensoes) -> Dimensoes:
-    """Convenção da padronização: altura = menor lado, comprimento = maior."""
-    if not d.completas():
-        return d
-    a, l, c = sorted(d.lados)  # type: ignore[type-var]
-    return Dimensoes(a, l, c, d.peso)
-
 
 def mesmo_tamanho(a: Dimensoes, b: Dimensoes) -> bool:
     """Lados sem ordem, com tolerância de 0,5 cm ou 3% (2,98 m ≈ 3 m)."""
@@ -364,106 +252,24 @@ def mesmo_peso(a: Optional[int], b: Optional[int]) -> bool:
     return bool(a and b and abs(a - b) <= max(10, 0.05 * max(a, b)))
 
 
-def _grupos(itens: List[Dict[str, Any]], igual) -> List[List[Dict[str, Any]]]:
-    grupos: List[List[Dict[str, Any]]] = []
-    for it in sorted(itens, key=lambda f: PRIORIDADE_FONTE.get(f["fonte"], 9)):
-        for g in grupos:
-            if igual(g[0], it):
-                g.append(it)
-                break
-        else:
-            grupos.append([it])
-    # Maior grupo primeiro; empate: o que tem a fonte mais confiável.
-    grupos.sort(key=lambda g: (-len(g), PRIORIDADE_FONTE.get(g[0]["fonte"], 9)))
-    return grupos
-
-
-def _nivel(n_maior: int, n_total: int) -> str:
-    if n_total == 0:
-        return "baixa"
-    if n_maior >= 2 and n_maior == n_total:
-        return "alta"
-    if n_maior >= 2 or n_total == 1:
-        return "media"
-    return "baixa"
-
-
-def comparar_fontes(fontes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    fontes: [{"fonte": "ml_titulo"|..., "local": "...", "dims": {altura, largura, comprimento, peso}}].
-    Agrupa as fontes com o mesmo tamanho (e, à parte, o mesmo peso) e sugere o valor do maior
-    grupo. Confiabilidade: alta = todas as fontes com medida concordam (2 ou mais); média = a
-    maioria concorda, ou só uma fonte tem medida; baixa = conflito ou nenhuma medida. A do peso
-    conta junto (peso é obrigatório no ML): a geral é a menor das duas.
-    """
-    com_tamanho = [f for f in fontes if Dimensoes.de_dict(f.get("dims")).completas()]
-    com_peso = [f for f in fontes if Dimensoes.de_dict(f.get("dims")).peso]
-
-    g_tam = _grupos(com_tamanho, lambda a, b: mesmo_tamanho(Dimensoes.de_dict(a["dims"]), Dimensoes.de_dict(b["dims"])))
-    g_peso = _grupos(com_peso, lambda a, b: mesmo_peso(Dimensoes.de_dict(a["dims"]).peso, Dimensoes.de_dict(b["dims"]).peso))
-
-    sugestao = Dimensoes()
-    if g_tam:
-        sugestao = normalizada(Dimensoes(*Dimensoes.de_dict(g_tam[0][0]["dims"]).lados))
-    else:  # sem nenhuma fonte completa: o que houver de mais completo, para adiantar a revisão
-        parciais = sorted(
-            (f for f in fontes if not Dimensoes.de_dict(f.get("dims")).vazias()),
-            key=lambda f: (Dimensoes.de_dict(f["dims"]).faltando().__len__(), PRIORIDADE_FONTE.get(f["fonte"], 9)),
-        )
-        if parciais:
-            sugestao = Dimensoes(*Dimensoes.de_dict(parciais[0]["dims"]).lados)
-    if g_peso:
-        sugestao.peso = Dimensoes.de_dict(g_peso[0][0]["dims"]).peso
-
-    conf_tam = _nivel(len(g_tam[0]) if g_tam else 0, len(com_tamanho))
-    conf_peso = _nivel(len(g_peso[0]) if g_peso else 0, len(com_peso))
-    geral = min(conf_tam, conf_peso, key=lambda c: ORDEM_CONFIABILIDADE[c])
-    return {
-        "sugestao": sugestao.para_dict(),
-        "confiabilidade": geral,
-        "confiabilidade_tamanho": conf_tam,
-        "confiabilidade_peso": conf_peso,
-        "fontes_concordantes": [f["fonte"] + "|" + f.get("local", "") for f in (g_tam[0] if g_tam else [])],
-    }
-
-
-# ---------------------------------------------------------------------------------------------
-# Embalagem padrão e tipo de envio
-# ---------------------------------------------------------------------------------------------
-
 def embalagem_para(produto: Dimensoes) -> Optional[Dimensoes]:
     """
-    Embalagem padrão do produto: seção fixa (5 x 7 cm) e o menor comprimento padrão (100, 200
-    ou 300 cm) que caiba o maior lado. None se o produto não cabe (seção ou comprimento): aí o
-    tipo de envio não é decidido sozinho. Peso da embalagem = peso do produto.
+    Embalagem do produto no ML: as medidas do cadastro do Tiny como estão, com o peso bruto (a
+    padrão 5 x 7 x 100/200/300 era trocada de volta pela integração do Tiny). None sem os três lados.
     """
     if not produto.completas():
         return None
-    menor, meio, maior = sorted(produto.lados)  # type: ignore[type-var]
-    secao_a, secao_b = settings.embalagem_secao()
-    if menor > secao_a or meio > secao_b:
-        return None
-    for comprimento in settings.embalagem_comprimentos():
-        if maior <= comprimento:
-            return Dimensoes(secao_a, secao_b, float(comprimento), produto.peso)
-    return None
+    return Dimensoes(produto.altura, produto.largura, produto.comprimento, produto.peso)
 
 
-def envio_indicado(embalagem: Optional[Dimensoes], tags: Iterable[str] = ()) -> Optional[str]:
+def envio_indicado(embalagem: Optional[Dimensoes]) -> Optional[str]:
     """
-    'me2' se o ML diz que o anúncio aceita ME2 (tag me2_available) ou se a embalagem cabe nos
-    limites de ME2 (ME2_MAX_*); senão 'me1'. None sem embalagem.
+    Pelo maior lado da embalagem: até ME2_MAX_EMBALAGEM_CM (1 m e 2 m) é 'me2'; maior (3 m) é
+    'me1'. None sem embalagem.
     """
     if embalagem is None or not embalagem.completas():
         return None
-    if "me2_available" in set(tags or ()):
-        return "me2"
-    lados = embalagem.lados
-    cabe = (
-        max(lados) <= settings.ME2_MAX_LADO_CM  # type: ignore[type-var]
-        and sum(lados) <= settings.ME2_MAX_SOMA_CM  # type: ignore[arg-type]
-    )
-    return "me2" if cabe else "me1"
+    return "me2" if max(embalagem.lados) <= settings.ME2_MAX_EMBALAGEM_CM else "me1"  # type: ignore[type-var]
 
 
 def e_carrinho(titulo: Optional[str]) -> bool:

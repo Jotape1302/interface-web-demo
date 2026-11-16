@@ -1,0 +1,5 @@
+# Hoje o orquestrador roda com o venv do RAGs (mesmas versões); lista para um venv próprio.
+chromadb>=1.5
+sentence-transformers>=6.1
+torch>=2.14
+pydantic>=2.13

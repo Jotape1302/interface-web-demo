@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -14,11 +14,8 @@ import {
   Copy,
   FileSpreadsheet,
   FileText,
-  Flag,
   Info,
-  Layers,
   Play,
-  PlayCircle,
   Radar,
   RefreshCw,
   ScanBarcode,
@@ -38,7 +35,6 @@ import { formatCnpjMask, formatDateBR, formatDateTimeBR } from "@/lib/formatters
 import type {
   DanfeBatchResponse,
   DanfeSefazStatus,
-  DanfeItemResult,
   DanfeStatusResponse,
   DashboardConfig,
   DateRangeFilter,
@@ -50,14 +46,14 @@ import { HistoryFilter } from "@/components/history-filter";
 import { BatchExecutionView } from "@/components/batch-execution-view";
 import { TinyLogo } from "@/components/ui/brand-logos";
 import { isDateWithinFilter } from "@/lib/date-range-utils";
-import { ReportIncidentModal } from "@/components/report-incident-modal";
+import { ReportarErro } from "@/components/reportar-erro";
 import { DanfeReviewPanel } from "./danfe-review-panel";
-import { isExecutionReported, subscribeToIncidents } from "@/lib/incidents-store";
 import { makeDemoDanfeHistory, makeDemoDanfeStatus, makeDemoSefazStatus } from "@/lib/demo";
 import { groupDanfeHistory } from "@/lib/batch-grouping";
 import { setIfChanged } from "@/lib/deep-equal";
 import { useDataPolling } from "@/lib/use-data-polling";
 import { readApiError } from '@/lib/api-errors';
+import { itemDeErroDoEnvio, juntarLotes } from '@/lib/danfe-lote-manual';
 import { useAuth } from "@/lib/auth-context";
 import { ConfirmImpactDialog } from "./confirm-impact-dialog";
 
@@ -184,27 +180,15 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
   // Estados para o upload manual secundário
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isUploadingManual, setIsUploadingManual] = useState(false);
+  const [progressoManual, setProgressoManual] = useState<{ atual: number; total: number } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Estado para reporte de falhas fiscais ao Administrador
-  const [reportingIncident, setReportingIncident] = useState<{
-    id: string;
-    node?: string;
-    details?: string;
-  } | null>(null);
-  const [, setIncidentsVersion] = useState(0);
   const [resolvingFile, setResolvingFile] = useState<string | null>(null);
 
   // Sinal para o painel de revisão/categorização recarregar a lista de notas pendentes
   // sempre que um novo lote termina de ser escaneado (sem re-renderizar o painel inteiro).
   const [reviewRefreshSignal, setReviewRefreshSignal] = useState(0);
-
-  useEffect(() => {
-    return subscribeToIncidents(() => {
-      setIncidentsVersion((v) => v + 1);
-    });
-  }, []);
 
   // Filtragem e agrupamento de histórico fiscal em lotes
   const filteredHistory = useMemo(() => {
@@ -440,25 +424,26 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
     setIsUploadingManual(true);
     setErrorMessage(null);
 
-    const formData = new FormData();
-    selectedFiles.forEach((file) => {
-      formData.append("files", file);
-    });
-
+    // Um arquivo por requisição: o lote inteiro numa chamada só passava dos 60 s do proxy (HTTP 504
+    // com 7 NFC-e, 12/11/2026). Arquivo que falha vira item de erro e os outros seguem.
+    const partes: DanfeBatchResponse[] = [];
     try {
       const headers = getStoredAuthHeaders();
       delete headers["Content-Type"];
-      const res = await fetch(`${apiBase}/api/danfe/process-batch`, {
-        method: "POST",
-        headers,
-        body: formData,
-      });
-
-      if (!res.ok) {
-        throw new Error(await readApiError(res, 'Erro na requisição'));
+      for (const [i, file] of selectedFiles.entries()) {
+        setProgressoManual({ atual: i + 1, total: selectedFiles.length });
+        const formData = new FormData();
+        formData.append("files", file);
+        try {
+          const res = await fetch(`${apiBase}/api/danfe/process-batch`, { method: "POST", headers, body: formData });
+          if (!res.ok) throw new Error(await readApiError(res, 'Erro na requisição'));
+          partes.push((await res.json()) as DanfeBatchResponse);
+        } catch (e) {
+          const mensagem = e instanceof Error ? e.message : "Falha ao enviar o arquivo.";
+          partes.push({ total: 1, success_count: 0, failed_count: 1, total_amount: 0, items: [itemDeErroDoEnvio(file.name, mensagem)] });
+        }
       }
-
-      const result: DanfeBatchResponse = (await res.json()) as DanfeBatchResponse;
+      const result = juntarLotes(partes);
       setBatchResult(result);
       setReviewRefreshSignal((v) => v + 1);
       clearFiles();
@@ -471,6 +456,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
       );
     } finally {
       setIsUploadingManual(false);
+      setProgressoManual(null);
     }
   };
 
@@ -501,7 +487,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
         {certAlerts.length > 0 && (
           <div
             role="alert"
-            className={`flex gap-2 rounded-lg border px-3 py-2.5 text-xs ${
+            className={`flex gap-2 rounded-none border px-3 py-2.5 text-xs ${
               certAlerts.some((c) => (c.dias_restantes ?? 0) <= 7 || c.erro)
                 ? "border-[var(--status-error-border)] bg-[var(--status-error-bg)] text-[var(--status-error-fg)]"
                 : "border-amber-500/40 bg-amber-500/5 text-amber-700 dark:text-amber-300"
@@ -528,7 +514,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
         )}
 
         {/* Linha de Integrações e Provedores */}
-        <div className="flex flex-wrap items-center gap-3 text-xs bg-card p-3 rounded-lg border border-border">
+        <div className="flex flex-wrap items-center gap-3 text-xs bg-card p-3 rounded-none border border-border">
           <div className="flex items-center gap-1.5 font-medium">
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
             <span>SEFAZ:</span>
@@ -582,7 +568,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
 
         {/* Alerta de erro */}
         {errorMessage && (
-          <div className="p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm flex items-start gap-3">
+          <div className="p-4 rounded-none bg-destructive/10 border border-destructive/20 text-destructive text-sm flex items-start gap-3">
             <AlertCircle className="shrink-0 mt-0.5" size={18} />
             <div>
               <p className="font-semibold">Falha na Execução</p>
@@ -592,7 +578,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
         )}
 
         {/* CONSOLE OPERACIONAL: VARREDURA DIRETA NA SEFAZ POR CNPJ */}
-        <Card className="p-4 md:p-5 bg-card border border-border shadow-2xs rounded-xl">
+        <Card className="p-4 md:p-5 bg-card border border-border shadow-2xs rounded-none">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
             <div className="space-y-1.5 max-w-2xl">
               <div className="flex flex-wrap items-center gap-2">
@@ -637,7 +623,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
               </div>
 
               {sefazCnpjErrors.length > 0 && (
-                <div className="mt-2 p-3 rounded-lg bg-[var(--status-pending-bg)] border border-[var(--status-pending-border)] text-[var(--status-pending-fg)] text-xs space-y-1">
+                <div className="mt-2 p-3 rounded-none bg-[var(--status-pending-bg)] border border-[var(--status-pending-border)] text-[var(--status-pending-fg)] text-xs space-y-1">
                   <p className="font-semibold flex items-center gap-1.5">
                     <AlertCircle size={14} className="shrink-0" />
                     {sefazCnpjErrors.length === 1
@@ -659,7 +645,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
               )}
 
               {sefazCnpjErrors.length === 0 && sefazStatus?.last_scan_finished_at && (
-                <div className="mt-2 p-2.5 rounded-lg bg-[var(--status-success-bg)] border border-[var(--status-success-border)] text-[var(--status-success-fg)] text-xs flex items-center gap-2">
+                <div className="mt-2 p-2.5 rounded-none bg-[var(--status-success-bg)] border border-[var(--status-success-border)] text-[var(--status-success-fg)] text-xs flex items-center gap-2">
                   <CheckCircle2 size={15} className="shrink-0" />
                   <span>
                     Todas as filiais estão sincronizadas com a SEFAZ. Não há novos documentos emitidos pendentes de busca no momento.
@@ -782,7 +768,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
 
         {/* SEÇÃO SECUNDÁRIA: UPLOAD MANUAL DE CONTINGÊNCIA (COLAPSÁVEL) — lança no Tiny */}
         {canLaunch && (
-        <div className="border border-border/50 rounded-lg overflow-hidden">
+        <div className="border border-border/50 rounded-none overflow-hidden">
           <button
             type="button"
             onClick={() => setShowManualUpload(!showManualUpload)}
@@ -802,7 +788,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                 onDragLeave={handleDrag}
                 onDragOver={handleDrag}
                 onDrop={handleDrop}
-                className={`flex flex-col items-center justify-center p-6 text-center border-2 border-dashed rounded-lg transition-colors ${
+                className={`flex flex-col items-center justify-center p-6 text-center border-2 border-dashed rounded-none transition-colors ${
                   dragActive ? "bg-primary/5 border-primary" : "border-border/60"
                 }`}
               >
@@ -878,7 +864,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                       {isUploadingManual ? (
                         <>
                           <RefreshCw className="animate-spin" size={12} />
-                          Processando...
+                          {progressoManual ? `Processando ${progressoManual.atual} de ${progressoManual.total}…` : "Processando..."}
                         </>
                       ) : (
                         <>
@@ -962,7 +948,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                   {/* Fluxo Visual das 3 Etapas */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3 text-xs">
                     {/* Etapa 1: Extração */}
-                    <div className="p-3 rounded-md bg-muted/30 border border-border/40 space-y-1.5">
+                    <div className="p-3 rounded-none bg-muted/30 border border-border/40 space-y-1.5">
                       <div className="flex items-center justify-between font-semibold text-foreground">
                         <span className="flex items-center gap-1.5">
                           <ScanBarcode size={14} className="text-primary" />
@@ -986,7 +972,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                     </div>
 
                     {/* Etapa 2: Consulta Fiscal */}
-                    <div className="p-3 rounded-md bg-muted/30 border border-border/40 space-y-1.5">
+                    <div className="p-3 rounded-none bg-muted/30 border border-border/40 space-y-1.5">
                       <div className="flex items-center justify-between font-semibold text-foreground">
                         <span className="flex items-center gap-1.5">
                           <FileSpreadsheet size={14} className="text-primary" />
@@ -1017,7 +1003,7 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                     </div>
 
                     {/* Etapa 3: Tiny ERP */}
-                    <div className="p-3 rounded-md bg-muted/30 border border-border/40 space-y-1.5">
+                    <div className="p-3 rounded-none bg-muted/30 border border-border/40 space-y-1.5">
                       <div className="flex items-center justify-between font-semibold text-foreground">
                         <span className="flex items-center gap-1.5">
                           <ArrowRight size={14} className="text-primary" />
@@ -1169,7 +1155,6 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
               const isError = h.audit_status === "error";
               const isResolved = isError && !!h.resolved_at;
               const incidentKey = h.chave_acesso || h.original_filename || h.error_file || `nfe-${i}`;
-              const reported = isExecutionReported(incidentKey);
 
               return (
                 <TableRow key={incidentKey} className="hover:bg-muted/40 text-sm transition-colors">
@@ -1264,32 +1249,12 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
                             {resolvingFile === h.error_file ? "Salvando..." : "Marcar como resolvida"}
                           </Button>
                         )}
-                        {reported ? (
-                          <Badge
-                            variant="warning"
-                            className="text-xs font-semibold"
-                            title="Incidente já encaminhado para a fila de resolução do administrador"
-                          >
-                            <CheckCircle2 size={12} />
-                            Reportado
-                          </Badge>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              setReportingIncident({
-                                id: incidentKey,
-                                node: h.metodo_leitura || "Leitura Fiscal",
-                                details: h.details,
-                              })
-                            }
-                            className="h-7 px-2.5 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:text-rose-700 hover:bg-rose-500/10 border-rose-500/30 gap-1.5 cursor-pointer shadow-2xs"
-                          >
-                            <Flag size={12} />
-                            Reportar
-                          </Button>
-                        )}
+                        <ReportarErro
+                          automationId="danfe-tiny"
+                          executionId={incidentKey}
+                          stoppedNode={h.metodo_leitura || "Leitura fiscal"}
+                          errorMessage={h.details || `Falha ao processar ${h.original_filename || h.error_file || "a DANFE"}`}
+                        />
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-xs">—</span>
@@ -1300,16 +1265,6 @@ export default function DanfePanel({ config }: { config: DashboardConfig }) {
             }}
           />
 
-          {reportingIncident && (
-            <ReportIncidentModal
-              isOpen={!!reportingIncident}
-              onClose={() => setReportingIncident(null)}
-              executionId={reportingIncident.id}
-              automationId="danfe-tiny"
-              automationTitle="NF-e & DANFE"
-              stoppedNode={reportingIncident.node}
-            />
-          )}
         </div>
       </div>
       <ConfirmImpactDialog

@@ -2,11 +2,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from app.inter_client import (
     InterClient,
-    InterTransacao,
     _clean_digits,
     _to_decimal,
 )

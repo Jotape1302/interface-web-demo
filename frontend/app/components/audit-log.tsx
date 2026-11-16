@@ -81,6 +81,7 @@ export default function AuditLog() {
   }, [fetchPage, isDemo]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     if (canView) void reload();
   }, [reload, canView]);
 
@@ -157,7 +158,7 @@ export default function AuditLog() {
             type="button"
             onClick={exportCsv}
             disabled={entries.length === 0}
-            className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-xl border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-none border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Download size={14} />
             Exportar CSV
@@ -165,7 +166,7 @@ export default function AuditLog() {
           <button
             type="button"
             onClick={() => void reload()}
-            className="flex cursor-pointer items-center gap-1.5 rounded-xl border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
+            className="flex cursor-pointer items-center gap-1.5 rounded-none border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
           >
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
             Atualizar
@@ -182,7 +183,7 @@ export default function AuditLog() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar por usuário, alvo ou detalhe"
-            className="h-8 w-full rounded-lg border border-input bg-transparent pl-8 pr-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
+            className="h-8 w-full rounded-none border border-input bg-transparent pl-8 pr-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
           />
         </label>
         <NativeSelect value={acao} onChange={(e) => setAcao(e.target.value)} aria-label="Filtrar por ação" className="sm:w-72">
@@ -200,10 +201,10 @@ export default function AuditLog() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-500">{error}</div>
+        <div className="rounded-none border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-500">{error}</div>
       )}
 
-      <div className="overflow-x-auto rounded-lg border border-border bg-card">
+      <div className="overflow-x-auto rounded-none border border-border bg-card">
         <table className="w-full min-w-[760px] text-left text-xs text-foreground">
           <thead className="border-b border-border bg-muted/60 font-mono text-[10px] uppercase text-muted-foreground">
             <tr>
@@ -255,7 +256,7 @@ export default function AuditLog() {
             type="button"
             onClick={() => void loadMore()}
             disabled={loading}
-            className="cursor-pointer rounded-xl border border-border bg-muted/60 px-4 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
+            className="cursor-pointer rounded-none border border-border bg-muted/60 px-4 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-50"
           >
             Carregar mais
           </button>

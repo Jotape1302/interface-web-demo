@@ -74,8 +74,9 @@ function metrics(value: unknown): Metrics {
     totalQueue: integer(row.totalQueue),
     paidCount: integer(row.paidCount),
     reconciledCount: integer(row.reconciledCount),
-    hoursSaved: positive(row.hoursSaved),
-    estimatedSavings: positive(row.estimatedSavings),
+    // Ausentes para quem não tem `roi:ver` (o gateway corta as duas chaves).
+    ...(row.hoursSaved === undefined ? {} : { hoursSaved: positive(row.hoursSaved) }),
+    ...(row.estimatedSavings === undefined ? {} : { estimatedSavings: positive(row.estimatedSavings) }),
     automationRate: row.automationRate === null ? null : positive(row.automationRate),
   };
   if (

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from app.config import settings
 from app.main import NFeAutomationOrchestrator
-from app.nfe_client import NFeData, MockNFeProvider
+from app.nfe_client import MockNFeProvider
 from app.scanner import ScanResult
 from app.tiny_client import TinyClient
 

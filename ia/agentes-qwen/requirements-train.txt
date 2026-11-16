@@ -1,0 +1,10 @@
+# Só para o fine-tuning do classificador de NF-e (agentes/finetune_financeiro.py), num venv próprio:
+#   uv venv .venv-treino --python 3.12 && uv pip install -p .venv-treino -r requirements-train.txt
+# Separado do venv de execução (o do RAGs, Python 3.14): o Unsloth não suporta 3.14, e o torch dele
+# não deve trocar o que serve a RAG e o classificador. O unsloth traz torch, transformers, trl,
+# peft, bitsandbytes, accelerate e datasets nas versões que ele suporta.
+unsloth
+# Conversão do adaptador LoRA para GGUF (o Ollama não aceita adaptador safetensors para Qwen2).
+gguf
+sentencepiece
+protobuf

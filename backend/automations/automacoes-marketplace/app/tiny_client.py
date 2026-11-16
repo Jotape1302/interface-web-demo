@@ -1,6 +1,6 @@
 """
-Tiny ERP (API v3) para a padronização de dimensões: lista os produtos de uma conta, lê o
-cadastro (nome, descrição, dimensões, peso) e grava as dimensões padronizadas.
+Tiny ERP (API v3) para a padronização de dimensões: lista os produtos de uma conta e lê o
+cadastro (nome, dimensões, peso bruto). Só leitura: a automação não grava no Tiny.
 
 O token vem da tabela api_tokens do MariaDB (renovado fora daqui, como na automacoes-financeiro).
 Unidades do Tiny: largura/altura/comprimento em cm, pesoLiquido/pesoBruto em kg.
@@ -12,8 +12,9 @@ from typing import Any, Callable, Dict, Iterator, Optional
 
 import requests
 
+from app import retry
 from app.config import settings
-from app.dimensoes import Dimensoes
+from app.retry import TENTATIVAS, deve_repetir, espera
 
 logger = logging.getLogger("marketplace.tiny")
 
@@ -60,7 +61,7 @@ class ClienteTiny:
         token = self._token()
         if not token:
             raise TinyAPIError(f"Sem token do Tiny para a conta {self.conta} (tabela api_tokens).")
-        for tentativa in (1, 2, 3):
+        for tentativa in range(1, TENTATIVAS + 1):
             self._throttle()
             try:
                 resp = self.http.request(
@@ -68,13 +69,13 @@ class ClienteTiny:
                     timeout=30, **kwargs,
                 )
             except requests.RequestException as e:
-                if tentativa == 3:
+                if tentativa == TENTATIVAS or not deve_repetir(metodo, None):
                     raise TinyAPIError(f"Falha de rede ao {descricao}: {e}") from e
-                time.sleep(2 * tentativa)
+                retry.dormir(espera(tentativa))
                 continue
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if tentativa < 3:
-                    time.sleep(5 * tentativa)
+            if (resp.status_code == 429 or resp.status_code >= 500) and deve_repetir(metodo, resp.status_code):
+                if tentativa < TENTATIVAS:
+                    retry.dormir(espera(tentativa, resp))
                     continue
             if not 200 <= resp.status_code < 300:
                 raise TinyAPIError(f"Falha ao {descricao} no Tiny ({self.conta}): HTTP {resp.status_code} - {resp.text[:400]}", resp.status_code)
@@ -97,26 +98,3 @@ class ClienteTiny:
 
     def produto(self, produto_id: int) -> Dict[str, Any]:
         return self._chamar("GET", f"/produtos/{produto_id}", f"ler o produto {produto_id}")
-
-    def gravar_dimensoes(self, produto: Dict[str, Any], dims: Dimensoes) -> None:
-        """
-        PUT /produtos/{id}: o Tiny exige sku e descricao no corpo, que vão como estão no cadastro.
-        Só as dimensões mudam (as demais chaves de `dimensoes` são mantidas). Peso em kg; o bruto
-        acompanha o líquido (a embalagem pesa quase nada).
-        """
-        atuais = dict(produto.get("dimensoes") or {})
-        atuais.pop("quantidadeVolumes", None)
-        embalagem = atuais.pop("embalagem", None)
-        novas = {
-            **{k: v for k, v in atuais.items() if k in ("diametro",)},
-            "altura": dims.altura,
-            "largura": dims.largura,
-            "comprimento": dims.comprimento,
-        }
-        if dims.peso:
-            novas["pesoLiquido"] = round(dims.peso / 1000, 3)
-            novas["pesoBruto"] = round(dims.peso / 1000, 3)
-        if isinstance(embalagem, dict) and (embalagem.get("id") or embalagem.get("tipo") is not None):
-            novas["embalagem"] = {"id": embalagem.get("id"), "tipo": embalagem.get("tipo")}
-        corpo = {"sku": produto["sku"], "descricao": produto["descricao"], "dimensoes": novas}
-        self._chamar("PUT", f"/produtos/{produto['id']}", f"gravar as dimensões do SKU {produto['sku']}", json=corpo)

@@ -28,7 +28,7 @@ void test("perfis demo: Admin ROOT, Gestor parcial, 2 Users com e 2 sem permissÃ
   resetDemoAdminStore();
   const root = demoSessionFor(DEMO_ROOT_USERNAME)!;
   assert.equal(root.user.is_root, true);
-  assert.equal(root.permissions.length, 46);
+  assert.equal(root.permissions.length, 51);
   assert.equal(demoSessionFor("gestora.demo")!.user.role, "gestor");
   assert.ok(demoSessionFor("fin.demo")!.permissions.length > 0);
   assert.ok(demoSessionFor("mkt.demo")!.permissions.length > 0);

@@ -1,4 +1,7 @@
-import { actorHeaders, automationFetch, financeiroCandidateUrls, upstreamError, type ActorContext } from "./automation-http.js";
+import { economia } from "./roi.js";
+import { noPeriodo } from "./periodo.js";
+import { nextDailyRunSaoPaulo } from "./overview.js";
+import { actorHeaders, automationFetch, callAutomation, createAutomationUrlResolver, financeiroCandidateUrls, upstreamError, type ActorContext } from "./automation-http.js";
 import type {
   Account,
   ConfirmLancamentoItemInput,
@@ -11,18 +14,24 @@ import type {
   DanfeStatusResponse,
   Dashboard,
   HistoryAdapter,
+  DanfeHistoryItem,
+  DanfeHistoryResponse,
+  DanfeImportKeyResponse,
   HistoryWindow,
+  RoiPeriodo,
   TinyCategory,
 } from "./contracts.js";
 
 export interface DanfeService {
   readDashboard(): Promise<Dashboard>;
   readStatus(): Promise<DanfeStatusResponse>;
-  readHistory(): Promise<any>;
+  readHistory(): Promise<DanfeHistoryResponse>;
   readSefazStatus(): Promise<DanfeSefazStatus>;
+  /** Notas lançadas com sucesso (histórico de auditoria, `processed_at`); com `periodo`, só as do período. Rejeita se o motor estiver fora. */
+  contarLancadas(periodo?: RoiPeriodo): Promise<number>;
   /** `force` (ignorar o cooldown da SEFAZ) só é repassado quando a rota já validou role admin. */
   scanSefaz(actor?: ActorContext, opts?: { force?: boolean }): Promise<DanfeSefazStatus>;
-  importKey(chave: string, actor?: ActorContext): Promise<any>;
+  importKey(chave: string, actor?: ActorContext): Promise<DanfeImportKeyResponse>;
   processBatch(body: Buffer, contentType: string, actor?: ActorContext): Promise<DanfeBatchResponse>;
   getTinyCategories(cnpj?: string): Promise<TinyCategory[]>;
   getPendingReview(): Promise<DanfePendingReviewResponse>;
@@ -38,6 +47,12 @@ export interface DanfeService {
     parcelas?: number,
     actor?: ActorContext,
   ): Promise<ConfirmLancamentoResponse>;
+  /**
+   * Ponte do classificador Qwen (coletor da VPS → automação): repassa GET qwen/pendentes,
+   * GET qwen/confirmadas-recentes e POST qwen/sugestoes com a chave interna e devolve status e
+   * corpo da automação como vieram. Só no modo live.
+   */
+  qwenRepasse?(metodo: "GET" | "POST", caminho: string, corpo?: unknown): Promise<{ status: number; corpo: unknown }>;
   historyAdapter: HistoryAdapter;
 }
 
@@ -82,9 +97,7 @@ export function createDanfeService(
       },
       async readSefazStatus(): Promise<DanfeSefazStatus> {
         const now = new Date();
-        const next = new Date(now);
-        next.setDate(next.getDate() + (now.getHours() >= 6 ? 1 : 0));
-        next.setHours(6, 0, 0, 0);
+        const next = nextDailyRunSaoPaulo(now, 6);
         return {
           last_scan_started_at: new Date(now.getTime() - 3600000).toISOString(),
           last_scan_finished_at: new Date(now.getTime() - 3590000).toISOString(),
@@ -100,6 +113,9 @@ export function createDanfeService(
       },
       async scanSefaz(): Promise<DanfeSefazStatus> {
         return this.readSefazStatus();
+      },
+      async contarLancadas(): Promise<number> {
+        return 318;
       },
       async readDashboard(): Promise<Dashboard> {
         // Reaproveita a mesma nota fictícia de getPendingReview() para que a contagem de
@@ -125,8 +141,8 @@ export function createDanfeService(
             totalQueue: 340,
             paidCount: 318,
             reconciledCount: 310,
-            hoursSaved: (318 * 3) / 60,
-            estimatedSavings: Math.round(((318 * 3) / 60) * 11 * 100) / 100,
+            hoursSaved: economia("danfe-tiny", 318).horas,
+            estimatedSavings: economia("danfe-tiny", 318).reais,
             automationRate: 93.5,
           },
           approvals,
@@ -202,7 +218,7 @@ export function createDanfeService(
           ],
         };
       },
-      async importKey(chave: string): Promise<any> {
+      async importKey(chave: string): Promise<DanfeImportKeyResponse> {
         return {
           status: "success",
           message: `NF-e ${chave.slice(25, 34)} importada com sucesso (modo demonstração).`,
@@ -410,41 +426,10 @@ export function createDanfeService(
   }
 
   // MODO LIVE: Comunica com a API Python do automacao-nfe com resolução dinâmica de candidatos
-  const candidateUrls = financeiroCandidateUrls(pythonApiUrl);
-
-  let activePythonUrl = candidateUrls[0] || "http://127.0.0.1:8000";
-
-  async function resolvePythonUrl(): Promise<string> {
-    try {
-      const res = await automationFetch(`${activePythonUrl}/api/v1/health`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (res.ok) return activePythonUrl;
-    } catch {
-      // URL ativa falhou, tenta outros candidatos
-    }
-
-    const errors: string[] = [];
-    for (const url of candidateUrls) {
-      if (url === activePythonUrl) continue;
-      try {
-        const res = await automationFetch(`${url}/api/v1/health`, {
-          signal: AbortSignal.timeout(2000),
-        });
-        if (res.ok) {
-          console.log(`[DANFE Service] Conectado ao automacao-nfe via ${url}`);
-          activePythonUrl = url;
-          return activePythonUrl;
-        }
-        errors.push(`${url}: HTTP ${res.status}`);
-      } catch (err) {
-        errors.push(`${url}: ${(err as Error).message}`);
-      }
-    }
-
-    console.error(`[DANFE Service] Falha ao conectar no automacao-nfe: ${errors.join("; ")}`);
-    return activePythonUrl;
-  }
+  // URL do motor financeiro memorizada por 60 s (sem /health a cada chamada) + breaker "financeiro".
+  const resolvePythonUrl = createAutomationUrlResolver(financeiroCandidateUrls(pythonApiUrl));
+  const fetchFin = (url: string, init?: RequestInit): Promise<Response> =>
+    callAutomation("financeiro", () => automationFetch(url, init), { invalidate: resolvePythonUrl.invalidate });
 
   const HISTORY_LIMIT = 1000;
 
@@ -455,11 +440,11 @@ export function createDanfeService(
     async readHistory(window: HistoryWindow) {
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/danfe/history?limit=${HISTORY_LIMIT}`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/danfe/history?limit=${HISTORY_LIMIT}`, {
           signal: AbortSignal.timeout(5000),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const histData = (await res.json()) as { history?: any[] };
+        const histData = (await res.json()) as Partial<DanfeHistoryResponse>;
         const historyItems = Array.isArray(histData.history) ? histData.history : [];
 
         const fromMs = Date.parse(window.from);
@@ -467,7 +452,7 @@ export function createDanfeService(
         const executions = historyItems
           .filter((item) => item.processed_at && Number.isFinite(Date.parse(item.processed_at)))
           .filter((item) => {
-            const t = Date.parse(item.processed_at);
+            const t = Date.parse(item.processed_at ?? "");
             return t >= fromMs && t <= toMs;
           })
           .map((item, idx) => {
@@ -477,8 +462,8 @@ export function createDanfeService(
               : `DANFE-EXEC-${idx + 1}-${timeMs}`;
             return {
               id: executionId,
-              startedAt: new Date(item.processed_at).toISOString(),
-              stoppedAt: new Date(item.processed_at).toISOString(),
+              startedAt: new Date(item.processed_at ?? "").toISOString(),
+              stoppedAt: new Date(item.processed_at ?? "").toISOString(),
               // A auditoria só grava o instante do processamento, não a duração.
               durationMs: null,
               status: (item.audit_status === "error" ? "error" : "success") as "error" | "success",
@@ -489,7 +474,7 @@ export function createDanfeService(
         // A API devolve os `HISTORY_LIMIT` eventos mais recentes: se veio cheia e o mais antigo
         // ainda está dentro da janela, podem faltar dias no começo do gráfico.
         const oldest = historyItems
-          .map((item) => Date.parse(item.processed_at))
+          .map((item) => Date.parse(item.processed_at ?? ""))
           .filter(Number.isFinite)
           .reduce((min, t) => Math.min(min, t), Infinity);
         const complete = historyItems.length < HISTORY_LIMIT || oldest < fromMs;
@@ -503,10 +488,27 @@ export function createDanfeService(
 
   return {
     historyAdapter: liveHistoryAdapter,
+    async qwenRepasse(metodo, caminho, corpo) {
+      const baseUrl = await resolvePythonUrl();
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/qwen/${caminho}`, {
+        method: metodo,
+        headers: corpo === undefined ? undefined : { "Content-Type": "application/json" },
+        body: corpo === undefined ? undefined : JSON.stringify(corpo),
+        signal: AbortSignal.timeout(30000),
+      });
+      const texto = await res.text();
+      let lido: unknown;
+      try {
+        lido = texto ? JSON.parse(texto) : {};
+      } catch {
+        lido = { error: texto.slice(0, 500) };
+      }
+      return { status: res.status, corpo: lido };
+    },
     async readStatus(): Promise<DanfeStatusResponse> {
       try {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/health`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/health`, {
           signal: AbortSignal.timeout(5000),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -524,13 +526,24 @@ export function createDanfeService(
       }
     },
     async readSefazStatus(): Promise<DanfeSefazStatus> {
-      try {
+      // Responde em ~150 ms; em 08/11/2026 às 05:52 um único timeout de 8 s (motor fiscal ocupado
+      // com a conciliação ML das 5h) virou incidente. Uma nova tentativa antes do ERROR: só a falha
+      // que se repete é problema de verdade.
+      const ler = async (): Promise<DanfeSefazStatus> => {
         const baseUrl = await resolvePythonUrl();
-        const res = await automationFetch(`${baseUrl}/api/v1/danfe/sefaz-status`, {
+        const res = await fetchFin(`${baseUrl}/api/v1/danfe/sefaz-status`, {
           signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return (await res.json()) as DanfeSefazStatus;
+      };
+      try {
+        try {
+          return await ler();
+        } catch (e) {
+          console.warn(`[DANFE Service] readSefazStatus: 1ª tentativa falhou (${(e as Error).message}); tentando de novo`);
+          return await ler();
+        }
       } catch (e) {
         console.error(`[DANFE Service] readSefazStatus falhou: ${(e as Error).message}`);
         return {
@@ -546,7 +559,7 @@ export function createDanfeService(
     },
     async scanSefaz(actor?: ActorContext, opts?: { force?: boolean }): Promise<DanfeSefazStatus> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/scan-sefaz${opts?.force ? "?force=true" : ""}`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/scan-sefaz${opts?.force ? "?force=true" : ""}`, {
         method: "POST",
         headers: actorHeaders(actor, { asUser: true }),
         signal: AbortSignal.timeout(120000),
@@ -554,23 +567,32 @@ export function createDanfeService(
       if (!res.ok) throw await upstreamError(res, "Falha ao executar a varredura SEFAZ");
       return (await res.json()) as DanfeSefazStatus;
     },
+    async contarLancadas(periodo?: RoiPeriodo): Promise<number> {
+      const baseUrl = await resolvePythonUrl();
+      // Limite alto: o ROI conta tudo, não só as últimas 100 notas do painel.
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/history?limit=1000000`, { signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as Partial<DanfeHistoryResponse> | null;
+      if (!Array.isArray(data?.history)) throw new Error("Histórico de NF-e indisponível");
+      return data.history.filter((i) => i.audit_status === "success" && noPeriodo(i.processed_at, periodo)).length;
+    },
     async readDashboard(): Promise<Dashboard> {
       try {
         const baseUrl = await resolvePythonUrl();
         const [healthRes, histRes, pendingRes] = await Promise.all([
-          automationFetch(`${baseUrl}/api/v1/health`, { signal: AbortSignal.timeout(3000) }),
-          automationFetch(`${baseUrl}/api/v1/danfe/history?limit=100`, { signal: AbortSignal.timeout(3000) }).catch(() => null),
-          automationFetch(`${baseUrl}/api/v1/danfe/pending-review`, { signal: AbortSignal.timeout(3000) }).catch(() => null),
+          fetchFin(`${baseUrl}/api/v1/health`, { signal: AbortSignal.timeout(3000) }),
+          fetchFin(`${baseUrl}/api/v1/danfe/history?limit=100`, { signal: AbortSignal.timeout(3000) }).catch(() => null),
+          fetchFin(`${baseUrl}/api/v1/danfe/pending-review`, { signal: AbortSignal.timeout(3000) }).catch(() => null),
         ]);
 
         if (!healthRes.ok) {
           throw new Error(`Motor Python indisponível (${healthRes.status})`);
         }
 
-        let historyItems: any[] = [];
+        let historyItems: DanfeHistoryItem[] = [];
         if (histRes && histRes.ok) {
           try {
-            const histData = (await histRes.json()) as any;
+            const histData = (await histRes.json()) as Partial<DanfeHistoryResponse> | null;
             if (Array.isArray(histData?.history)) {
               historyItems = histData.history;
             }
@@ -584,7 +606,7 @@ export function createDanfeService(
         let approvals: Account[] = [];
         if (pendingRes && pendingRes.ok) {
           try {
-            const pendingData = (await pendingRes.json()) as { pending?: any[] };
+            const pendingData = (await pendingRes.json()) as Partial<DanfePendingReviewResponse>;
             approvals = (pendingData.pending ?? []).map((entry) => ({
               id: `danfe-pending-${String(entry.chave ?? "").slice(-8)}`,
               beneficiary: entry.nfe_data?.emitente_nome ?? "Fornecedor não identificado",
@@ -607,10 +629,8 @@ export function createDanfeService(
         const successCount = successItems.length;
         const automationRate = total > 0 ? Math.round((successCount / total) * 1000) / 10 : null;
 
-        // 3 minutos poupados por lançamento fiscal com sucesso; R$ 11,00/h
-        const minutesSaved = successCount * 3;
-        const hoursSaved = minutesSaved / 60;
-        const estimatedSavings = Math.round(hoursSaved * 11 * 100) / 100;
+        // ROI = (manual − atual) por nota lançada com sucesso (constantes em roi.ts).
+        const { horas: hoursSaved, reais: estimatedSavings } = economia("danfe-tiny", successCount);
 
         const executions = historyItems.slice(0, 10).map((item, idx) => {
           const timeMs = item.processed_at ? new Date(item.processed_at).getTime() : idx;
@@ -632,7 +652,7 @@ export function createDanfeService(
         // marcada manualmente como resolvida (resolved_at).
         // Várias tentativas com erro da mesma nota contam como uma pendência só.
         const launchedChaves = new Set<string>(
-          successItems.map((item) => item.chave_acesso).filter(Boolean),
+          successItems.map((item) => item.chave_acesso).filter((chave): chave is string => Boolean(chave)),
         );
         const seenFailedChaves = new Set<string>();
         const failureItems = historyItems.filter((item) => {
@@ -713,15 +733,15 @@ export function createDanfeService(
     },
     async readHistory() {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/history`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/history`, {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
+      return (await res.json()) as DanfeHistoryResponse;
     },
     async processBatch(body: Buffer, contentType: string, actor?: ActorContext): Promise<DanfeBatchResponse> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/process-batch`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/process-batch`, {
         method: "POST",
         headers: {
           "Content-Type": contentType,
@@ -736,7 +756,7 @@ export function createDanfeService(
     async getTinyCategories(cnpj?: string): Promise<TinyCategory[]> {
       const baseUrl = await resolvePythonUrl();
       const query = cnpj ? `?cnpj=${encodeURIComponent(cnpj)}` : "";
-      const res = await automationFetch(`${baseUrl}/api/v1/tiny/categories${query}`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/tiny/categories${query}`, {
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -744,7 +764,7 @@ export function createDanfeService(
     },
     async getPendingReview(): Promise<DanfePendingReviewResponse> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/pending-review`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/pending-review`, {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -752,7 +772,7 @@ export function createDanfeService(
     },
     async getNotas(status: DanfeNotaStatus): Promise<DanfeNotasResponse> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/notas?status_filter=${status}`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/notas?status_filter=${status}`, {
         signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -760,7 +780,7 @@ export function createDanfeService(
     },
     async archiveNota(chave: string, actor?: ActorContext): Promise<{ chave: string; status: string }> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/archive`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/archive`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...actorHeaders(actor, { asUser: true }) },
         body: JSON.stringify({ chave }),
@@ -771,7 +791,7 @@ export function createDanfeService(
     },
     async resolveFailure(errorFile: string, actor?: ActorContext): Promise<{ error_file: string; resolved_at: string }> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/failures/resolve`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/failures/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...actorHeaders(actor, { asUser: true }) },
         body: JSON.stringify({ error_file: errorFile }),
@@ -782,7 +802,7 @@ export function createDanfeService(
     },
     async restoreNota(chave: string, actor?: ActorContext): Promise<{ chave: string; status: string }> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/restore`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/restore`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...actorHeaders(actor, { asUser: true }) },
         body: JSON.stringify({ chave }),
@@ -800,7 +820,7 @@ export function createDanfeService(
       actor?: ActorContext,
     ): Promise<ConfirmLancamentoResponse> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/confirm-lancamento`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/confirm-lancamento`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...actorHeaders(actor, { asUser: true }) },
         body: JSON.stringify({
@@ -816,16 +836,16 @@ export function createDanfeService(
       if (!res.ok) throw await upstreamError(res, "Falha ao confirmar lançamento no Tiny");
       return (await res.json()) as ConfirmLancamentoResponse;
     },
-    async importKey(chave: string, actor?: ActorContext): Promise<any> {
+    async importKey(chave: string, actor?: ActorContext): Promise<DanfeImportKeyResponse> {
       const baseUrl = await resolvePythonUrl();
-      const res = await automationFetch(`${baseUrl}/api/v1/danfe/import-key`, {
+      const res = await fetchFin(`${baseUrl}/api/v1/danfe/import-key`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...actorHeaders(actor, { asUser: true }) },
         body: JSON.stringify({ chave }),
         signal: AbortSignal.timeout(30000),
       });
       if (!res.ok) throw await upstreamError(res, "Falha ao importar NF-e pela chave");
-      return await res.json();
+      return (await res.json()) as DanfeImportKeyResponse;
     },
   };
 }

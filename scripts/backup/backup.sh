@@ -10,7 +10,14 @@
 #                            quando BACKUP_AGE_RECIPIENT está definido
 #   SHA256SUMS               para conferir a integridade na hora de restaurar
 # e atualiza $BACKUP_DIR/last-backup.json, que o gateway lê na página Saúde do
-# sistema. Backups mais velhos que BACKUP_RETENTION_DAYS são apagados.
+# sistema. Retenção: só se apaga o que for MAIS VELHO que BACKUP_RETENTION_DAYS e estiver
+# além dos BACKUP_KEEP_MIN backups mais recentes BEM-SUCEDIDOS (marcador BACKUP_OK na pasta),
+# então uma sequência de falhas nunca esvazia o histórico bom.
+#
+# Modos:
+#   backup.sh                  faz o backup (padrão)
+#   backup.sh verify-restore   carrega o último backup bom num MariaDB descartável e conta as
+#                              tabelas (teste de restauração; ver README, "Teste de restauração")
 #
 # Configuração: scripts/backup/backup.env (copie de backup.env.example).
 # Agendamento: scripts/backup/systemd/ (timer diário) — ver scripts/backup/README.md.
@@ -27,6 +34,9 @@ fi
 
 BACKUP_DIR="${BACKUP_DIR:?defina BACKUP_DIR no backup.env}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
+# Quantos backups bem-sucedidos mais recentes nunca são apagados, mesmo passando dos dias.
+BACKUP_KEEP_MIN="${BACKUP_KEEP_MIN:-3}"
+MODE="${1:-backup}"
 BACKUP_DB_NAMES="${BACKUP_DB_NAMES:-financeiro}"
 BACKUP_CACHE_PATHS="${BACKUP_CACHE_PATHS:-}"
 # Certificados e chaves (Inter em data/certs, A1 em secrets) nunca entram no tar: o backup
@@ -49,7 +59,7 @@ DOCKER_BIN="${DOCKER_BIN:-docker}"
 # Docker rootless: no timer do systemd (ou no cron) não existe o DOCKER_HOST que o
 # .bashrc define, e o CLI procuraria o socket no lugar errado. Usa o socket do
 # usuário quando ele existe; DOCKER_HOST no backup.env tem prioridade.
-if [[ -n "$MARIADB_CONTAINER" && -z "${DOCKER_HOST:-}" ]]; then
+if [[ ( -n "$MARIADB_CONTAINER" || "$MODE" == "verify-restore" ) && -z "${DOCKER_HOST:-}" ]]; then
   ROOTLESS_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
   if [[ -S "$ROOTLESS_SOCK" ]]; then
     export DOCKER_HOST="unix://$ROOTLESS_SOCK"
@@ -227,6 +237,40 @@ dump_database() {
   zcat "$out" | tail -n 1 | grep -q -- "-- Dump completed"
 }
 
+# Backup bem-sucedido = tem BACKUP_OK. Pastas anteriores a este marcador (sem ele) valem como
+# boas se tiverem SHA256SUMS e não tiverem FALHOU.
+backup_ok() {
+  local d="$1"
+  [[ -f "$d/BACKUP_OK" ]] && return 0
+  [[ -f "$d/SHA256SUMS" && ! -f "$d/FALHOU" ]]
+}
+
+# Apaga somente o que for mais velho que BACKUP_RETENTION_DAYS E não estiver entre os
+# BACKUP_KEEP_MIN backups bem-sucedidos mais recentes.
+apply_retention() {
+  local d kept=0 name
+  local -a dirs=()
+  mapfile -t dirs < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??_??????' | sort -r)
+  declare -A protegido=()
+  for d in "${dirs[@]}"; do
+    [[ $kept -ge $BACKUP_KEEP_MIN ]] && break
+    if backup_ok "$d"; then
+      protegido["$d"]=1
+      kept=$((kept + 1))
+    fi
+  done
+  for d in "${dirs[@]}"; do
+    [[ -n ${protegido[$d]:-} ]] && continue
+    # Idade pelo mtime da pasta, como antes (-mtime +N = mais de N dias).
+    if [[ -n $(find "$d" -maxdepth 0 -mtime +"$BACKUP_RETENTION_DAYS") ]]; then
+      name="$(basename "$d")"
+      rm -rf -- "$d"
+      echo "Removido: $name"
+    fi
+  done
+  log "Retenção: $kept backup(s) bem-sucedido(s) recente(s) protegido(s) (BACKUP_KEEP_MIN=$BACKUP_KEEP_MIN)"
+}
+
 main() {
   mkdir -p "$BACKUP_DIR"
   check_encryption
@@ -293,12 +337,109 @@ main() {
     fi
   fi
 
+  # Marcador de sucesso: só agora o backup está completo (dump conferido, criptografia,
+  # SHA256SUMS e cópia externa). A retenção conta apenas as pastas que o têm.
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$TARGET/BACKUP_OK"
+
   CURRENT_STEP="limpeza dos backups antigos"
-  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??_??????' \
-    -mtime +"$BACKUP_RETENTION_DAYS" -print -exec rm -rf {} + | sed 's/^/Removido: /'
+  apply_retention
 
   write_status "ok"
   log "Backup concluído ($(du -sh "$TARGET" | cut -f1))"
 }
 
-main "$@"
+# Teste de restauração: carrega o último backup bom num MariaDB descartável e conta as tabelas.
+#   * padrão: sobe um container ($DOCKER_BIN = docker ou podman rootless) com VERIFY_MARIADB_IMAGE,
+#     restaura nele e o derruba no fim; nada toca no banco de produção;
+#   * VERIFY_DB_HOST definido: usa esse servidor TEMPORÁRIO (VERIFY_DB_USER/VERIFY_DB_PASSWORD/
+#     VERIFY_DB_PORT) com um banco de nome único, que é apagado no fim. NUNCA aponte para o
+#     servidor de produção.
+# Dumps só em .age exigem BACKUP_AGE_IDENTITY (chave privada) na hora do teste.
+verify_restore() {
+  trap - ERR
+  # Globais de propósito: o trap de EXIT roda depois que a função retorna.
+  vdir="" cname="" tmp="" status="erro" msg="" tables=0
+  local dump_tables=0 total=0 db
+  local VERIFY_IMAGE="${VERIFY_MARIADB_IMAGE:-mariadb:11}"
+  local VERIFY_MIN_TABLES="${VERIFY_MIN_TABLES:-1}"
+  VERIFY_FILE="$BACKUP_DIR/last-verify.json"
+
+  verify_finish() {
+    local code=$?
+    [[ -n "$cname" ]] && "$DOCKER_BIN" rm -f "$cname" >/dev/null 2>&1 || true
+    [[ -n "$tmp" ]] && rm -rf -- "$tmp"
+    if [[ -d "$BACKUP_DIR" ]]; then
+      printf '{"status":"%s","checkedAt":"%s","backup":"%s","tables":%s,"message":"%s"}\n' \
+        "$status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$(basename "${vdir:-}")")" "$tables" "$(json_escape "$msg")" \
+        >"$VERIFY_FILE.tmp" && chmod 644 "$VERIFY_FILE.tmp" && mv -f "$VERIFY_FILE.tmp" "$VERIFY_FILE"
+    fi
+    if [[ "$status" == "ok" ]]; then log "verify-restore OK: $tables tabela(s) restaurada(s)"; else log "verify-restore FALHOU: ${msg:-erro inesperado (código $code)}"; fi
+    return 0
+  }
+  verify_fail() { msg="$1"; status="erro"; exit 1; }
+  trap verify_finish EXIT
+
+  local d
+  while IFS= read -r d; do
+    if backup_ok "$d"; then vdir="$d"; break; fi
+  done < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??_??????' | sort -r)
+  [[ -n "$vdir" ]] || verify_fail "nenhum backup bem-sucedido em $BACKUP_DIR"
+  log "verify-restore: usando $vdir"
+  (cd "$vdir" && sha256sum --quiet -c SHA256SUMS) || verify_fail "SHA256SUMS não confere em $vdir"
+
+  tmp="$(mktemp -d)"
+  local rootpw; rootpw="$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
+  local client=() VPW
+  if [[ -n "${VERIFY_DB_HOST:-}" ]]; then
+    VPW="${VERIFY_DB_PASSWORD:-}"
+    local bin=mariadb; command -v "$bin" >/dev/null 2>&1 || bin=mysql
+    command -v "$bin" >/dev/null 2>&1 || verify_fail "cliente mariadb/mysql não instalado para VERIFY_DB_HOST"
+    client=(env MYSQL_PWD="$VPW" "$bin" --host="$VERIFY_DB_HOST" --port="${VERIFY_DB_PORT:-3306}" --user="${VERIFY_DB_USER:?defina VERIFY_DB_USER}")
+  else
+    command -v "$DOCKER_BIN" >/dev/null 2>&1 || verify_fail "'$DOCKER_BIN' não encontrado (docker/podman rootless ou VERIFY_DB_HOST)"
+    cname="norvia-verify-restore-$$"
+    log "Subindo MariaDB descartável ($VERIFY_IMAGE)"
+    MARIADB_ROOT_PASSWORD="$rootpw" "$DOCKER_BIN" run -d --name "$cname" -e MARIADB_ROOT_PASSWORD "$VERIFY_IMAGE" >/dev/null \
+      || verify_fail "não consegui subir o container $VERIFY_IMAGE"
+    client=(env MYSQL_PWD="$rootpw" "$DOCKER_BIN" exec -i -e MYSQL_PWD "$cname" mariadb -uroot)
+    local ready=0
+    for _ in $(seq 60); do
+      if "${client[@]}" -e 'SELECT 1' >/dev/null 2>&1; then ready=1; break; fi
+      sleep 2
+    done
+    [[ $ready -eq 1 ]] || verify_fail "MariaDB descartável não ficou pronto em 120 s"
+  fi
+
+  for db in $BACKUP_DB_NAMES; do
+    local gz="$vdir/mariadb-$db.sql.gz" sqldb="$db"
+    if [[ ! -f "$gz" && -f "$gz.age" ]]; then
+      [[ -n "${BACKUP_AGE_IDENTITY:-}" ]] || verify_fail "só existe $gz.age: defina BACKUP_AGE_IDENTITY (chave privada) para o teste"
+      "$AGE_BIN" -d -i "$BACKUP_AGE_IDENTITY" -o "$tmp/dump.sql.gz" "$gz.age" || verify_fail "falha ao descriptografar $gz.age"
+      gz="$tmp/dump.sql.gz"
+    fi
+    [[ -f "$gz" ]] || verify_fail "dump de $db não encontrado em $vdir"
+    log "Restaurando $db"
+    if [[ -n "${VERIFY_DB_HOST:-}" ]]; then
+      # Servidor externo: renomeia o banco para um nome único e descartável (nunca sobrescreve o real).
+      sqldb="verify_${db}_$$"
+      zcat "$gz" | sed "s/\`$db\`/\`$sqldb\`/g" | "${client[@]}" || verify_fail "falha ao carregar o dump de $db"
+    else
+      zcat "$gz" | "${client[@]}" || verify_fail "falha ao carregar o dump de $db"
+    fi
+    tables="$("${client[@]}" --batch --skip-column-names -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$sqldb' AND TABLE_TYPE='BASE TABLE'")"
+    dump_tables="$(zcat "$gz" | grep -c '^CREATE TABLE' || true)"
+    log "Banco $db: $tables tabela(s) restaurada(s) (o dump declara $dump_tables CREATE TABLE)"
+    [[ "$tables" -ge "$VERIFY_MIN_TABLES" ]] || verify_fail "banco $db restaurado com $tables tabela(s) (mínimo $VERIFY_MIN_TABLES)"
+    total=$((total + tables))
+    [[ -n "${VERIFY_DB_HOST:-}" ]] && "${client[@]}" -e "DROP DATABASE IF EXISTS \`$sqldb\`"
+  done
+  tables=$total
+  status="ok"
+  msg=""
+}
+
+case "$MODE" in
+  backup) main ;;
+  verify-restore) verify_restore ;;
+  *) echo "uso: $0 [backup | verify-restore]" >&2; exit 2 ;;
+esac

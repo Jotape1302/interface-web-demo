@@ -104,7 +104,12 @@ desktop.ini
 
 # Backup: configuração com senha do banco
 scripts/backup/backup.env
+# Coletor de incidentes: token do orquestrador
+scripts/coletor-incidentes/coletor.env
 
 # Base de conhecimento RAG (Qwen 14B local): espelho somente leitura de
 # ../RAGs/knowledge (fonte da verdade), mantido pelo agente rag_curator
 knowledge/
+
+# Configuração local do Codex (agentes por máquina)
+.codex/

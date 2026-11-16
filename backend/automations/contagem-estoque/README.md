@@ -178,8 +178,17 @@ mesma pasta, e nunca é reutilizado, mesmo após a limpeza por retenção). Cont
 numeração são numeradas pela ordem de criação quando o bot sobe.
 
 A diferença é calculada contra o saldo atual, então reenviar a mesma contagem não duplica a
-entrada. O POST não é repetido sozinho: sem resposta do Tiny, o saldo é relido para saber se a
-entrada entrou. Contagem sem SKU vai ao Tiny quando o SKU for informado no painel. O resultado
+entrada. O POST não é repetido sozinho: sem resposta do Tiny **ou com HTTP 5xx**, o saldo é relido
+para saber se a entrada entrou (só é falha se não entrou). Leituras (GET) repetem em 429/5xx com
+backoff e `Retry-After` (até 4 tentativas, teto de 60 s). Além disso, cada `registro_id` lançado com
+sucesso fica em `lancamentos_tiny.json` (pasta do registro, `REGISTRO_DIR`): o mesmo registro, com o
+mesmo SKU e quantidade, não lança de novo.
+
+**Premissa: um único processo.** A trava de ajuste (`_ajuste_lock`) é por processo; a API roda como
+thread do bot (`python -m app.main`, 1 worker). O serviço se recusa a subir com `WEB_CONCURRENCY` ou
+`UVICORN_WORKERS` maior que 1, e o arquivo de lançamentos usa `flock` como segunda proteção. Não
+escale este serviço com mais de uma réplica/worker apontando para o mesmo depósito do Tiny. Datas de
+negócio (número/data da auditoria) usam `America/Sao_Paulo`. Contagem sem SKU vai ao Tiny quando o SKU for informado no painel. O resultado
 (entrada, saldo anterior ou erro) fica em `contagem_estoque_tiny` (gateway) e aparece no cartão,
 com **Reenviar ao Tiny** quando falhou (`POST /api/stock-count/contagens/:id/tiny`, permissão
 `contagem_estoque:conferir`).

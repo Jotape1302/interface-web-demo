@@ -11,6 +11,7 @@ import {
   RefreshCw,
   RotateCcw,
   Truck,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -26,6 +27,7 @@ import { SITUACAO_INFO, formatMedidas, rotuloModo } from '@/lib/fretes-helpers';
 import { createFretesService, type FretesService } from '@/lib/fretes-service';
 import { useDataPolling } from '@/lib/use-data-polling';
 import { Empty, SourceError } from './panel-state';
+import { ReportarErro } from '@/components/reportar-erro';
 import { linkExternoSeguro } from '@/lib/session-guard';
 import { useAuth } from '@/lib/auth-context';
 import { ColumnFilterBar, ColumnFilterHeader } from './column-filter';
@@ -70,7 +72,7 @@ const FRETES_DEFS: Record<string, ColumnFilterDef<AnuncioFrete>> = {
   },
   dimensoes: {
     id: 'dimensoes',
-    label: 'Dimensões padronizadas',
+    label: 'Medidas do Tiny',
     tipo: 'texto',
     accessor: (a) => (a.padrao ? `${formatMedidas(a.padrao)} ${a.embalagem ? a.embalagem.comprimento : ''}` : '—'),
   },
@@ -223,7 +225,7 @@ function AbaAnuncios({
       />
 
       {erro ? (
-        <SourceError message={erro} />
+        <SourceError message={erro} reportar={{ automationId: 'shipping-review', executionId: 'painel' }} />
       ) : !todosAnuncios ? (
         <Skeleton className="h-64 w-full" />
       ) : total === 0 ? (
@@ -234,7 +236,7 @@ function AbaAnuncios({
           </Button>
         </Empty>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-border">
+        <div className="overflow-x-auto rounded-none border border-border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -267,7 +269,7 @@ function AbaAnuncios({
                     def={FRETES_DEFS.dimensoes}
                     value={colFilters.dimensoes}
                     onChange={(v) => updateColFilter('dimensoes', v)}
-                    title="Dimensões padronizadas"
+                    title="Medidas do Tiny"
                   />
                 </TableHead>
                 <TableHead>
@@ -299,9 +301,6 @@ function AbaAnuncios({
                     {a.padrao ? (
                       <>
                         {formatMedidas(a.padrao)}
-                        {a.embalagem && (
-                          <span className="block text-[10px] text-muted-foreground">embalagem 5 × 7 × {a.embalagem.comprimento}</span>
-                        )}
                       </>
                     ) : (
                       '—'
@@ -348,7 +347,7 @@ function AbaHistorico({ historico }: { historico: HistoricoFretes | null }) {
   if (!historico) return <Skeleton className="h-64 w-full" />;
   if (historico.itens.length === 0) return <Empty>Nenhuma alteração de frete ainda.</Empty>;
   return (
-    <div className="overflow-x-auto rounded-xl border border-border">
+    <div className="overflow-x-auto rounded-none border border-border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -379,7 +378,9 @@ function AbaHistorico({ historico }: { historico: HistoricoFretes | null }) {
                 )}
                 {t.dims && <p className="font-mono text-[11px] text-muted-foreground">{formatMedidas(t.dims)}</p>}
               </TableCell>
-              <TableCell className="text-xs">{t.usuario || (t.origem === 'rotina' ? 'Rotina diária' : '—')}</TableCell>
+              <TableCell className="text-xs">
+                {t.usuario || (t.origem === 'rotina' ? 'Rotina diária' : t.origem === 'varredura' ? 'Correção do tipo de frete' : '—')}
+              </TableCell>
               <TableCell className="max-w-72">
                 <Badge variant={TROCA_INFO[t.status].variant} className="text-[10px]">
                   {TROCA_INFO[t.status].label}
@@ -462,7 +463,7 @@ function AbaDesfeitos({
     }
   }
 
-  if (erro && !itens) return <SourceError message={erro} />;
+  if (erro && !itens) return <SourceError message={erro} reportar={{ automationId: 'shipping-review', executionId: 'painel' }} />;
   if (!itens) return <Skeleton className="h-64 w-full" />;
   if (itens.length === 0) return <Empty>Nenhum anúncio desfeito pelo Mercado Livre.</Empty>;
 
@@ -484,14 +485,14 @@ function AbaDesfeitos({
           </Button>
         )}
       </div>
-      {erro && <SourceError message={erro} />}
+      {erro && <SourceError message={erro} reportar={{ automationId: 'shipping-review', executionId: 'painel' }} />}
       {aviso && (
         <p className="flex items-start gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
           <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
           {aviso}
         </p>
       )}
-      <div className="overflow-x-auto rounded-xl border border-border">
+      <div className="overflow-x-auto rounded-none border border-border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -531,6 +532,15 @@ function AbaDesfeitos({
                     {a.falha_envio?.em && (
                       <p className="text-[10px] text-muted-foreground">{formatDateTimeBR(a.falha_envio.em)}</p>
                     )}
+                    {a.falha_envio && (
+                      <ReportarErro
+                        className="mt-1"
+                        automationId="shipping-review"
+                        executionId={`anuncio-${a.mlb}`}
+                        stoppedNode="Envio do tipo de frete ao Mercado Livre"
+                        errorMessage={a.falha_envio.mensagem}
+                      />
+                    )}
                   </TableCell>
                 </TableRow>
               );
@@ -552,12 +562,15 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
   const { can } = useAuth();
   const canRetentar = can('fretes:retentar');
   const canVerificar = can('fretes:executar');
+  const canCorrigirTipo = can('fretes:corrigir_tipo');
   const [aba, setAba] = useState<Aba>('anuncios');
   const [status, setStatus] = useState<FretesStatus | null>(null);
   const [historico, setHistorico] = useState<HistoricoFretes | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [recarregar, setRecarregar] = useState(0);
   const [executando, setExecutando] = useState(false);
+  // Corrigir o tipo mexe em anúncios já em ME1/ME2: pede um segundo clique para confirmar.
+  const [confirmarCorrecao, setConfirmarCorrecao] = useState(false);
 
   const carregar = useCallback(async () => {
     try {
@@ -571,6 +584,7 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
   }, [service]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     void carregar();
   }, [carregar, recarregar]);
 
@@ -599,9 +613,24 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
     }
   }
 
+  async function corrigirTipo() {
+    setConfirmarCorrecao(false);
+    setExecutando(true);
+    try {
+      await service.corrigirTipo();
+      setTimeout(() => setRecarregar((n) => n + 1), 1500);
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : 'Falha ao iniciar a correção do tipo de frete.');
+    } finally {
+      setExecutando(false);
+    }
+  }
+
   const envios = status?.envios ?? {};
+  const tipoErrado = status?.contagem.tipo_inconsistente ?? 0;
   const kpis = [
-    { label: 'Sem dimensões padronizadas', valor: status?.sem_padrao ?? 0, tom: 'text-amber-700 dark:text-amber-400' },
+    { label: 'Sem medida no Tiny', valor: status?.sem_padrao ?? 0, tom: 'text-amber-700 dark:text-amber-400' },
+    { label: 'Tipo errado pela embalagem', valor: tipoErrado, tom: 'text-amber-700 dark:text-amber-400' },
     { label: 'A combinar', valor: envios.not_specified ?? 0, tom: 'text-rose-600 dark:text-rose-400' },
     { label: 'ML desfez', valor: status?.desfeitos ?? 0, tom: 'text-rose-600 dark:text-rose-400' },
     { label: 'Aguardando conferência', valor: status?.aguardando_conferencia ?? 0, tom: 'text-amber-700 dark:text-amber-400' },
@@ -627,9 +656,10 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
             {fretesACombinar.title}
           </h1>
           <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
-            Todo dia a automação pega as dimensões padronizadas de cada produto, define a embalagem (5 × 7 × 100/200/300 cm) e o
-            tipo de envio, e tira do frete a combinar os anúncios que já podem ser trocados. Cada troca é conferida{' '}
-            {status?.minutos_conferencia ?? 10} minutos depois.
+            Todo dia a automação pega no Tiny da mesma empresa as medidas e o peso bruto do SKU de cada anúncio, usa essas
+            medidas como embalagem e tira do frete a combinar os anúncios que já podem ser trocados: produto de 1 m ou 2 m vai
+            no ME2 e o de 3 m no ME1. &ldquo;Corrigir tipo de frete&rdquo; faz o mesmo nos anúncios que já estão em ME1/ME2
+            com o tipo errado. Cada troca é conferida {status?.minutos_conferencia ?? 10} minutos depois.
           </p>
         </div>
         <div className="flex flex-col items-start gap-1 sm:items-end">
@@ -644,43 +674,75 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
                 {status?.em_execucao ? 'Verificando…' : 'Verificar agora'}
               </Button>
             )}
+            {canCorrigirTipo &&
+              (confirmarCorrecao ? (
+                <>
+                  <Button type="button" size="sm" onClick={() => void corrigirTipo()} disabled={executando || Boolean(status?.em_execucao)}>
+                    <Wrench size={14} />
+                    Confirmar correção ({tipoErrado})
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setConfirmarCorrecao(false)}>
+                    Cancelar
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setConfirmarCorrecao(true)}
+                  disabled={executando || Boolean(status?.em_execucao)}
+                  title="Troca para ME2 os anúncios com embalagem de 1 m/2 m e para ME1 os de 3 m que estão com o tipo errado (o Full fica de fora)"
+                >
+                  <Wrench size={14} />
+                  Corrigir tipo de frete
+                </Button>
+              ))}
           </div>
           <p className="text-[11px] text-muted-foreground">
             {ultima ? `Última verificação: ${formatDateTimeBR(ultima.concluida_em)}` : 'Nenhuma verificação ainda'}
+            {ultima?.origem === 'varredura' && ` (correção do tipo: ${ultima.resumo.corrigidos ?? 0} corrigido(s))`}
             {status && ` · próxima: ${formatDateTimeBR(status.proxima_execucao)}`}
           </p>
         </div>
       </div>
 
-      {erro && <SourceError message={erro} />}
+      {erro && <SourceError message={erro} reportar={{ automationId: 'shipping-review', executionId: 'painel' }} />}
       {status && !status.configurado && (
-        <div role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
+        <div role="alert" className="rounded-none border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
           Nenhuma conta do Mercado Livre tem access token na automação. A renovação dos tokens é feita fora deste sistema
           e ainda não foi configurada.
         </div>
       )}
       {status?.configurado && contasDesconectadas.length > 0 && (
-        <div role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
+        <div role="alert" className="rounded-none border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
           Conta(s) sem conexão com o Mercado Livre: {contasDesconectadas.map((c) => c.rotulo).join(', ')}. Elas ficam de
           fora da verificação até receberem um access token válido (a renovação é feita fora deste sistema).
         </div>
       )}
       {ultima && ultima.resumo.erros.length > 0 && (
-        <div role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-rose-700 dark:text-rose-300">
+        <div role="alert" className="rounded-none border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-rose-700 dark:text-rose-300">
           <p className="font-semibold">A última verificação teve falhas:</p>
           <ul className="mt-1 list-disc pl-4">
             {ultima.resumo.erros.map((e) => (
               <li key={e}>{e}</li>
             ))}
           </ul>
+          <ReportarErro
+            className="mt-2"
+            automationId="shipping-review"
+            executionId={`verificacao-${ultima.iniciada_em}`}
+            stoppedNode="Verificação"
+            errorMessage={ultima.resumo.erros.join('\n')}
+          />
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
         {kpis.map((k) => (
           <div
             key={k.label}
-            className="rounded-lg border border-border bg-card p-3 text-left"
+            className="rounded-none border border-border bg-card p-3 text-left"
           >
             <p className="text-[11px] text-muted-foreground">{k.label}</p>
             {status ? (
@@ -692,7 +754,7 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
         ))}
       </div>
 
-      <div role="tablist" className="inline-flex flex-wrap gap-1 rounded-lg border border-border p-1">
+      <div role="tablist" className="inline-flex flex-wrap gap-1 rounded-none border border-border p-1">
         {abas.map((t) => (
           <button
             key={t.id}
@@ -701,7 +763,7 @@ export default function FretesView({ apiBaseUrl }: { apiBaseUrl?: string }) {
             aria-selected={aba === t.id}
             onClick={() => setAba(t.id)}
             className={cn(
-              'flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
+              'flex cursor-pointer items-center gap-1.5 rounded-none px-3 py-1.5 text-xs font-medium transition',
               aba === t.id ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
             )}
           >

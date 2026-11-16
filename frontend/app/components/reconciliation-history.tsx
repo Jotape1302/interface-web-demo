@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ReportarErro } from "@/components/reportar-erro";
 import { SourceError } from "./panel-state";
 import { ColumnFilterBar, ColumnFilterHeader } from "./column-filter";
 import { formatDateBR, money } from "@/lib/formatters";
@@ -277,7 +278,7 @@ export default function ReconciliationHistory({ service, reloadSignal }: Reconci
         </div>
       ) : currentError ? (
         <>
-          <SourceError message={currentError} />
+          <SourceError message={currentError} reportar={{ automationId: "inter-reconciliation", executionId: "historico-de-baixas" }} />
           <div className="flex justify-end border-t border-border px-4 py-3">
             <Button size="sm" variant="outline" onClick={reload} className="gap-1.5">
               <RefreshCw size={13} />
@@ -433,6 +434,14 @@ export default function ReconciliationHistory({ service, reloadSignal }: Reconci
                           <p className="line-clamp-3 break-words text-[11px] text-rose-600 dark:text-rose-400" title={h.mensagem}>
                             {h.mensagem}
                           </p>
+                        )}
+                        {h.status === "erro" && (
+                          <ReportarErro
+                            automationId="inter-reconciliation"
+                            executionId={`baixa-${h.id}`}
+                            stoppedNode="Baixa no Tiny"
+                            errorMessage={h.mensagem || `Baixa da conta ${h.conta_pagar_id} terminou com erro`}
+                          />
                         )}
                       </div>
                     </TableCell>

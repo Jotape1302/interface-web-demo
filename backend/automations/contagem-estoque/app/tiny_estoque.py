@@ -11,11 +11,17 @@ repetido sozinho: sem resposta, o saldo é relido para saber se a entrada entrou
 A observação de cada lançamento começa com "Auditoria {data} lançamento {ID} - ...", com o
 número e a data da contagem como aparecem no painel (app/auditoria.py).
 """
+import contextlib
+import json
 import logging
+import os
+import random
+import tempfile
 import threading
 import time
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import requests
 
@@ -40,12 +46,99 @@ CNPJ_REVESTA = "36592814000100"
 _throttle_lock = threading.Lock()
 _ultima_chamada = 0.0
 # Um ajuste por vez: duas conferências seguidas do mesmo SKU leriam o mesmo saldo e lançariam a
-# diferença duas vezes.
+# diferença duas vezes. ATENÇÃO: a trava é por PROCESSO. O serviço roda com 1 processo (a API é
+# uma thread do bot); exigir_processo_unico() recusa a subida com mais de um worker, e o arquivo
+# de lançamentos (HistoricoLancamentos) ainda protege com flock entre processos do mesmo volume.
 _ajuste_lock = threading.Lock()
+
+
+def exigir_processo_unico(ambiente: Optional[Dict[str, str]] = None) -> None:
+    """Falha na subida se o uvicorn/gunicorn foi configurado com mais de 1 worker (EST-02)."""
+    env = os.environ if ambiente is None else ambiente
+    for nome in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        bruto = (env.get(nome) or "").strip()
+        if bruto.isdigit() and int(bruto) > 1:
+            raise RuntimeError(
+                f"{nome}={bruto}: a contagem de estoque exige 1 processo (a trava de ajuste é por processo; "
+                "com mais de um, duas contagens do mesmo SKU poderiam lançar a entrada em duplicidade)."
+            )
+
+
+class HistoricoLancamentos:
+    """
+    Entradas já lançadas no Tiny por registro_id (arquivo JSON atômico): o mesmo registro nunca
+    lança duas vezes, mesmo se a resposta se perdeu e o painel reenviou. O flock em arquivo
+    irmão serializa também processos diferentes que dividam a pasta.
+    """
+
+    def __init__(self, pasta: Path) -> None:
+        self.pasta = Path(pasta)
+        self.arquivo = self.pasta / "lancamentos_tiny.json"
+        self._trava = self.pasta / ".lancamentos_tiny.lock"
+
+    @contextlib.contextmanager
+    def exclusivo(self) -> Iterator[None]:
+        self.pasta.mkdir(parents=True, exist_ok=True)
+        with open(self._trava, "a+") as f:
+            try:
+                import fcntl
+
+                fcntl.flock(f, fcntl.LOCK_EX)
+            except ImportError:  # Windows: sem flock, vale só a trava do processo
+                pass
+            yield
+
+    def _ler(self) -> Dict[str, Any]:
+        if not self.arquivo.exists():
+            return {}
+        try:
+            return json.loads(self.arquivo.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            # Não recomeça do zero: perderia a proteção contra lançamento duplicado.
+            raise RuntimeError(f"Histórico de lançamentos ilegível em {self.arquivo}: {e}") from e
+
+    def obter(self, registro_id: str) -> Optional[Dict[str, Any]]:
+        return self._ler().get(registro_id)
+
+    def registrar(self, registro_id: str, resultado: Dict[str, Any]) -> None:
+        dados = self._ler()
+        dados[registro_id] = resultado
+        fd, tmp = tempfile.mkstemp(dir=self.pasta, prefix=".lancamentos-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(dados, f, ensure_ascii=False)
+            os.replace(tmp, self.arquivo)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
+# Leituras (GET) repetem em 429/5xx/rede: backoff exponencial com jitter, respeitando Retry-After.
+# Escrita (POST de entrada) nunca é repetida aqui: o desfecho é apurado relendo o saldo.
+TENTATIVAS_LEITURA = 4
+TETO_ESPERA_S = 60.0
 
 
 class TinyAPIError(RuntimeError):
     """Falha de comunicação com o Tiny (HTTP, rede, token)."""
+
+    def __init__(self, mensagem: str, status: Optional[int] = None) -> None:
+        super().__init__(mensagem)
+        self.status = status
+
+
+def _espera_retry(tentativa: int, resp: Any = None) -> float:
+    try:
+        valor = float((getattr(resp, "headers", None) or {}).get("Retry-After", ""))
+        if valor >= 0:
+            return min(TETO_ESPERA_S, valor)
+    except (TypeError, ValueError):
+        pass
+    return min(TETO_ESPERA_S, 2.0 * (2 ** (tentativa - 1)) + random.uniform(0, 1))
+
+
+def _dormir(segundos: float) -> None:
+    time.sleep(segundos)
 
 
 class EstoqueTinyErro(RuntimeError):
@@ -57,6 +150,18 @@ def _dec(valor: Any) -> Decimal:
         return Decimal(str(valor if valor is not None else 0))
     except (InvalidOperation, ValueError):
         return Decimal(0)
+
+
+def _numero_json(valor: Decimal, casas: int) -> Any:
+    """
+    Decimal → número JSON sem perda: arredonda em `casas` e devolve int (inteiro) ou float (o
+    json grava o menor texto que volta ao mesmo número, ex.: 2.5, 11.75). Recusa o que passaria de
+    15 dígitos significativos, onde o float já não representa o decimal.
+    """
+    q = valor.quantize(Decimal(1).scaleb(-casas))
+    if len(q.as_tuple().digits) > 15:
+        raise EstoqueTinyErro(f"Valor {valor} grande demais para enviar ao Tiny sem perder precisão.")
+    return int(q) if q == q.to_integral() else float(q)
 
 
 def _fmt(valor: Decimal) -> str:
@@ -104,16 +209,31 @@ class ClienteTinyEstoque:
         token = self._token()
         if not token:
             raise TinyAPIError(f"Sem token do Tiny para a conta {CONTA_TINY} (tabela api_tokens).")
-        self._throttle()
-        resp = self.http.request(
-            metodo,
-            f"{self.base_url}{caminho}",
-            headers={**HEADERS, "Authorization": f"Bearer {token}"},
-            timeout=(5, 25),
-            **kwargs,
-        )
+        leitura = metodo.upper() == "GET"
+        tentativas = TENTATIVAS_LEITURA if leitura else 1
+        for tentativa in range(1, tentativas + 1):
+            self._throttle()
+            try:
+                resp = self.http.request(
+                    metodo,
+                    f"{self.base_url}{caminho}",
+                    headers={**HEADERS, "Authorization": f"Bearer {token}"},
+                    timeout=(5, 25),
+                    **kwargs,
+                )
+            except requests.RequestException:
+                if tentativa == tentativas:
+                    raise
+                _dormir(_espera_retry(tentativa))
+                continue
+            if leitura and (resp.status_code == 429 or resp.status_code >= 500) and tentativa < tentativas:
+                _dormir(_espera_retry(tentativa, resp))
+                continue
+            break
         if not 200 <= resp.status_code < 300:
-            raise TinyAPIError(f"o Tiny respondeu HTTP {resp.status_code} ao {descricao}: {_erro_legivel(resp)}")
+            raise TinyAPIError(
+                f"o Tiny respondeu HTTP {resp.status_code} ao {descricao}: {_erro_legivel(resp)}", resp.status_code
+            )
         try:
             return resp.json() if resp.content else {}
         except ValueError:
@@ -159,8 +279,8 @@ class ClienteTinyEstoque:
             json={
                 "deposito": {"id": int(deposito_id)},
                 "tipo": "E",
-                "quantidade": float(quantidade),
-                "precoUnitario": float(preco_unitario),
+                "quantidade": _numero_json(quantidade, 4),
+                "precoUnitario": _numero_json(preco_unitario, 4),
                 "observacoes": observacoes[:OBSERVACOES_MAX],
             },
         )
@@ -224,6 +344,7 @@ def ajustar_contagem(
     numero: int,
     criado_em: str,
     usuario: str = "",
+    historico: Optional[HistoricoLancamentos] = None,
 ) -> Dict[str, Any]:
     """
     Compara a contagem (em unidades) com o saldo do depósito no Tiny e lança só a entrada que falta.
@@ -232,47 +353,72 @@ def ajustar_contagem(
     deposito_cfg = cliente.cfg.CONTAGEM_TINY_DEPOSITO_ID
     contado = Decimal(quantidade_contada)
     auditoria = cabecalho(numero, criado_em)
-    with _ajuste_lock:
-        produto = cliente.buscar_produto(sku)
-        id_produto = int(produto["id"])
-        deposito = escolher_deposito(cliente.estoque(id_produto), deposito_cfg)
-        saldo = _dec(deposito.get("saldo"))
-        base = {
-            "sku": sku,
-            "id_produto": id_produto,
-            "produto": str(produto.get("descricao") or ""),
-            "deposito": str(deposito.get("nome") or deposito.get("id")),
-            "saldo_anterior": float(saldo),
-            "contado": int(contado),
-            "auditoria": formatar_numero(numero),
-        }
-        entrada = contado - saldo
-        if entrada <= 0:
-            logger.info("[TINY] %s sem entrada: Tiny %s, contado %s (registro %s)", sku, saldo, contado, registro_id)
-            return {**base, "status": "sem_entrada", "entrada": 0, "id_lancamento": None}
+    with _ajuste_lock, (historico.exclusivo() if historico else contextlib.nullcontext()):
+        # Idempotência por registro: o mesmo registro (mesmo SKU e quantidade) já lançado com
+        # sucesso não lança de novo, nem que o saldo do Tiny tenha mudado depois.
+        if historico is not None:
+            anterior = historico.obter(registro_id)
+            if anterior and anterior.get("sku") == sku and anterior.get("contado") == int(contado):
+                logger.info("[TINY] registro %s já lançado (%s); nada a fazer", registro_id, sku)
+                return {**anterior, "repetido": True}
+        resultado = _ajustar(cliente, sku, contado, registro_id, numero, auditoria, usuario, deposito_cfg)
+        if historico is not None and resultado["status"] == "lancado":
+            historico.registrar(registro_id, resultado)
+        return resultado
 
-        obs = (
-            f"{auditoria} - Divergência na contagem do SKU {sku}: contado {int(contado)}, "
-            f"saldo no Tiny {_fmt(saldo)}, entrada de {_fmt(entrada)} (registro {registro_id}"
-            + (f", {usuario})" if usuario else ")")
-        )
-        preco = cliente.preco_custo(id_produto)
-        try:
-            id_lanc = cliente.lancar_entrada(id_produto, deposito.get("id"), entrada, obs, preco)
-        except requests.RequestException as e:
-            # Sem resposta: a entrada pode ter entrado. Relê o saldo em vez de repetir o POST.
-            logger.warning("[TINY] %s sem resposta no lançamento (%s); relendo o saldo", sku, e)
-            depois = _dec(escolher_deposito(cliente.estoque(id_produto), deposito_cfg).get("saldo"))
-            if depois >= contado:
-                return {**base, "status": "lancado", "entrada": float(entrada), "id_lancamento": None}
-            raise TinyAPIError(
-                f"O Tiny não respondeu ao lançar a entrada de {sku} e o saldo segue {_fmt(depois)}: envie de novo."
-            ) from e
-        logger.info(
-            "[TINY] %s entrada %s (Tiny %s → contado %s) registro %s (%s) lançamento %s usuário %s",
-            sku, _fmt(entrada), _fmt(saldo), int(contado), registro_id, auditoria, id_lanc, usuario,
-        )
-        return {**base, "status": "lancado", "entrada": float(entrada), "id_lancamento": id_lanc}
+
+def _ajustar(
+    cliente: ClienteTinyEstoque,
+    sku: str,
+    contado: Decimal,
+    registro_id: str,
+    numero: int,
+    auditoria: str,
+    usuario: str,
+    deposito_cfg: Optional[int],
+) -> Dict[str, Any]:
+    produto = cliente.buscar_produto(sku)
+    id_produto = int(produto["id"])
+    deposito = escolher_deposito(cliente.estoque(id_produto), deposito_cfg)
+    saldo = _dec(deposito.get("saldo"))
+    base = {
+        "sku": sku,
+        "id_produto": id_produto,
+        "produto": str(produto.get("descricao") or ""),
+        "deposito": str(deposito.get("nome") or deposito.get("id")),
+        "saldo_anterior": float(saldo),
+        "contado": int(contado),
+        "auditoria": formatar_numero(numero),
+    }
+    entrada = contado - saldo
+    if entrada <= 0:
+        logger.info("[TINY] %s sem entrada: Tiny %s, contado %s (registro %s)", sku, saldo, contado, registro_id)
+        return {**base, "status": "sem_entrada", "entrada": 0, "id_lancamento": None}
+
+    obs = (
+        f"{auditoria} - Divergência na contagem do SKU {sku}: contado {int(contado)}, "
+        f"saldo no Tiny {_fmt(saldo)}, entrada de {_fmt(entrada)} (registro {registro_id}"
+        + (f", {usuario})" if usuario else ")")
+    )
+    preco = cliente.preco_custo(id_produto)
+    try:
+        id_lanc = cliente.lancar_entrada(id_produto, deposito.get("id"), entrada, obs, preco)
+    except (requests.RequestException, TinyAPIError) as e:
+        if isinstance(e, TinyAPIError) and not (e.status and e.status >= 500):
+            raise  # 4xx/token: o Tiny recusou, a entrada não entrou
+        # Sem resposta ou 5xx: a entrada pode ter entrado. Relê o saldo em vez de repetir o POST.
+        logger.warning("[TINY] %s sem resposta/5xx no lançamento (%s); relendo o saldo", sku, e)
+        depois = _dec(escolher_deposito(cliente.estoque(id_produto), deposito_cfg).get("saldo"))
+        if depois >= contado:
+            return {**base, "status": "lancado", "entrada": float(entrada), "id_lancamento": None}
+        raise TinyAPIError(
+            f"O Tiny não respondeu ao lançar a entrada de {sku} e o saldo segue {_fmt(depois)}: envie de novo."
+        ) from e
+    logger.info(
+        "[TINY] %s entrada %s (Tiny %s → contado %s) registro %s (%s) lançamento %s usuário %s",
+        sku, _fmt(entrada), _fmt(saldo), int(contado), registro_id, auditoria, id_lanc, usuario,
+    )
+    return {**base, "status": "lancado", "entrada": float(entrada), "id_lancamento": id_lanc}
 
 
 def token_da_revesta(linha: Optional[Dict[str, Any]]) -> Optional[str]:

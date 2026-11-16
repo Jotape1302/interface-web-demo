@@ -6,6 +6,7 @@ pymysql>=1.1.1  # CVE-2024-36039
 fastapi>=0.120.0
 starlette>=0.49.1  # CVE-2024-47874, CVE-2025-54121, CVE-2025-62727
 uvicorn>=0.28.0
+tzdata>=2024.1  # ZoneInfo("America/Sao_Paulo") sem base de fusos no sistema (slim)
 
 # Testes
 pytest>=8.0.0

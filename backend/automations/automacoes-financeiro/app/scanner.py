@@ -2,7 +2,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Literal
+from typing import List, Optional, Literal
 
 import cv2
 import numpy as np
@@ -171,7 +171,7 @@ class DANFEScanner:
                         logger.info(f"Chave de acesso extraída via texto direto do PDF: {candidate}")
                         return ScanResult(key=candidate, method="ocr", file_path=file_path, page_number=1, raw_text=raw_text_collected)
             except Exception:
-                pass
+                logger.debug("pdftotext indisponível ou falhou para %s", file_path, exc_info=True)
 
         try:
             images = self._load_images_from_file(file_path)

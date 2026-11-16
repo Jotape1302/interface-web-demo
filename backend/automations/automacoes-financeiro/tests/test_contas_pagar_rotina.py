@@ -1,6 +1,4 @@
-import pytest
-from datetime import date, datetime, timedelta
-from decimal import Decimal
+from datetime import datetime
 from unittest.mock import MagicMock
 
 from app.contas_pagar_rotina import EstadoContasPagar, proxima_execucao_contas_pagar
@@ -260,3 +258,18 @@ def test_conta_parcial_sem_saldo_informado_nao_sai(tmp_path):
 
     assert store.conferir_baixas_externas(mock_tiny, mock_repo, cfg=cfg) == 0
     assert [c["id"] for c in store.carregar()["unmatched_tiny"]] == [77]
+
+
+def test_rotina_diaria_confere_baixas_externas(monkeypatch):
+    # Regressão: a rotina chamava conferir_baixas_externas com nomes que não existiam no
+    # módulo (NameError engolido pelo except), e a conferência nunca rodava.
+    import app.api as api_module
+
+    monkeypatch.setattr(api_module, "_run_preview", lambda req: {"status": "ok"})
+    monkeypatch.setattr(api_module, "TinyClient", MagicMock(name="TinyClient"))
+    monkeypatch.setattr(api_module, "TokenRepository", MagicMock(name="TokenRepository"))
+    store = MagicMock()
+    monkeypatch.setattr(api_module, "store_contas_pagar", store)
+
+    assert api_module._executar_rotina_diaria_contas_pagar() == {"status": "ok"}
+    store.conferir_baixas_externas.assert_called_once()

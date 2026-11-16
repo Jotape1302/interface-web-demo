@@ -1,5 +1,9 @@
 import type { Pool } from "mariadb";
+import type { RoiPeriodo } from "./contracts.js";
+import { logWarn } from "./errors.js";
 import type { Config } from "./config.js";
+import { noPeriodo, periodoSql } from "./periodo.js";
+import type { DbRow } from "./database.js";
 
 /**
  * Ações de usuário registradas no log de auditoria. O rótulo em português de cada uma
@@ -25,6 +29,7 @@ export const AUDIT_ACTIONS = [
   "workflow_token_disparado",
   "incidente_reportado",
   "incidente_resolvido",
+  "agentes_qwen_resolvido",
   "nfe_varredura_sefaz",
   "nfe_lote_enviado",
   "nfe_lancada",
@@ -35,12 +40,24 @@ export const AUDIT_ACTIONS = [
   "baixa_conciliacao_executada",
   "conciliacao_ml_executada",
   "baixa_conciliacao_ml_executada",
+  "dda_executado",
+  "dda_conta_vinculada",
+  "dda_conta_criada",
+  "dda_boleto_descartado",
+  "dda_boleto_reaberto",
+  "dda_boletos_validados",
+  "dda_contas_criadas_lote",
+  "conciliacao_ml_lancamentos_exportados",
+  "conciliacao_ml_tarifas_lancadas",
+  "conciliacao_ml_tarifas_conferidas",
+  "conciliacao_ml_tarifas_refeitas_manual",
   "sincronizacao_tokens_ml_solicitada",
   "nfe_importada_chave",
   "fretes_medidas_enviadas",
   "fretes_medidas_salvas",
   "fretes_verificacao_manual",
   "fretes_nova_tentativa",
+  "fretes_tipo_corrigido",
   "dimensoes_validadas",
   "dimensoes_reenviadas",
   "dimensoes_coleta_manual",
@@ -49,6 +66,12 @@ export const AUDIT_ACTIONS = [
   "contagem_estoque_excluida",
   "contagem_estoque_conferida",
   "contagem_estoque_tiny",
+  "marketing_lote_gerado",
+  "marketing_rascunho_aprovado",
+  "marketing_produto_alterado",
+  "marketing_ambientes_gerar",
+  "marketing_ambiente_aprovado",
+  "marketing_ambiente_recusado",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -91,6 +114,8 @@ export interface AuditService {
   /** Nunca lança: auditoria é best-effort e não pode derrubar a ação auditada. */
   record(input: AuditInput): Promise<void>;
   list(query?: AuditQuery): Promise<AuditEntry[]>;
+  /** Soma o campo numérico `detalhes.<campo>` de todas as entradas da ação (usado pelo ROI). Rejeita se o banco falhar. */
+  somarDetalhe(acao: AuditAction, campo: "sucessos", periodo?: RoiPeriodo): Promise<number>;
 }
 
 const MEMORY_LIMIT = 2000;
@@ -105,7 +130,7 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
   const memory: AuditEntry[] = [];
   let nextId = 1;
 
-  async function query<T = any>(sql: string, values: any[] = []): Promise<T[]> {
+  async function query<T = DbRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     if (!pool) throw new Error("Pool de banco não configurado");
     const conn = await pool.getConnection();
     try {
@@ -115,7 +140,7 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
     }
   }
 
-  function mapRow(r: any): AuditEntry {
+  function mapRow(r: DbRow): AuditEntry {
     let detalhes: Record<string, unknown> | undefined;
     if (r.detalhes) {
       try {
@@ -127,12 +152,12 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
     return {
       id: String(r.id),
       usuarioId: r.usuario_id === null || r.usuario_id === undefined ? null : Number(r.usuario_id),
-      usuarioNome: r.usuario_nome,
-      acao: r.acao,
-      alvo: r.alvo ?? undefined,
+      usuarioNome: r.usuario_nome as string,
+      acao: r.acao as AuditEntry["acao"],
+      alvo: (r.alvo as string | null | undefined) ?? undefined,
       detalhes,
       sucesso: Boolean(r.sucesso),
-      ip: r.ip ?? undefined,
+      ip: (r.ip as string | null | undefined) ?? undefined,
       criadoEm: String(r.criado_em),
     };
   }
@@ -221,7 +246,7 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
       if (pool) {
         try {
           const where: string[] = [];
-          const values: any[] = [];
+          const values: unknown[] = [];
           if (q.before && /^\d+$/.test(q.before)) {
             where.push("id < ?");
             values.push(Number(q.before));
@@ -239,7 +264,7 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
             const like = `%${q.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
             values.push(like, like, like);
           }
-          const rows = await query<any>(
+          const rows = await query(
             `SELECT id, usuario_id, usuario_nome, acao, alvo, detalhes, sucesso, ip,
                     DATE_FORMAT(criado_em, '%Y-%m-%dT%H:%i:%sZ') AS criado_em
              FROM auditoria_acoes
@@ -248,9 +273,26 @@ export function createAuditService(config: Config, pool: Pool | undefined): Audi
             [...values, limit],
           );
           return rows.map(mapRow);
-        } catch {}
+        } catch (err) {
+          logWarn("audit_db_query_failed", err);
+        }
       }
       return memory.filter((e) => matchesMemory(e, q)).slice(0, limit);
+    },
+
+    async somarDetalhe(acao, campo, periodo) {
+      if (pool) {
+        const f = periodoSql("criado_em", periodo);
+        const [row] = await query<{ total: number | bigint | string | null }>(
+          `SELECT COALESCE(SUM(CAST(JSON_VALUE(detalhes, ?) AS UNSIGNED)), 0) AS total
+             FROM auditoria_acoes WHERE ${["acao = ?", "detalhes IS NOT NULL", "JSON_VALID(detalhes)", ...f.where].join(" AND ")}`,
+          [`$.${campo}`, acao, ...f.values],
+        );
+        return Number(row?.total ?? 0);
+      }
+      return memory
+        .filter((e) => e.acao === acao && noPeriodo(e.criadoEm, periodo))
+        .reduce((soma, e) => soma + (Number.isFinite(Number(e.detalhes?.[campo])) ? Number(e.detalhes?.[campo]) : 0), 0);
     },
   };
 }

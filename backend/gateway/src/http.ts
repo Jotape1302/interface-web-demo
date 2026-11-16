@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AuthService, User } from "./auth.js";
 import { PublicError } from "./errors.js";
+import { CircuitBreakerOpenError } from "./circuit-breaker.js";
 
 export type Session = {
   user: User;
@@ -46,7 +47,8 @@ export function isAllowedOrigin(origin: string, allowedOrigins: string[]): boole
 /** Limite do corpo JSON (GW-06), contado em bytes. */
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
-const PARSED_BODY = Symbol("norvia.parsedJsonBody");
+/** Corpo já lido e validado por `preparseJsonBody`, por requisição. */
+const parsedBodies = new WeakMap<IncomingMessage, { value: unknown }>();
 
 export function isJsonContentType(contentType: string | undefined): boolean {
   if (!contentType) return false;
@@ -92,15 +94,34 @@ export async function preparseJsonBody(request: IncomingMessage): Promise<void> 
   if (raw.trim() && !isJsonContentType(request.headers["content-type"])) {
     throw new PublicError(415, "Content-Type deve ser application/json.", "unsupported_media_type");
   }
-  (request as any)[PARSED_BODY] = { value: parseRaw(raw) };
+  parsedBodies.set(request, { value: parseRaw(raw) });
 }
 
-export async function parseJsonBody<T = any>(request: IncomingMessage): Promise<T> {
-  const stash = (request as any)[PARSED_BODY] as { value: unknown } | undefined;
+/** Corpo já lido pela pré-leitura (undefined se não houve, ex.: upload multipart). */
+export function corpoPreLido(request: IncomingMessage): unknown {
+  return parsedBodies.get(request)?.value;
+}
+
+export async function parseJsonBody<T = unknown>(request: IncomingMessage): Promise<T> {
+  const stash = parsedBodies.get(request);
   if (stash) return stash.value as T;
   // Sem pré-leitura (handlers chamados direto em testes): mesmo limite de tamanho.
   const raw = (await readBodyLimited(request)).toString("utf-8");
   return parseRaw<T>(raw);
+}
+
+export type JsonObject = Record<string, unknown>;
+
+/**
+ * Corpo JSON vindo do cliente (ou de uma automação) para ler campos: o que não for objeto
+ * (null, array, número) vira `{}`, e cada campo segue `unknown` até a rota validar.
+ */
+export function asJsonObject(value: unknown): JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
+}
+
+export async function parseJsonObject(request: IncomingMessage): Promise<JsonObject> {
+  return asJsonObject(await parseJsonBody(request));
 }
 
 export function extractToken(request: IncomingMessage): string | null {
@@ -169,6 +190,13 @@ export function sendError(ctx: RequestContext, e: unknown, fallback = "Erro inte
       error: e.message,
       ...(e.code ? { code: e.code } : {}),
       ...(e.extra ?? {}),
+      requestId: ctx.requestId,
+    });
+  }
+  if (e instanceof CircuitBreakerOpenError) {
+    return ctx.send(503, {
+      error: "Automação temporariamente indisponível: circuito aberto. Tente novamente em instantes.",
+      code: "circuit_open",
       requestId: ctx.requestId,
     });
   }

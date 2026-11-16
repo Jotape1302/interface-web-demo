@@ -99,14 +99,14 @@ void test("teto do Gestor: fora do teto fica travado (não concede nem revoga)",
 });
 
 void test("diferença e ações de risco concedidas", () => {
-  const d = diffGrants(CAT, ["contas_pagar:ver", "erros:ver"], ["contas_pagar:ver", "revisao_nfe:ver", "revisao_nfe:forcar_varredura"]);
+  const d = diffGrants(CAT, ["contas_pagar:ver", "saude:ver"], ["contas_pagar:ver", "revisao_nfe:ver", "revisao_nfe:forcar_varredura"]);
   assert.deepEqual(d.added, ["revisao_nfe:ver", "revisao_nfe:forcar_varredura"]);
-  assert.deepEqual(d.removed, ["erros:ver"]);
+  assert.deepEqual(d.removed, ["saude:ver"]);
   assert.deepEqual(
     addedRiskActions(CAT, [], ["revisao_nfe:ver", "revisao_nfe:forcar_varredura"]).map((a) => a.key),
     ["revisao_nfe:forcar_varredura"],
   );
-  assert.deepEqual(countGrants(["contas_pagar:ver", "contas_pagar:baixar", "erros:ver"]), { tabs: 2, actions: 1 });
+  assert.deepEqual(countGrants(["contas_pagar:ver", "contas_pagar:baixar", "saude:ver"]), { tabs: 2, actions: 1 });
   assert.equal(hasNoAccess("user", { tabs: 0, actions: 0 }), true);
   assert.equal(hasNoAccess("admin", { tabs: 0, actions: 0 }), false);
 });

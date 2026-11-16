@@ -16,7 +16,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Badge } from "@/components/ui/badge";
 import type { DatePresetKey, DateRangeFilter } from "@/lib/contracts";
 import {
   getPresetRange,
@@ -263,8 +262,8 @@ export function HistoryFilter({
               locale={ptBR}
               numberOfMonths={1}
               captionLayout="dropdown"
-              fromYear={2024}
-              toYear={2027}
+              startMonth={new Date(2024, 0)}
+              endMonth={new Date(2027, 11)}
               className="p-0 select-none"
             />
 

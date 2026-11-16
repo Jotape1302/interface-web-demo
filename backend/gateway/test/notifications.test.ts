@@ -27,7 +27,7 @@ function makeUser(
 // RBAC por usuário: o setor é só rótulo; quem recebe é quem tem a permissão (+ admins).
 const TEST_USERS: User[] = [
   makeUser(1, "TI", "admin"),
-  makeUser(2, "Marketing", "user", "approved", ["contas_pagar:ver", "erros:ver"]),
+  makeUser(2, "Marketing", "user", "approved", ["contas_pagar:ver", "saude:ver"]),
   makeUser(3, "Financeiro", "user", "approved", ["contagem_estoque:ver"]),
   makeUser(4, "Logística", "user", "approved", ["fretes:ver"]),
   makeUser(5, "Diretoria", "user"),
@@ -44,7 +44,7 @@ test("NotificationService: notifyPermission e notifyArea seguem as permissões, 
     listUsers: async () => TEST_USERS,
     onNotify: (id) => notified.push(id),
   });
-  await svc.notifyPermission("erros:ver", { tipo: "t", titulo: "Incidente" });
+  await svc.notifyPermission("saude:ver", { tipo: "t", titulo: "Incidente" });
   assert.deepEqual(notified.sort(), [1, 2]);
   notified.length = 0;
   await svc.notifyPermission("usuarios:aprovar_cadastro", { tipo: "t", titulo: "Cadastro" });

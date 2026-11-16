@@ -1,13 +1,9 @@
 from datetime import date
 from decimal import Decimal
-import pytest
 
 from app.boleto import (
-    BoletoInfo,
     parse_boleto,
     vencimento_do_fator,
-    _linha_bancaria_para_barras,
-    _linha_convenio_para_barras,
 )
 
 

@@ -19,6 +19,7 @@ export interface MlResultadoEmpresa {
   analise_id?: string;
   resumo?: MlResumo;
   baixa?: { sucessos: number; falhas: number; ignorados: number };
+  tarifas?: { lancamentos: number; falhas: number };
 }
 
 export interface MlLinhaLog {
@@ -31,7 +32,7 @@ export interface MlLinhaLog {
 /** Execução da rotina (análise diária/manual) ou de uma baixa, com o log linha a linha. */
 export interface MlExecucao {
   id: string;
-  tipo: 'analise' | 'baixa';
+  tipo: 'analise' | 'baixa' | 'tarifas';
   origem: 'agendada' | 'manual';
   usuario?: string;
   iniciada_em: string;
@@ -88,7 +89,8 @@ export interface MlGrupo {
   id_venda: string;
   id_operacao?: string;
   mlb?: string;
-  data: string; // dd/mm/aaaa
+  data: string; // dd/mm/aaaa da liberação
+  data_venda?: string; // dd/mm/aaaa da venda: a data da baixa no Tiny
   nome_cliente: string;
   valor_total: number;
   quantidade_movimentos: number;
@@ -105,6 +107,10 @@ export interface MlGrupo {
   conta_saldo: number | null;
   conta_valor_pago: number | null;
   baixado_em: string;
+  /** Venda cancelada/devolvida: pedido do Tiny de onde a baixa cria a conta a receber. */
+  pedido_tiny_numero?: string;
+  pedido_tiny_valor?: number | null;
+  pode_baixar?: boolean;
 }
 
 /** Linha da planilha de lançamentos de caixa para importar no Tiny. */
@@ -252,7 +258,91 @@ export interface MlBaixaJob extends MlJobBase {
   resultado: MlBaixaResponse | null;
 }
 
-export type MlJob = MlExecucaoJob | MlBaixaJob;
+/** Linha de tarifa/envio/extra de uma venda baixada que ainda não está no caixa do Tiny. */
+export interface MlTarifaLinha {
+  chave: string;
+  tipo_operacao: string;
+  categoria: string;
+  historico: string;
+  tipo: 'C' | 'D';
+  valor: number;
+  /** Já saiu numa planilha de lançamentos (só aparece com "incluir as da planilha"). */
+  na_planilha: boolean;
+}
+
+export interface MlTarifaVenda {
+  grupo_id: string;
+  id_venda: string;
+  nome_cliente: string;
+  conta_id: number;
+  data_venda: string;
+  data_liberacao: string;
+  baixado_em: string;
+  linhas: MlTarifaLinha[];
+}
+
+export interface MlTarifasPendentes {
+  empresa: string;
+  incluir_exportados: boolean;
+  vendas: MlTarifaVenda[];
+  total_vendas: number;
+  total_linhas: number;
+  /** Vendas baixadas antigas cujas tarifas a próxima execução ainda vai ler do relatório do dia. */
+  vendas_sem_leitura: number;
+  /** Lançados pela API antes do padrão do financeiro (06/11/2026): histórico próprio e contato = cliente. */
+  padrao_antigo?: MlTarifaAntiga[];
+}
+
+export interface MlTarifaAntiga {
+  chave: string;
+  /** Id do lançamento no caixa do Tiny. */
+  id: number;
+  venda: string;
+  /** AAAA-MM-DD */
+  data: string;
+  valor: number;
+  tipo: 'C' | 'D';
+  historico: string;
+}
+
+export interface MlMarcarRefeitos {
+  empresa: string;
+  marcados: number;
+  /** Chaves que não estavam mais no padrão antigo (já marcadas, conferidas ou de outra empresa). */
+  ignorados: number;
+}
+
+export interface MlConferirApagados {
+  empresa: string;
+  conferidos: number;
+  liberados: number;
+  ainda_no_tiny: number;
+  nao_conferidos: number;
+}
+
+export interface MlTarifasResultado {
+  grupo_id: string;
+  id_venda?: string;
+  nome_cliente?: string;
+  conta_id?: number;
+  status: 'sucesso' | 'parcial' | 'erro';
+  mensagem: string;
+}
+
+export interface MlTarifasResponse {
+  status: 'concluido' | 'parcial' | 'erro';
+  total_solicitados: number;
+  total_lancamentos: number;
+  total_falhas: number;
+  resultados: MlTarifasResultado[];
+}
+
+export interface MlTarifasJob extends MlJobBase {
+  tipo: 'ml_lancar_tarifas';
+  resultado: MlTarifasResponse | null;
+}
+
+export type MlJob = MlExecucaoJob | MlBaixaJob | MlTarifasJob;
 
 export type MlArquivoTipo = 'relatorio' | 'lancamentos' | 'vendas-recebimentos' | 'saldo-recebimentos' | 'saldo-total';
 

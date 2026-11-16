@@ -13,6 +13,8 @@ Você é o **Agente Especialista em Automações e RPA**, responsável pela arqu
 
 A esteira de DANFE roda por **varredura NSU direta na SEFAZ** (`sefaz_scan.py`) — o fluxo via pasta do Google Drive foi descontinuado.
 
+**Classificador Qwen da revisão de NF-e (desde 2026-11-03):** o LLM roda no PC do TI (repo privado `agentes-qwen`) e nunca é chamado pela automação. O financeiro só expõe `/api/v1/danfe/qwen/{pendentes,sugestoes,confirmadas-recentes}` (com `X-Internal-Key`), e o coletor da VPS leva e traz pelo gateway. Precedência da categoria na tela (`_sugestao_item`): código > NCM > Qwen alta/média > só fornecedor > Qwen baixa > regra. Forma e meio de pagamento são determinísticos (XML > último lançamento com o fornecedor), sem LLM. Recusa da SEFAZ que não é defeito (cStat 632, 640/137, 656 no `import-key`) é `logger.warning` + 422 explicando: `logger.error` vira incidente no coletor.
+
 ---
 
 ## 2. Stack & Skills

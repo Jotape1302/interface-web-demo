@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   aplicaFiltros,
   carregarFiltrosSession,
-  converterParaDateRange,
   filtrosAtivosCount,
   isFiltroAtivo,
   normalizarDataLinha,
@@ -41,14 +40,14 @@ const DEFS_TESTE: Record<string, ColumnFilterDef<ItemExemplo>> = {
   status: { id: "status", label: "Status", tipo: "lista", accessor: (i) => i.status },
 };
 
-test("normalizarTexto: remove acentos e converte para minúsculas", () => {
+void test("normalizarTexto: remove acentos e converte para minúsculas", () => {
   assert.equal(normalizarTexto("Café com Açúcar"), "cafe com acucar");
   assert.equal(normalizarTexto("  SÃO PAULO  "), "sao paulo");
   assert.equal(normalizarTexto(""), "");
   assert.equal(normalizarTexto(null), "");
 });
 
-test("parseNumeroBR: converte números e strings em formato brasileiro", () => {
+void test("parseNumeroBR: converte números e strings em formato brasileiro", () => {
   assert.equal(parseNumeroBR(1500.5), 1500.5);
   assert.equal(parseNumeroBR("1.234,56"), 1234.56);
   assert.equal(parseNumeroBR("1234,56"), 1234.56);
@@ -59,14 +58,14 @@ test("parseNumeroBR: converte números e strings em formato brasileiro", () => {
   assert.equal(parseNumeroBR(null), null);
 });
 
-test("normalizarDataLinha: converte formato brasileiro e ISO para meio-dia Brasília", () => {
+void test("normalizarDataLinha: converte formato brasileiro e ISO para meio-dia Brasília", () => {
   assert.equal(normalizarDataLinha("10/10/2026"), "2026-10-10T12:00:00-03:00");
   assert.equal(normalizarDataLinha("2026-10-12"), "2026-10-12T12:00:00-03:00");
   assert.equal(normalizarDataLinha(""), null);
   assert.equal(normalizarDataLinha(null), null);
 });
 
-test("aplicaFiltros: tipo texto insensível a maiúsculas e acentos", () => {
+void test("aplicaFiltros: tipo texto insensível a maiúsculas e acentos", () => {
   // Busca "cafe" acha "Café Especial & Grãos"
   const res1 = aplicaFiltros(ITENS_TESTE, { nome: "cafe" }, DEFS_TESTE);
   assert.equal(res1.length, 1);
@@ -82,7 +81,7 @@ test("aplicaFiltros: tipo texto insensível a maiúsculas e acentos", () => {
   assert.equal(res3.length, 0);
 });
 
-test("aplicaFiltros: tipo lista seleciona valores correspondentes", () => {
+void test("aplicaFiltros: tipo lista seleciona valores correspondentes", () => {
   const res1 = aplicaFiltros(ITENS_TESTE, { empresa: ["Norvia"] }, DEFS_TESTE);
   assert.equal(res1.length, 2);
   assert.deepEqual(res1.map((i) => i.id), ["1", "3"]);
@@ -92,7 +91,7 @@ test("aplicaFiltros: tipo lista seleciona valores correspondentes", () => {
   assert.deepEqual(res2.map((i) => i.id), ["2", "4"]);
 });
 
-test("aplicaFiltros: tipo numero suporta =, >=, <= e entre", () => {
+void test("aplicaFiltros: tipo numero suporta =, >=, <= e entre", () => {
   // Operador =
   const resIgual = aplicaFiltros(ITENS_TESTE, { valor: { op: "=", val: 250 } }, DEFS_TESTE);
   assert.equal(resIgual.length, 1);
@@ -114,7 +113,7 @@ test("aplicaFiltros: tipo numero suporta =, >=, <= e entre", () => {
   assert.deepEqual(resEntre.map((i) => i.id), ["1", "2"]);
 });
 
-test("aplicaFiltros: tipo data com intervalo de e ate", () => {
+void test("aplicaFiltros: tipo data com intervalo de e ate", () => {
   const res = aplicaFiltros(
     ITENS_TESTE,
     { data: { de: "2026-10-10", ate: "2026-10-11" } },
@@ -124,7 +123,7 @@ test("aplicaFiltros: tipo data com intervalo de e ate", () => {
   assert.deepEqual(res.map((i) => i.id), ["1", "2"]);
 });
 
-test("aplicaFiltros: combina múltiplos filtros de coluna simultaneamente", () => {
+void test("aplicaFiltros: combina múltiplos filtros de coluna simultaneamente", () => {
   const filtros: ColumnFiltersState = {
     empresa: ["Norvia"],
     valor: { op: ">=", val: 2000 },
@@ -134,12 +133,12 @@ test("aplicaFiltros: combina múltiplos filtros de coluna simultaneamente", () =
   assert.equal(res[0].id, "3");
 });
 
-test("obterValoresUnicos: extrai valores ordenados e sem duplicatas", () => {
+void test("obterValoresUnicos: extrai valores ordenados e sem duplicatas", () => {
   const empresas = obterValoresUnicos(ITENS_TESTE, (i) => i.empresa);
   assert.deepEqual(empresas, ["Norvia", "Revesta"]);
 });
 
-test("filtrosAtivosCount e isFiltroAtivo", () => {
+void test("filtrosAtivosCount e isFiltroAtivo", () => {
   assert.equal(isFiltroAtivo("", "texto"), false);
   assert.equal(isFiltroAtivo("abc", "texto"), true);
   assert.equal(isFiltroAtivo([], "lista"), false);
@@ -157,14 +156,14 @@ test("filtrosAtivosCount e isFiltroAtivo", () => {
   assert.equal(filtrosAtivosCount(filtros, DEFS_TESTE), 2);
 });
 
-test("salvarFiltrosSession e carregarFiltrosSession: trata ausência de storage sem estourar", () => {
+void test("salvarFiltrosSession e carregarFiltrosSession: trata ausência de storage sem estourar", () => {
   // No ambiente Node sem window, deve rodar sem erros
   salvarFiltrosSession("teste", "aba1", { nome: "filtro" });
   const carregado = carregarFiltrosSession("teste", "aba1", { padrao: "abc" });
   assert.deepEqual(carregado, { padrao: "abc" });
 });
 
-test("parseNumeroBR: ponto só de milhar vale mil, e aceita R$", () => {
+void test("parseNumeroBR: ponto só de milhar vale mil, e aceita R$", () => {
   assert.equal(parseNumeroBR("1.500"), 1500);
   assert.equal(parseNumeroBR("12.345.678"), 12345678);
   assert.equal(parseNumeroBR("R$ 1.500,00"), 1500);
@@ -172,7 +171,7 @@ test("parseNumeroBR: ponto só de milhar vale mil, e aceita R$", () => {
   assert.equal(parseNumeroBR("1.5"), 1.5);
 });
 
-test("textoCombina: termo numérico compara só os dígitos (CNPJ, documento)", () => {
+void test("textoCombina: termo numérico compara só os dígitos (CNPJ, documento)", () => {
   assert.equal(textoCombina("12345678000190", "ACME LTDA 12.345.678/0001-90"), true);
   assert.equal(textoCombina("12.345.678/0001-90", "ACME 12345678000190"), true);
   assert.equal(textoCombina("acme", "Ácme Ltda"), true);
@@ -180,6 +179,6 @@ test("textoCombina: termo numérico compara só os dígitos (CNPJ, documento)", 
   assert.equal(textoCombina("", "qualquer"), true);
 });
 
-test("contarValores: conta linhas por valor e ignora vazios", () => {
+void test("contarValores: conta linhas por valor e ignora vazios", () => {
   assert.deepEqual(contarValores([{ v: "a" }, { v: "b" }, { v: "a" }, { v: "" }, { v: null }], (i) => i.v), { a: 2, b: 1 });
 });

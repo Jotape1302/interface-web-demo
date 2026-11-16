@@ -1,0 +1,15 @@
+# Orquestrador dos agentes Qwen: receptor (127.0.0.1:8790) + trabalhador.
+# Unidade de USUÁRIO no PC do TI (systemctl --user). Usa o venv do RAGs (torch/CUDA já instalados).
+[Unit]
+Description=Agentes Qwen - orquestrador de incidentes do interface-web
+After=network-online.target ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documentos/projetos/agentes-qwen
+ExecStart=%h/Documentos/projetos/RAGs/.venv/bin/python -m agentes servir
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

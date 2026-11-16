@@ -1,0 +1,16 @@
+# Túnel SSH reverso PC → VPS: na VPS, 127.0.0.1:8790 passa a chegar no orquestrador deste PC.
+# A conexão sai do PC; nenhuma porta é aberta aqui e o Ollama (11434) não é encaminhado.
+# "vps-norvia" é um Host do ~/.ssh/config com a chave dedicada (ver README, "Túnel").
+[Unit]
+Description=Agentes Qwen - túnel SSH reverso até a VPS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -R 127.0.0.1:8790:127.0.0.1:8790 vps-norvia
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=default.target

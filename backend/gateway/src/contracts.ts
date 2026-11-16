@@ -2,8 +2,9 @@ export interface Metrics {
   totalQueue: number;
   paidCount: number;
   reconciledCount: number;
-  hoursSaved: number;
-  estimatedSavings: number;
+  /** Ausentes para quem não tem `roi:ver` (cortados no servidor). */
+  hoursSaved?: number;
+  estimatedSavings?: number;
   automationRate: number | null;
 }
 export interface Account {
@@ -98,6 +99,10 @@ export interface DanfeData {
   meio_pagamento_nfe: string | null;
   /** Marcador de caixa/cartão lido do nome do arquivo ("Cartão Clara", "Caixa Visa"...). */
   marcador_caixa?: string | null;
+  /** Bandeira do cartão no XML (detPag/card/tBand: 01 Visa, 02 Mastercard, 06 Elo...). */
+  bandeira_cartao_nfe?: string | null;
+  /** Parcelas declaradas no XML da NF-e (cobr/dup); a revisão pré-seleciona. */
+  parcelas_nfe?: number | null;
 }
 
 export interface DanfeTinyResult {
@@ -119,8 +124,17 @@ export interface DanfeReviewItem {
   valor_unitario: number | null;
   categoria_sugerida_id: string;
   categoria_sugerida_nome: string;
-  /** "historico": veio das notas anteriores do mesmo fornecedor; "regra": descrição/NCM. */
-  categoria_sugerida_origem?: "historico" | "regra";
+  /**
+   * "historico": notas anteriores do mesmo fornecedor; "qwen": classificador local no PC do TI;
+   * "regra": descrição/NCM. Precedência: histórico por código > por NCM > Qwen alta/média >
+   * histórico só do fornecedor > Qwen baixa > regra.
+   */
+  categoria_sugerida_origem?: "historico" | "qwen" | "regra";
+  /** Só com origem "historico": o que casou (mesmo código, mesmo NCM ou só o fornecedor). */
+  categoria_sugerida_nivel?: "codigo" | "ncm" | "fornecedor" | null;
+  /** Só com origem "qwen". */
+  categoria_sugerida_confianca?: "alta" | "media" | "baixa" | null;
+  categoria_sugerida_motivo?: string | null;
 }
 
 export interface DanfeItemResult {
@@ -150,11 +164,54 @@ export interface DanfePendingReviewEntry {
   staged_at: string;
   nfe_data: DanfeData;
   itens: DanfeReviewItem[];
+  /**
+   * Só nas pendentes: forma de pagamento que o XML crava (tPag/tBand) ou, sem isso, a última
+   * confirmada com o fornecedor. null: vale a regra do painel (marcador do arquivo, padrão da empresa).
+   */
+  forma_pagamento_sugerida?: string | null;
+  forma_pagamento_origem?: "xml" | "historico" | null;
+  /** Só nas pendentes: último "Meio de pagamento da NFe" (tPag) lançado com o fornecedor. */
+  meio_pagamento_nfe_historico?: string | null;
+  /** Última recusa do Tiny ao confirmar (a nota segue pendente); null depois de lançar. */
+  last_error?: string | null;
+  last_error_at?: string | null;
 }
 
 export interface DanfePendingReviewResponse {
   total: number;
   pending: DanfePendingReviewEntry[];
+}
+
+/**
+ * Item de GET /api/v1/danfe/history: o `.meta.json` de uma nota processada (sucesso) ou o
+ * registro de uma falha. O meta.json mudou de formato ao longo do tempo (ex.: `emitente` já foi
+ * texto e objeto), então só os campos que o gateway lê têm tipo; o resto segue como veio.
+ */
+export interface DanfeHistoryItem {
+  audit_status: "success" | "error";
+  processed_at?: string;
+  chave_acesso?: string;
+  error_file?: string;
+  resolved_at?: string | null;
+  original_filename?: string;
+  metodo_leitura?: string;
+  /** Texto do erro (falhas). */
+  details?: string;
+  /** Nos meta.json atuais é objeto; nos antigos, texto (aí razao_social/cnpj ficam undefined). */
+  emitente?: { razao_social?: string; cnpj?: string };
+  valor_total?: number | string;
+  [campo: string]: unknown;
+}
+
+export interface DanfeHistoryResponse {
+  total: number;
+  history: DanfeHistoryItem[];
+}
+
+export interface DanfeImportKeyResponse {
+  status: string;
+  message: string;
+  chave: string;
 }
 
 export type DanfeNotaStatus = "pending" | "confirmed" | "archived";
@@ -187,6 +244,8 @@ export interface ConfirmLancamentoResponse {
   chave: string;
   status: "success" | "partial_error";
   grupos: GroupedLancamentoResult[];
+  /** Nota como a revisão mostrou + sugestão por item: o send do gateway tira (atividades.ts) e o painel não recebe. */
+  treino?: { contexto?: unknown; sugestao?: unknown };
 }
 
 export interface DanfeBatchResponse {
@@ -383,3 +442,90 @@ export interface MlTokenSyncResponse {
   tokens_atualizados: string[];
 }
 
+
+/**
+ * Tarefa longa da automação financeira (GET .../jobs/{id}): espelho de `_job_publico` em
+ * backend/automations/automacoes-financeiro/app/routers/jobs.py. `resultado` depende do tipo
+ * (prévia, baixa Inter, baixa ML) e chega como JSON solto.
+ */
+export interface AutomationJob {
+  job_id?: string;
+  tipo?: string;
+  status: "executando" | "concluido" | "erro";
+  etapa?: string;
+  atual?: number;
+  total?: number;
+  iniciado_em?: string;
+  concluido_em?: string | null;
+  resultado?: unknown;
+  erro?: string | null;
+}
+
+export interface RoiAutomacao {
+  id: string;
+  titulo: string;
+  unidade: string;
+  /** Itens contados na fonte; null quando a fonte falhou. */
+  itens: number | null;
+  minutosManual: number;
+  minutosAtual: number;
+  tarefaManual: string;
+  tarefaAtual: string;
+  horasEconomizadas: number | null;
+  reais: number | null;
+  fonte: { status: "ok" | "erro"; mensagem?: string };
+  observacao: string | null;
+}
+/** Período do ROI (dias de São Paulo, inclusivos); null/null = desde o início. */
+export interface RoiPeriodo {
+  de: string | null;
+  ate: string | null;
+}
+export interface RoiResponse {
+  mode: Dashboard["mode"];
+  periodo: RoiPeriodo;
+  generatedAt: string;
+  valorHora: number;
+  automacoes: RoiAutomacao[];
+  /** Soma só das fontes ok; `parcial` = alguma fonte falhou. */
+  totais: { horasEconomizadas: number; reais: number; parcial: boolean };
+  /** Automações que ficam fora da conta, com o motivo. */
+  naoMedidas: Array<{ id: string; titulo: string; motivo: string }>;
+}
+
+// ---- Visão geral por área (GET /api/areas/{area}/visao-geral). Espelho: frontend/lib/area-overview-contracts.ts
+export type AreaVisaoGeralId = "financeiro" | "logistica" | "marketplace" | "producao";
+export type Severidade = "critica" | "atencao" | "info";
+export interface AcaoPendente {
+  id: string;
+  automacao: string;
+  titulo: string;
+  descricao: string;
+  quantidade: number | null;
+  severidade: Severidade;
+  href: string;
+  acao: string;
+  desde: string | null;
+}
+export interface AutomacaoResumo {
+  id: string;
+  titulo: string;
+  href: string;
+  status: "ok" | "atencao" | "erro" | "sem_dados";
+  ultimaExecucao: string | null;
+  indicadores: { rotulo: string; valor: string }[];
+}
+export interface ServicoStatus {
+  id: string;
+  nome: string;
+  conectado: boolean;
+  mensagem: string;
+}
+export interface VisaoGeralArea {
+  area: AreaVisaoGeralId;
+  geradoEm: string;
+  acoesPendentes: AcaoPendente[];
+  automacoes: AutomacaoResumo[];
+  servicos: ServicoStatus[];
+  indisponiveis: { fonte: string; mensagem: string }[];
+}

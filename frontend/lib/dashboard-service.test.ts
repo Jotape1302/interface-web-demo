@@ -7,15 +7,15 @@ import { automationStatus } from "./automations";
 const timestamp = "2026-09-08T12:30:00Z";
 const liveFixture = () => ({ ...makeDemoDashboard(timestamp), mode: "live" as const });
 
-test("demonstration preserves independent accumulated metrics and complete approval/failure lists", async () => {
+void test("demonstration preserves independent accumulated metrics and complete approval/failure lists", async () => {
   const result = await new MockDashboardService().getDashboard();
   assert.equal(result.mode, "demo");
   assert.deepEqual(result.metrics, {
     totalQueue: 1280,
     paidCount: 1092,
     reconciledCount: 1184,
-    hoursSaved: 91,
-    estimatedSavings: 1001,
+    hoursSaved: 81.9,
+    estimatedSavings: 900.9,
     automationRate: 92.5,
   });
   assert.equal(result.approvals?.length, 12);
@@ -24,7 +24,7 @@ test("demonstration preserves independent accumulated metrics and complete appro
   assert.ok(result.approvals?.every((account) => account.beneficiary.includes("(fictício)")));
 });
 
-test("live request uses relative endpoint, same-origin credentials, no cache and signal", async () => {
+void test("live request uses relative endpoint, same-origin credentials, no cache and signal", async () => {
   const fetcher: typeof fetch = async (input, init) => {
     assert.equal(input, "/api/accounts-payable/dashboard");
     assert.equal(init?.credentials, "same-origin");
@@ -36,7 +36,7 @@ test("live request uses relative endpoint, same-origin credentials, no cache and
   assert.equal(result.mode, "live");
 });
 
-test("live request strips trailing base slash and surfaces authorization failure without demo fallback", async () => {
+void test("live request strips trailing base slash and surfaces authorization failure without demo fallback", async () => {
   const fetcher: typeof fetch = async (input) => {
     assert.equal(input, "https://api.example.test/api/accounts-payable/dashboard");
     return new Response(null, { status: 401 });
@@ -47,7 +47,7 @@ test("live request strips trailing base slash and surfaces authorization failure
   );
 });
 
-test("live mode refuses a demonstration response", async () => {
+void test("live mode refuses a demonstration response", async () => {
   const fetcher: typeof fetch = async () => Response.json(makeDemoDashboard(timestamp));
   await assert.rejects(
     new HttpDashboardService("", fetcher).getDashboard(),
@@ -55,14 +55,14 @@ test("live mode refuses a demonstration response", async () => {
   );
 });
 
-test("network failure remains an error and does not return a fixture", async () => {
+void test("network failure remains an error and does not return a fixture", async () => {
   const fetcher: typeof fetch = async () => {
     throw new Error("Network unavailable");
   };
   await assert.rejects(new HttpDashboardService("", fetcher).getDashboard(), /Network unavailable/);
 });
 
-test("abort is honored in demo and passed through the HTTP boundary", async () => {
+void test("abort is honored in demo and passed through the HTTP boundary", async () => {
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(new MockDashboardService().getDashboard(controller.signal), {
@@ -77,17 +77,17 @@ test("abort is honored in demo and passed through the HTTP boundary", async () =
   });
 });
 
-test("n8n outage preserves business data as a partial result", () => {
+void test("n8n outage preserves business data as a partial result", () => {
   const data = liveFixture();
   data.executions = null;
   data.sources.n8n = { status: "error", message: "n8n indisponível" };
   const parsed = parseDashboard(data);
-  assert.equal(parsed.metrics?.hoursSaved, 91);
+  assert.equal(parsed.metrics?.hoursSaved, 81.9);
   assert.equal(parsed.executions, null);
   assert.equal(automationStatus(parsed, false, false), "Falha de conexão");
 });
 
-test("database outage is distinct from an empty database", () => {
+void test("database outage is distinct from an empty database", () => {
   const unavailable = liveFixture();
   unavailable.metrics = null;
   unavailable.approvals = null;
@@ -108,7 +108,7 @@ test("database outage is distinct from an empty database", () => {
   assert.equal(parseDashboard(empty).metrics?.automationRate, null);
 });
 
-test("invalid and contradictory contracts are rejected", () => {
+void test("invalid and contradictory contracts are rejected", () => {
   const cases = [
     null,
     {},
@@ -122,7 +122,7 @@ test("invalid and contradictory contracts are rejected", () => {
   for (const value of cases) assert.throws(() => parseDashboard(value), /incompatíveis/);
 });
 
-test("dates are validated while MariaDB updatedAt and decimal strings preserve transport semantics", () => {
+void test("dates are validated while MariaDB updatedAt and decimal strings preserve transport semantics", () => {
   const data = liveFixture();
   data.approvals![0].updatedAt = "2026-09-08 09:30:00";
   data.approvals![0].amount = "-10.125";
@@ -131,7 +131,7 @@ test("dates are validated while MariaDB updatedAt and decimal strings preserve t
   assert.throws(() => parseDashboard(data), /incompatíveis/);
 });
 
-test("overall attention reflects failed technical executions as well as business pending work", () => {
+void test("overall attention reflects failed technical executions as well as business pending work", () => {
   const data = liveFixture();
   data.approvals = [];
   data.failures = [];
@@ -139,4 +139,20 @@ test("overall attention reflects failed technical executions as well as business
   data.executions = data.executions!.filter((execution) => execution.status !== "error");
   assert.equal(automationStatus(data, false, false), "Operacional");
   assert.equal(automationStatus(data, false, true), "Falha de conexão");
+});
+
+void test("métricas sem horas/R$ (usuário sem roi:ver) continuam válidas", () => {
+  const data = liveFixture();
+  const { hoursSaved: _h, estimatedSavings: _e, ...semRoi } = data.metrics!;
+  data.metrics = semRoi;
+  const parsed = parseDashboard(data);
+  assert.equal(parsed.metrics?.hoursSaved, undefined);
+  assert.equal(parsed.metrics?.estimatedSavings, undefined);
+  assert.equal(parsed.metrics?.paidCount, 1092);
+});
+
+void test("horas/R$ presentes mas inválidos continuam rejeitados", () => {
+  const data = liveFixture();
+  data.metrics = { ...data.metrics!, hoursSaved: -1 };
+  assert.throws(() => parseDashboard(data));
 });

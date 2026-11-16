@@ -55,7 +55,7 @@ export default function Approvals({
         loading ? (
           <div className="table-loading">Carregando contas…</div>
         ) : (
-          <SourceError message={error} />
+          <SourceError message={error} reportar={{ automationId: "accounts-payable", executionId: "painel" }} />
         )
       ) : accounts.length === 0 ? (
         <Empty>Nenhuma conta aguardando aprovação.</Empty>

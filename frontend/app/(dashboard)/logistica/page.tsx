@@ -1,7 +1,7 @@
 'use client';
 
-import AreaOverviewLogistica from "../../components/area-overview-logistica";
+import AreaOverview from "../../components/area-overview";
 
 export default function LogisticaOverviewPage() {
-  return <AreaOverviewLogistica />;
+  return <AreaOverview area="logistica" />;
 }

@@ -1,7 +1,7 @@
 import type { Config } from "../config.js";
 import { normalizeTokenWorkflowId } from "../config.js";
 import type { AuditService } from "../audit.js";
-import { parseJsonBody, type RequestContext } from "../http.js";
+import { type RequestContext, asJsonObject, parseJsonObject, type JsonObject } from "../http.js";
 
 // Painel do workflow n8n de renovação de tokens OAuth do Tiny (/api/admin/token-automation*).
 // Só é chamado de dentro de routes/admin.ts, depois da checagem de admin. Sem n8n
@@ -35,11 +35,12 @@ export function createTokenAutomationRoutes(config: Config, audit?: AuditService
             signal: AbortSignal.timeout(config.timeoutMs),
           });
           if (n8nRes.ok) {
-            const n8nData = (await n8nRes.json()) as { data?: any[] };
-            if (Array.isArray(n8nData?.data)) {
-              const mapped = n8nData.data.map((item: any) => {
-                const started = item.startedAt ? new Date(item.startedAt).toISOString() : new Date().toISOString();
-                const stopped = item.stoppedAt ? new Date(item.stoppedAt).toISOString() : null;
+            const n8nData = asJsonObject(await n8nRes.json());
+            if (Array.isArray(n8nData.data)) {
+              const mapped = n8nData.data.map((execucao: unknown) => {
+                const item = asJsonObject(execucao);
+                const started = item.startedAt ? new Date(item.startedAt as string).toISOString() : new Date().toISOString();
+                const stopped = item.stoppedAt ? new Date(item.stoppedAt as string).toISOString() : null;
                 const dur = started && stopped ? Date.parse(stopped) - Date.parse(started) : null;
                 const isSucc = item.status === "success";
                 return {
@@ -156,11 +157,8 @@ export function createTokenAutomationRoutes(config: Config, audit?: AuditService
     }
 
     if (path === "/api/admin/token-automation/execute" && method === "POST") {
-      let bodyObj: any = {};
-      try {
-        bodyObj = await parseJsonBody(request).catch(() => ({}));
-      } catch {}
-      const rawWf = typeof bodyObj?.workflowId === "string" ? bodyObj.workflowId : "";
+      const bodyObj = await parseJsonObject(request).catch((): JsonObject => ({}));
+      const rawWf = typeof bodyObj.workflowId === "string" ? bodyObj.workflowId : "";
       const targetWfId = normalizeTokenWorkflowId(rawWf || config.n8n.tokenWorkflowId);
       if (!WORKFLOW_ID_RE.test(targetWfId)) return send(400, { error: "workflowId inválido." });
       const registrar = (sucesso: boolean, extra?: Record<string, unknown>) =>
@@ -191,11 +189,11 @@ export function createTokenAutomationRoutes(config: Config, audit?: AuditService
             body: JSON.stringify({ destination: "manual_trigger" }),
           });
           if (runRes.ok) {
-            const runData = (await runRes.json().catch(() => ({}))) as any;
+            const runData = asJsonObject(await runRes.json().catch(() => ({})));
             registrar(true);
             return send(200, {
               success: true,
-              executionId: runData?.data?.executionId ?? null,
+              executionId: asJsonObject(runData.data).executionId ?? null,
               message: `Workflow ${targetWfId} disparado com sucesso no n8n!`,
             });
           }

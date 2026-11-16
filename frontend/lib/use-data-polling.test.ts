@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DataPoller, type RealtimeEvent } from './use-data-polling';
 
-test('DataPoller: executa fetch inicial e agenda intervalo periódico', async () => {
+void test('DataPoller: executa fetch inicial e agenda intervalo periódico', async () => {
   let fetchCount = 0;
   let intervalCallback: (() => void) | null = null;
 
@@ -39,7 +39,7 @@ test('DataPoller: executa fetch inicial e agenda intervalo periódico', async ()
   assert.equal(poller.isIntervalActive(), false, 'Temporizador deve ser limpo ao destruir');
 });
 
-test('DataPoller: propaga AbortSignal e aborta requisição em voo no destroy()', async () => {
+void test('DataPoller: propaga AbortSignal e aborta requisição em voo no destroy()', async () => {
   let signalReceived: AbortSignal | null = null;
   let errorReported: unknown = null;
 
@@ -71,7 +71,7 @@ test('DataPoller: propaga AbortSignal e aborta requisição em voo no destroy()'
   assert.equal(errorReported, null, 'AbortError não deve disparar onError');
 });
 
-test('DataPoller: refresh() cancela requisição anterior antes de iniciar a nova', async () => {
+void test('DataPoller: refresh() cancela requisição anterior antes de iniciar a nova', async () => {
   const signals: AbortSignal[] = [];
 
   const poller = new DataPoller<string>({
@@ -100,7 +100,7 @@ test('DataPoller: refresh() cancela requisição anterior antes de iniciar a nov
   await refreshPromise.catch(() => {});
 });
 
-test('DataPoller: pausa polling quando a aba fica oculta e retoma ao reativar', async () => {
+void test('DataPoller: pausa polling quando a aba fica oculta e retoma ao reativar', async () => {
   let currentVisibility: 'visible' | 'hidden' = 'visible';
   let visibilityListener: (() => void) | null = null;
   let fetchCount = 0;
@@ -159,7 +159,7 @@ test('DataPoller: pausa polling quando a aba fica oculta e retoma ao reativar', 
   poller.destroy();
 });
 
-test('DataPoller: eventos SSE em tempo real disparam re-fetch imediato', async () => {
+void test('DataPoller: eventos SSE em tempo real disparam re-fetch imediato', async () => {
   let fetchCount = 0;
   let realtimeListener: (() => void) | null = null;
   let subscribedTypes: RealtimeEvent[] = [];
@@ -197,7 +197,7 @@ test('DataPoller: eventos SSE em tempo real disparam re-fetch imediato', async (
   assert.equal(realtimeListener, null, 'Deve cancelar inscrição SSE ao destruir');
 });
 
-test('DataPoller: pula polling por intervalo quando skipWhenRealtimeConnected=true e SSE está conectado', async () => {
+void test('DataPoller: pula polling por intervalo quando skipWhenRealtimeConnected=true e SSE está conectado', async () => {
   let fetchCount = 0;
   let intervalCb: (() => void) | null = null;
   let sseConnected = true;
@@ -236,7 +236,7 @@ test('DataPoller: pula polling por intervalo quando skipWhenRealtimeConnected=tr
   poller.destroy();
 });
 
-test('DataPoller: respeita enabled=false', async () => {
+void test('DataPoller: respeita enabled=false', async () => {
   let fetchCount = 0;
 
   const poller = new DataPoller<string>({
@@ -258,7 +258,7 @@ test('DataPoller: respeita enabled=false', async () => {
   poller.destroy();
 });
 
-test('DataPoller: falha de rede chama onError e não encerra o ciclo de polling', async () => {
+void test('DataPoller: falha de rede chama onError e não encerra o ciclo de polling', async () => {
   let attempts = 0;
   let lastError: unknown = null;
   let intervalCb: (() => void) | null = null;

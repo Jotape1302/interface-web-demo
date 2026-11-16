@@ -17,6 +17,7 @@ import defusedxml.ElementTree as ET
 from xml.etree.ElementTree import Element
 import requests
 
+from app.fuso import hoje_sp
 from app.config import Settings, settings
 from app.nfe_items import NFeItem, extract_items_from_xml
 
@@ -52,8 +53,38 @@ COMPANY_UF_BY_CNPJ: Dict[str, str] = {
 
 
 class NFeProviderError(Exception):
-    """Exceção levantada quando ocorre falha na obtenção dos dados fiscais da NF-e."""
-    pass
+    """
+    Exceção levantada quando ocorre falha na obtenção dos dados fiscais da NF-e. `c_stat` traz o
+    código da SEFAZ quando houve um: quem trata um código específico olha aqui, nunca o texto da
+    mensagem (que pode conter a chave de 44 dígitos e casar com "632", "618"...).
+    """
+
+    def __init__(self, mensagem: str = "", c_stat: Optional[str] = None) -> None:
+        super().__init__(mensagem)
+        self.c_stat = c_stat
+
+
+# Respostas da consulta por chave que só dizem "esta nota não é deste CNPJ": 137 (nenhum documento
+# para o interessado) e 640 (interessado sem permissão — não é emitente, destinatário nem autorizado).
+CSTAT_NAO_E_DESTE_CNPJ = ("137", "640")
+
+
+class NFeNaoDestinadaError(NFeProviderError):
+    """Todos os CNPJs do grupo responderam que a nota não é deles (CSTAT_NAO_E_DESTE_CNPJ)."""
+
+    def __init__(self, mensagem: str, c_stat: Optional[str], cnpjs: List[str]) -> None:
+        super().__init__(mensagem, c_stat)
+        self.cnpjs = cnpjs
+
+
+def nome_curto_empresa(cnpj: Optional[str]) -> str:
+    """"Revesta", "Norvia Campinas"... a partir de COMPANY_DISPLAY_NAME_BY_CNPJ; sem nome, o CNPJ."""
+    nome = COMPANY_DISPLAY_NAME_BY_CNPJ.get(cnpj or "")
+    if not nome:
+        return cnpj or "CNPJ não informado"
+    filial = re.search(r"\(([^)]+)\)", nome)
+    base = nome.split()[0].capitalize()
+    return f"{base} {filial.group(1).capitalize()}" if filial else base
 
 
 @dataclass
@@ -77,6 +108,11 @@ class NFeData:
     destinatario_cnpj: Optional[str] = None
     destinatario_nome: Optional[str] = None
     meio_pagamento_nfe: Optional[str] = None
+    # Bandeira do cartão (pag -> detPag -> card -> tBand: 01=Visa, 02=Mastercard, 06=Elo...).
+    bandeira_cartao_nfe: Optional[str] = None
+    # Quantidade de parcelas declarada no XML da NF-e (cobr -> dup). None quando o XML não traz
+    # duplicatas ou a nota não veio de XML (o OCR confunde itens com parcelas e não conta aqui).
+    parcelas_nfe: Optional[int] = None
     numero_documento_custom: Optional[str] = None
     marcador_empresa: Optional[str] = None
     marcador_caixa: Optional[str] = None
@@ -182,11 +218,11 @@ def parse_res_nfe(xml_text: str) -> ResNFeSummary:
 
 def res_nfe_summary_to_nfe_data(summary: ResNFeSummary, dest_cnpj: Optional[str] = None) -> NFeData:
     """Converte um resumo `resNFe` em `NFeData` (sem itens/duplicatas discriminados)."""
-    data_emissao = date.today()
+    data_emissao = hoje_sp()
     if summary.dh_emi:
         try:
             data_emissao = datetime.fromisoformat(summary.dh_emi.split("T")[0]).date()
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
 
     numero_nota = (
@@ -264,9 +300,9 @@ class NFeXmlParser:
                 # Trata formato ISO com timezone (ex: 2024-03-15T14:30:00-03:00)
                 data_emissao = datetime.fromisoformat(data_emissao_str.split("T")[0]).date()
             except ValueError:
-                data_emissao = date.today()
+                data_emissao = hoje_sp()
         else:
-            data_emissao = date.today()
+            data_emissao = hoje_sp()
 
         # 2. Emitente (emit)
         emit_el = find_first(root, "emit")
@@ -303,6 +339,8 @@ class NFeXmlParser:
         det_pag_el = find_first(root, "detPag")
         t_pag_el = find_first(det_pag_el, "tPag") if det_pag_el is not None else None
         meio_pagamento_nfe = t_pag_el.text.strip() if (t_pag_el is not None and t_pag_el.text) else None
+        t_band_el = find_first(det_pag_el, "tBand") if det_pag_el is not None else None
+        bandeira_cartao_nfe = t_band_el.text.strip() if (t_band_el is not None and t_band_el.text) else None
 
         # 3. Totais (total -> ICMSTot -> vNF)
         icms_tot_el = find_first(root, "ICMSTot")
@@ -351,6 +389,8 @@ class NFeXmlParser:
             destinatario_cnpj=destinatario_cnpj,
             destinatario_nome=destinatario_nome,
             meio_pagamento_nfe=meio_pagamento_nfe,
+            bandeira_cartao_nfe=bandeira_cartao_nfe,
+            parcelas_nfe=len(duplicatas) or None,
             itens=itens
         )
 
@@ -432,7 +472,7 @@ class NuvemFiscalProvider(BaseNFeProvider):
             return NFeData(
                 chave=chave,
                 numero_nota=str(payload.get("numero", "")),
-                data_emissao=datetime.fromisoformat(payload.get("data_emissao", "").split("T")[0]).date() if payload.get("data_emissao") else date.today(),
+                data_emissao=datetime.fromisoformat(payload.get("data_emissao", "").split("T")[0]).date() if payload.get("data_emissao") else hoje_sp(),
                 emitente_nome=emitente.get("nome", "Fornecedor Nuvem Fiscal"),
                 emitente_cnpj=emitente.get("cnpj", ""),
                 valor_total=Decimal(str(valores.get("valor_total", 0.0))),
@@ -473,14 +513,14 @@ class PlugNotasProvider(BaseNFeProvider):
             for d in cobranca.get("duplicatas", []):
                 dups.append(NFeDuplicate(
                     numero=str(d.get("numero", "")),
-                    vencimento=datetime.strptime(d.get("vencimento"), "%Y-%m-%d").date() if d.get("vencimento") else date.today(),
+                    vencimento=datetime.strptime(d.get("vencimento"), "%Y-%m-%d").date() if d.get("vencimento") else hoje_sp(),
                     valor=Decimal(str(d.get("valor", 0)))
                 ))
 
             return NFeData(
                 chave=chave,
                 numero_nota=str(data.get("numero", "")),
-                data_emissao=datetime.fromisoformat(data.get("emissao", "").split("T")[0]).date() if data.get("emissao") else date.today(),
+                data_emissao=datetime.fromisoformat(data.get("emissao", "").split("T")[0]).date() if data.get("emissao") else hoje_sp(),
                 emitente_nome=emitente.get("razaoSocial", ""),
                 emitente_cnpj=emitente.get("cpfCnpj", ""),
                 valor_total=Decimal(str(data.get("valor", 0.0))),
@@ -575,12 +615,12 @@ class ReceitaFederalProvider(BaseNFeProvider):
             for d in cobranca.get("duplicatas", []):
                 dups.append(NFeDuplicate(
                     numero=str(d.get("numero", "")),
-                    vencimento=datetime.strptime(d.get("vencimento"), "%Y-%m-%d").date() if d.get("vencimento") else date.today(),
+                    vencimento=datetime.strptime(d.get("vencimento"), "%Y-%m-%d").date() if d.get("vencimento") else hoje_sp(),
                     valor=Decimal(str(d.get("valor", 0)))
                 ))
 
             data_emi_str = nfe.get("dataEmissao") or nfe.get("dhEmi")
-            data_emissao = datetime.fromisoformat(data_emi_str.split("T")[0]).date() if data_emi_str else date.today()
+            data_emissao = datetime.fromisoformat(data_emi_str.split("T")[0]).date() if data_emi_str else hoje_sp()
 
             return NFeData(
                 chave=chave,
@@ -745,7 +785,7 @@ class SefazA1Provider(BaseNFeProvider):
   </soap12:Body>
 </soap12:Envelope>"""
 
-    def _build_dist_nsu_envelope(self, ult_nsu: str) -> str:
+    def _build_dist_nsu_envelope(self, ult_nsu: str, especifico: bool = False) -> str:
         """
         Envelope de consulta por NSU (distNSUInt): em vez de pedir uma chave específica
         já conhecida (consChNFe), pede "tudo que é novo para este CNPJ desde este NSU" —
@@ -754,6 +794,12 @@ class SefazA1Provider(BaseNFeProvider):
         c_uf = UF_TO_IBGE.get(self.cert_uf, UF_TO_IBGE.get(self.uf, "35"))
         # Vai interpolado no XML: só dígitos (até 15), nunca texto vindo de fora.
         nsu_padded = validar_nsu(ult_nsu or "0").zfill(15)
+        # consNSU: um NSU específico (recupera documento pulado); distNSU: tudo depois do ultNSU.
+        consulta = (
+            f"<consNSU>\n            <NSU>{nsu_padded}</NSU>\n          </consNSU>"
+            if especifico
+            else f"<distNSU>\n            <ultNSU>{nsu_padded}</ultNSU>\n          </distNSU>"
+        )
         return f"""<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
@@ -763,16 +809,22 @@ class SefazA1Provider(BaseNFeProvider):
           <tpAmb>{self.ambiente}</tpAmb>
           <cUFAutor>{c_uf}</cUFAutor>
           <CNPJ>{self.cnpj}</CNPJ>
-          <distNSU>
-            <ultNSU>{nsu_padded}</ultNSU>
-          </distNSU>
+          {consulta}
         </distDFeInt>
       </nfeDadosMsg>
     </nfeDistDFeInteresse>
   </soap12:Body>
 </soap12:Envelope>"""
 
-    def consultar_distribuicao_nsu(self, ult_nsu: str = "0") -> "DistNsuResult":
+    def consultar_nsu(self, nsu: str) -> "DistNsuResult":
+        """
+        Consulta UM documento pelo NSU (consNSU). Recupera o que ficou para trás quando a SEFAZ
+        obriga o cursor a pular (cStat 656 "Deve ser utilizado o ultNSU": outro sistema já
+        consumiu a fila deste CNPJ). Limite da SEFAZ: 20 consultas por hora por CNPJ.
+        """
+        return self.consultar_distribuicao_nsu(nsu, especifico=True)
+
+    def consultar_distribuicao_nsu(self, ult_nsu: str = "0", especifico: bool = False) -> "DistNsuResult":
         """
         Consulta o lote de documentos novos disponíveis para este CNPJ a partir do NSU
         informado (distNSUInt). Ao contrário de get_nfe_data (que exige já saber a chave),
@@ -782,7 +834,7 @@ class SefazA1Provider(BaseNFeProvider):
         if not self.cnpj:
             raise NFeProviderError("CNPJ consultante (SEFAZ_CNPJ) não configurado no .env.")
 
-        soap_body = self._build_dist_nsu_envelope(ult_nsu)
+        soap_body = self._build_dist_nsu_envelope(ult_nsu, especifico)
         headers = {
             "Content-Type": "application/soap+xml; charset=utf-8; action=\"http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse\"",
             "Accept": "application/soap+xml, text/xml"
@@ -897,7 +949,7 @@ class SefazA1Provider(BaseNFeProvider):
                 try:
                     os.unlink(path)
                 except Exception:
-                    pass
+                    logger.debug("Não foi possível remover o certificado temporário %s", path, exc_info=True)
         if self._temp_dir:
             _remover_pasta_privada(self._temp_dir)
         self._temp_cert_file = None
@@ -930,7 +982,7 @@ class SefazA1Provider(BaseNFeProvider):
             return build_nfce_from_key(chave, fallback_dest_cnpj=self.cnpj)
 
         if c_stat not in ("138", "137"):
-            raise NFeProviderError(f"SEFAZ retornou rejeição: cStat {c_stat} - {x_motivo}")
+            raise NFeProviderError(f"SEFAZ retornou rejeição: cStat {c_stat} - {x_motivo}", c_stat=c_stat)
 
         for el in ret_dist.iter():
             if el.tag.split("}")[-1] == "docZip":
@@ -955,7 +1007,7 @@ class SefazA1Provider(BaseNFeProvider):
                         data.destinatario_cnpj = self.cnpj
                     return data
 
-        raise NFeProviderError(f"Nenhum documento retornado pela SEFAZ para a chave {chave} (cStat {c_stat} - {x_motivo}).")
+        raise NFeProviderError(f"Nenhum documento retornado pela SEFAZ para a chave {chave} (cStat {c_stat} - {x_motivo}).", c_stat=c_stat)
 
 
     def _parse_res_nfe(self, xml_text: str, chave: str) -> NFeData:
@@ -975,11 +1027,11 @@ class SefazA1Provider(BaseNFeProvider):
         nome = x_nome_el.text.strip() if x_nome_el is not None and x_nome_el.text else "Emitente SEFAZ"
         v_nf = Decimal(v_nf_el.text.strip()) if v_nf_el is not None and v_nf_el.text else Decimal("0.00")
         
-        data_emi = date.today()
+        data_emi = hoje_sp()
         if dh_emi_el is not None and dh_emi_el.text:
             try:
                 data_emi = datetime.fromisoformat(dh_emi_el.text.split("T")[0]).date()
-            except Exception:
+            except (ValueError, ArithmeticError):
                 pass
 
         n_nf = str(int(chave[25:34])) if len(chave) == 44 else "0"
@@ -1034,7 +1086,7 @@ def collect_candidate_passwords(cert_file: Path, cfg: Settings) -> List[str]:
                 if content:
                     candidates.append(content)
             except Exception:
-                pass
+                logger.warning("Não foi possível ler %s", companion, exc_info=True)
 
     # 2. Variáveis de ambiente dedicadas: SEFAZ_PASSWORD_<NOME> ou SEFAZ_PASSWORD_<CNPJ>
     stem_clean = "".join(c for c in cert_file.stem.upper() if c.isalnum() or c == "_")
@@ -1059,7 +1111,7 @@ def collect_candidate_passwords(cert_file: Path, cfg: Settings) -> List[str]:
                     else:
                         candidates.append(str(v).strip())
             except Exception:
-                pass
+                logger.warning("Mapa JSON de senhas de certificado inválido; ignorado", exc_info=True)
         else:
             entries = [e.strip() for e in raw.replace("\n", ",").split(",") if e.strip()]
             for e in entries:
@@ -1166,7 +1218,7 @@ def build_nfce_from_key(chave: str, fallback_dest_cnpj: Optional[str] = None) ->
         mes = int(chave[4:6])
         data_emissao = date(ano, mes, 1)
     except Exception:
-        data_emissao = date.today()
+        data_emissao = hoje_sp()
 
     cnpj_emit = chave[6:20] if len(chave) == 44 else ""
     n_nf = str(int(chave[25:34])) if len(chave) == 44 and chave[25:34].isdigit() else "0"
@@ -1191,13 +1243,13 @@ def build_receipt_from_key(chave: str, fallback_dest_cnpj: Optional[str] = None)
     if len(parts) > 3:
         try:
             val_total = Decimal(parts[3]) / Decimal("100")
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
 
     return NFeData(
         chave=chave,
         numero_nota="1",
-        data_emissao=date.today(),
+        data_emissao=hoje_sp(),
         emitente_nome=emitente_nome,
         emitente_cnpj="00000000000000",
         valor_total=val_total,
@@ -1361,7 +1413,7 @@ def extract_fiscal_data_from_text(raw_text: str) -> Dict[str, Any]:
         try:
             clean_v = val_match.group(1).replace(".", "").replace(",", ".").strip()
             data["valor_total"] = Decimal(clean_v)
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
 
     # 3. Data de emissão (DD/MM/YYYY). "Emissão" primeiro; "Data/Hora" é a data em que a
@@ -1372,7 +1424,7 @@ def extract_fiscal_data_from_text(raw_text: str) -> Dict[str, Any]:
     if date_match:
         try:
             data["data_emissao"] = datetime.strptime(date_match.group(1), "%d/%m/%Y").date()
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
 
     # 4. Razão Social / Nome do Emitente
@@ -1418,7 +1470,7 @@ def extract_fiscal_data_from_text(raw_text: str) -> Dict[str, Any]:
             d_venc = datetime.strptime(m.group("venc"), "%d/%m/%Y").date()
             d_val = Decimal(m.group("val").replace(".", "").replace(",", ".").strip())
             duplicatas.append(NFeDuplicate(numero=d_num, vencimento=d_venc, valor=d_val))
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
 
     if not duplicatas:
@@ -1428,14 +1480,14 @@ def extract_fiscal_data_from_text(raw_text: str) -> Dict[str, Any]:
                 qtd = int(parc_mult.group(1))
                 val_parc = Decimal(parc_mult.group(2).replace(".", "").replace(",", ".").strip())
                 if 1 < qtd <= 24:
-                    emissao = data.get("data_emissao", date.today())
+                    emissao = data.get("data_emissao", hoje_sp())
                     for i in range(qtd):
                         duplicatas.append(NFeDuplicate(
                             numero=f"{i+1:03d}",
                             vencimento=emissao,
                             valor=val_parc
                         ))
-            except Exception:
+            except (ValueError, ArithmeticError):
                 pass
 
     if duplicatas:
@@ -1513,7 +1565,7 @@ def enrich_nfe_data_from_file_context(
     valor_file: Optional[Decimal] = None
 
     # Só nomes no padrão do Drive viram N° documento. Antes QUALQUER nome virava: um XML
-    # salvo com a chave ("4126...1412.xml") ou baixado como "invoice-2000017019020870.xml"
+    # salvo com a chave ("4126...1412.xml") ou baixado como "invoice-2000074881215530.xml"
     # ia para o Tiny com N° documento "41260562875462000100" / "invoice-200001701902",
     # em vez de "NF-e {Empresa}" (incidente 2026-09-28, NF 24 Café e Prosa).
     if parts and _eh_prefixo_documento_drive(parts[0], len(parts)):
@@ -1533,7 +1585,7 @@ def enrich_nfe_data_from_file_context(
                 try:
                     val_cleaned = v_match.group(0).replace(".", "").replace(",", ".").strip()
                     valor_file = Decimal(val_cleaned)
-                except Exception:
+                except (ValueError, ArithmeticError):
                     pass
         elif not emitente_str and p_lower not in AUTHORIZED_PAYMENT_MARCADORES:
             # Se for apenas número/moeda sem R$ explícito
@@ -1542,7 +1594,7 @@ def enrich_nfe_data_from_file_context(
                 try:
                     val_cleaned = v_direct.group(1).replace(".", "").replace(",", ".").strip()
                     valor_file = Decimal(val_cleaned)
-                except Exception:
+                except (ValueError, ArithmeticError):
                     pass
             else:
                 emitente_str = p_clean
@@ -1570,7 +1622,7 @@ def enrich_nfe_data_from_file_context(
                 val_cleaned = match.group("valor").replace(".", "").replace(",", ".").strip()
                 try:
                     valor_file = Decimal(val_cleaned)
-                except Exception:
+                except (ValueError, ArithmeticError):
                     pass
 
     # Garante que marcador nunca seja atribuído a emitente_str
@@ -1587,7 +1639,7 @@ def enrich_nfe_data_from_file_context(
             if proc.returncode == 0 and proc.stdout.strip():
                 raw_ocr_text = proc.stdout
         except Exception:
-            pass
+            logger.debug("pdftotext indisponível ou falhou para %s", path_obj, exc_info=True)
 
     # Resolve empresa / destinatário e marcador pré-existente no Tiny
     emp_detect = (nfe_data.numero_documento_custom or "").lower()
@@ -1665,7 +1717,7 @@ def enrich_nfe_data_from_file_context(
         if internal.get("valor_total") and (nfe_data.valor_total is None or nfe_data.valor_total <= 0):
             nfe_data.valor_total = internal["valor_total"]
         data_texto = internal.get("data_emissao")
-        if data_texto and nfe_data.data_emissao == date.today():
+        if data_texto and nfe_data.data_emissao == hoje_sp():
             nfe_data.data_emissao = data_texto
         elif data_texto and sem_xml and len(chave_doc) == 44 and (data_texto.year % 100, data_texto.month) == (
             int(chave_doc[2:4]), int(chave_doc[4:6])
@@ -1745,7 +1797,9 @@ class MultiSefazA1Provider(BaseNFeProvider):
             return build_nfce_from_key(chave, fallback_dest_cnpj=None)
 
         logger.info(f"Consultando NF-e {chave} no pool de {len(self.providers)} CNPJs da empresa...")
-        last_error = None
+        # A resposta de cada CNPJ, não só a do último: se o destinatário de verdade falhou por outro
+        # motivo (656 consumo indevido, rede, certificado), é esse erro que a pessoa precisa ver.
+        falhas: List[Tuple[str, NFeProviderError]] = []
         for prov in self.providers:
             try:
                 data = prov.get_nfe_data(chave)
@@ -1753,25 +1807,30 @@ class MultiSefazA1Provider(BaseNFeProvider):
                     data.destinatario_cnpj = prov.cnpj
                 logger.info(f"NF-e {chave} localizada com sucesso no CNPJ {prov.cnpj}!")
                 return data
-
             except NFeProviderError as e:
-                err_msg = str(e)
-                if "618" in err_msg or "modelo diferente de 55" in err_msg.lower():
+                if e.c_stat == "618":
                     logger.info(f"SEFAZ indicou modelo não-55. Gerando dados estruturados a partir da chave {chave}...")
                     return build_nfce_from_key(chave, fallback_dest_cnpj=prov.cnpj)
-                if "137" in err_msg or "não encontrado" in err_msg.lower() or "não localizada" in err_msg.lower():
-                    logger.debug(f"Chave {chave} não pertence ao CNPJ {prov.cnpj}. Tentando próximo CNPJ...")
-                    last_error = e
-                    continue
-                last_error = e
-                logger.warning(f"Erro ao consultar CNPJ {prov.cnpj}: {e}")
+                falhas.append((prov.cnpj, e))
+                if e.c_stat in CSTAT_NAO_E_DESTE_CNPJ:
+                    logger.debug(f"Chave {chave} não pertence ao CNPJ {prov.cnpj} (cStat {e.c_stat}). Tentando próximo CNPJ...")
+                else:
+                    logger.warning(f"Erro ao consultar CNPJ {prov.cnpj}: {e}")
 
-        if last_error and ("618" in str(last_error) or "modelo diferente de 55" in str(last_error).lower()):
-            dest_cnpj = self.providers[0].cnpj if self.providers else None
-            return build_nfce_from_key(chave, fallback_dest_cnpj=dest_cnpj)
-
+        outras = [(cnpj, e) for cnpj, e in falhas if e.c_stat not in CSTAT_NAO_E_DESTE_CNPJ]
+        if not outras:
+            c_stat = "640" if any(e.c_stat == "640" for _, e in falhas) else "137"
+            raise NFeNaoDestinadaError(
+                f"Nenhum dos {len(self.providers)} CNPJs configurados é parte da nota fiscal {chave} na SEFAZ (cStat {c_stat}).",
+                c_stat=c_stat,
+                cnpjs=[p.cnpj for p in self.providers],
+            )
+        detalhe = "; ".join(f"{nome_curto_empresa(cnpj)}: {e}" for cnpj, e in outras)
         raise NFeProviderError(
-            f"A nota fiscal {chave} não foi localizada em nenhum dos {len(self.providers)} CNPJs configurados da empresa. Detalhe: {last_error}"
+            f"A nota fiscal {chave} não foi obtida da SEFAZ. "
+            f"{'O CNPJ abaixo falhou e pode ser' if len(outras) == 1 else 'Os CNPJs abaixo falharam e podem ser'} "
+            f"o destinatário — {detalhe}",
+            c_stat=outras[0][1].c_stat,
         )
 
 
@@ -1901,11 +1960,11 @@ class MockNFeProvider(BaseNFeProvider):
                 mes = int(chave[4:6])
                 data_emissao = date(ano, mes, 15)
             except Exception:
-                data_emissao = date.today()
+                data_emissao = hoje_sp()
         else:
             cnpj = "12345678000195"
             n_nf = "12345"
-            data_emissao = date.today()
+            data_emissao = hoje_sp()
 
         v_total = Decimal("1500.00")
         duplicatas = [

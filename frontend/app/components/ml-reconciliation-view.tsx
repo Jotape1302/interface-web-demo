@@ -2,420 +2,33 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadCsv } from "@/lib/csv-export";
-import { ColumnFilterBar, ColumnFilterHeader } from "./column-filter";
-import {
-  aplicaFiltros,
-  carregarFiltrosSession,
-  contarValores,
-  filtrosAtivosCount,
-  obterValoresUnicos,
-  salvarFiltrosSession,
-  type ColumnFilterDef,
-  type ColumnFilterValue,
-  type ColumnFiltersState,
-} from "@/lib/column-filters";
-import {
-  AlertTriangle,
-  ArrowDownLeft,
-  ArrowLeftRight,
-  ArrowUpRight,
-  CalendarClock,
-  CalendarDays,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleCheckBig,
-  Download,
-  History,
-  Info,
-  ListChecks,
-  Play,
-  ReceiptText,
-  RefreshCw,
-  type LucideIcon,
-} from "lucide-react";
+import { ColumnFilterBar } from "./column-filter";
+import { aplicaFiltros, carregarFiltrosSession, contarValores, filtrosAtivosCount, salvarFiltrosSession, type ColumnFilterValue, type ColumnFiltersState } from "@/lib/column-filters";
+import { AlertTriangle, ArrowDownLeft, ArrowLeftRight, ArrowUpRight, CalendarClock, CalendarDays, CheckCircle2, CircleCheckBig, Download, Info, ListChecks, Play, ReceiptText, RefreshCw, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { formatDateTimeBR, money } from "@/lib/formatters";
-import { describeJobProgress, formatElapsed } from "@/lib/reconciliation-helpers";
-import type {
-  MlAnalise,
-  MlAnaliseResumo,
-  MlArquivoTipo,
-  MlBaixaJob,
-  MlBaixaResponse,
-  MlComparativo,
-  MlExecucaoDetalhe,
-  MlExecucaoJob,
-  MlExecucaoResumo,
-  MlGrupo,
-  MlLancamento,
-  MlPendencia,
-  MlStatus,
-} from "@/lib/ml-reconciliation-contracts";
-import {
-  NIVEL_LOG,
-  casamentoMeta,
-  comparativoNoFiltro,
-  conexoesFaltando,
-  erroPeriodo,
-  pendenciaMotivoMeta,
-  periodoTexto,
-  situacaoMeta,
-  somaSelecionados,
-  statusExecucaoMeta,
-  waitForMlJob,
-  formatarMensagemSincronizacaoTokens,
-  grupoNoFiltro,
-  type MlFiltroGrupo,
-  type TokenSyncFeedback,
-} from "@/lib/ml-reconciliation-helpers";
-import {
-  createMlReconciliationService,
-  LancamentosJaExportadosError,
-  type MlReconciliationService,
-} from "@/lib/ml-reconciliation-service";
+import type { MlAnalise, MlAnaliseResumo, MlArquivoTipo, MlBaixaJob, MlBaixaResponse, MlExecucaoJob, MlExecucaoResumo, MlStatus } from "@/lib/ml-reconciliation-contracts";
+import { conexoesFaltando, erroPeriodo, periodoTexto, podeBaixar, vendaCancelada, somaSelecionados, statusExecucaoMeta, waitForMlJob, formatarMensagemSincronizacaoTokens, type TokenSyncFeedback } from "@/lib/ml-reconciliation-helpers";
+import { createMlReconciliationService, LancamentosJaExportadosError } from "@/lib/ml-reconciliation-service";
 import { SourceError } from "./panel-state";
 import { useAuth } from "@/lib/auth-context";
-
-type TabId = "recebimentos" | "vendas" | "lancamentos" | "pendencias" | "saldo";
-
-const PAGINA = 200;
-const STATUS_POLL_MS = 10_000;
-
-const RECEBIMENTOS_DEFS: Record<string, ColumnFilterDef<MlGrupo>> = {
-  data: { id: "data", label: "Liberação", tipo: "data", accessor: (g) => g.data },
-  cliente: { id: "cliente", label: "Cliente", tipo: "texto", accessor: (g) => g.nome_cliente || "" },
-  venda: { id: "venda", label: "Venda", tipo: "texto", accessor: (g) => `${g.id_venda || ""} ${g.mlb || ""}`.trim() },
-  valor: { id: "valor", label: "Recebido (bruto)", tipo: "numero", accessor: (g) => g.valor_total },
-  conta: { id: "conta", label: "Conta Tiny", tipo: "texto", accessor: (g) => `${g.conta_id || ""} ${g.conta_historico || ""}`.trim() },
-  situacao: { id: "situacao", label: "Situação", tipo: "lista", accessor: (g) => situacaoMeta(g.situacao).label },
-  // Sem coluna própria: preenchido pelos atalhos acima da tabela (Aptos, Pendentes…).
-  grupo: { id: "grupo", label: "Visão", tipo: "lista", accessor: (g) => grupoCategoria(g) },
-};
-
-const ATALHOS_RECEBIMENTOS: Array<{ id: MlFiltroGrupo; label: string }> = [
-  { id: "aptos", label: "Aptos para baixa" },
-  { id: "pendentes", label: "Pendentes" },
-  { id: "ja_baixados", label: "Já baixados no Tiny" },
-  { id: "conciliados", label: "Baixados pela automação" },
-];
-
-function grupoCategoria(g: MlGrupo): string {
-  return ATALHOS_RECEBIMENTOS.find((a) => grupoNoFiltro(g, a.id))?.label ?? "Outros";
-}
-
-const PARA_CONFERIR = "Para conferir";
-
-const VENDAS_DEFS: Record<string, ColumnFilterDef<MlComparativo>> = {
-  data: { id: "data", label: "Liberação", tipo: "data", accessor: (c) => c.data },
-  pagamento: { id: "pagamento", label: "Pagamento (MP)", tipo: "texto", accessor: (c) => c.id_pagamento || "" },
-  venda: { id: "venda", label: "Venda (ML)", tipo: "texto", accessor: (c) => `${c.id_pedido || ""} ${c.id_pacote || ""} ${c.mlb || ""}`.trim() },
-  cliente: { id: "cliente", label: "Cliente (Tiny)", tipo: "texto", accessor: (c) => c.nome_cliente || "" },
-  valor: { id: "valor", label: "Líquido liberado", tipo: "numero", accessor: (c) => c.valor_liberado },
-  ligacao: { id: "ligacao", label: "Ligação", tipo: "lista", accessor: (c) => casamentoMeta(c.casou_por).label },
-  // Pagamentos com observação (pedido só pelo relatório, valor diferente…): atalho "Para conferir".
-  conferir: {
-    id: "conferir",
-    label: "Conferência",
-    tipo: "lista",
-    accessor: (c) => (comparativoNoFiltro(c, "conferir") ? PARA_CONFERIR : "Sem observação"),
-  },
-};
-
-const LANCAMENTOS_DEFS: Record<string, ColumnFilterDef<MlLancamento>> = {
-  data: { id: "data", label: "Data", tipo: "data", accessor: (l) => l.data },
-  fluxo: { id: "fluxo", label: "Fluxo MP", tipo: "lista", accessor: (l) => (l.tipo === "C" ? "Recebimento MP" : "Pagamento MP") },
-  categoria: { id: "categoria", label: "Categoria", tipo: "lista", accessor: (l) => l.categoria || "" },
-  historico: { id: "historico", label: "Histórico", tipo: "texto", accessor: (l) => l.historico || "" },
-  contato: { id: "contato", label: "Contato", tipo: "texto", accessor: (l) => `${l.contato || ""} ${l.cnpj || ""}`.trim() },
-  valor: { id: "valor", label: "Valor", tipo: "numero", accessor: (l) => l.valor },
-};
-
-const PENDENCIAS_DEFS: Record<string, ColumnFilterDef<MlPendencia>> = {
-  data: { id: "data", label: "Data", tipo: "data", accessor: (p) => p.data },
-  fluxo: { id: "fluxo", label: "Fluxo MP", tipo: "lista", accessor: (p) => (p.valor >= 0 ? "Recebimento MP" : "Pagamento MP") },
-  tipo_operacao: { id: "tipo_operacao", label: "Tipo de operação", tipo: "lista", accessor: (p) => p.tipo_operacao || "" },
-  referencia: { id: "referencia", label: "Pagamento / venda", tipo: "texto", accessor: (p) => `${p.operacao_relacionada || ""} ${p.id_venda || ""}`.trim() },
-  cliente: { id: "cliente", label: "Cliente", tipo: "texto", accessor: (p) => p.nome_cliente || "" },
-  valor: { id: "valor", label: "Valor", tipo: "numero", accessor: (p) => Math.abs(p.valor) },
-  motivo: { id: "motivo", label: "Motivo da pendência", tipo: "texto", accessor: (p) => p.motivo || "" },
-};
-
-const ARQUIVOS: Array<{ tipo: MlArquivoTipo; label: string }> = [
-  { tipo: "lancamentos", label: "Lançamentos de caixa (importação Tiny)" },
-  { tipo: "relatorio", label: "Relatório conciliado" },
-  { tipo: "vendas-recebimentos", label: "Vendas × recebimentos" },
-  { tipo: "saldo-recebimentos", label: "Saldo por dia (recebimentos)" },
-  { tipo: "saldo-total", label: "Saldo por dia (todas as operações)" },
-];
-
-function erroDe(e: unknown, fallback: string): string {
-  if (e instanceof DOMException && e.name === "TimeoutError") return "O servidor não respondeu a tempo. Tente novamente.";
-  return e instanceof Error ? e.message : fallback;
-}
-
-/** Hora local da rotina: tirada da próxima execução (ISO com fuso), não de hora_diaria (fuso do container). */
-function horaRotina(status: MlStatus | null): number {
-  const proxima = status?.proxima_execucao ? new Date(status.proxima_execucao) : null;
-  if (proxima && !Number.isNaN(proxima.getTime())) return proxima.getHours();
-  return status?.hora_diaria ?? 8;
-}
-
-function hojeIso(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function Metric({
-  label,
-  icon: Icon,
-  iconClass,
-  value,
-  detail,
-}: {
-  label: string;
-  icon: LucideIcon;
-  iconClass: string;
-  value: string;
-  detail: string;
-}) {
-  return (
-    <div className="metric-card">
-      <div className="metric-top">
-        <span>{label}</span>
-        <span className={cn("grid size-8 shrink-0 place-items-center rounded-md border", iconClass)}>
-          <Icon size={18} />
-        </span>
-      </div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-detail text-xs">{detail}</div>
-    </div>
-  );
-}
-
-function JobProgress({ job, elapsedMs, texto }: { job: MlExecucaoJob | MlBaixaJob | null; elapsedMs: number; texto: string }) {
-  const progress = job ? describeJobProgress(job) : { percent: null, label: "Iniciando…" };
-  return (
-    <div className="space-y-2.5">
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
-        <output className="flex min-w-0 items-center gap-2 font-medium text-foreground" aria-live="polite">
-          <RefreshCw size={13} className="shrink-0 animate-spin text-primary" aria-hidden="true" />
-          <span className="truncate">{progress.label}</span>
-        </output>
-        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{formatElapsed(elapsedMs)}</span>
-      </div>
-      <Progress
-        value={progress.percent}
-        aria-label={texto}
-        className={cn(
-          "w-full",
-          progress.percent === null && "[&_[data-slot=progress-indicator]]:w-1/3 [&_[data-slot=progress-indicator]]:animate-pulse",
-        )}
-      />
-    </div>
-  );
-}
-
-function Pilulas({
-  opcoes,
-  ativo,
-  contagem,
-  total,
-  onChange,
-}: {
-  opcoes: string[];
-  /** Opção marcada; null = "Todos". */
-  ativo: string | null;
-  contagem: Record<string, number>;
-  total: number;
-  onChange: (opcao: string | null) => void;
-}) {
-  const botao = (valor: string | null, rotulo: string, n: number) => (
-    <button
-      key={rotulo}
-      type="button"
-      onClick={() => onChange(valor)}
-      aria-pressed={ativo === valor}
-      className={cn(
-        "rounded-[4px] border px-2.5 py-1 text-[11px] font-medium transition",
-        ativo === valor ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted/50",
-      )}
-    >
-      {rotulo} · {n}
-    </button>
-  );
-  return (
-    <div className="flex flex-wrap gap-1 border-b border-border px-3 py-2">
-      {opcoes.map((o) => botao(o, o, contagem[o] ?? 0))}
-      {botao(null, "Todos", total)}
-    </div>
-  );
-}
-
-/** Opção única marcada num filtro de lista (para destacar o atalho correspondente). */
-function unicaOpcao(valor: ColumnFilterValue | undefined): string | null {
-  return Array.isArray(valor) && valor.length === 1 ? valor[0]! : null;
-}
-
-function MaisLinhas({ mostrando, total, onMais }: { mostrando: number; total: number; onMais: () => void }) {
-  return (
-    <div className="table-footer flex items-center justify-between gap-3">
-      <span>
-        Mostrando {Math.min(mostrando, total)} de {total}
-      </span>
-      {mostrando < total && (
-        <Button variant="outline" size="sm" onClick={onMais}>
-          Mostrar mais
-        </Button>
-      )}
-    </div>
-  );
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Histórico de execuções (com o log de cada uma)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function resumoExecucao(e: MlExecucaoResumo, nomes: Map<string, string>): string {
-  return Object.entries(e.empresas)
-    .map(([id, r]) => {
-      const nome = nomes.get(id) ?? id;
-      if (r.baixa) return `${nome}: ${r.baixa.sucessos} baixada(s), ${r.baixa.ignorados} pulada(s), ${r.baixa.falhas} falha(s)`;
-      if (r.status !== "ok") return `${nome}: ${r.mensagem || "falhou"}`;
-      return `${nome}: ${r.resumo?.aptos_baixa ?? 0} apto(s), ${r.resumo?.total_pendencias ?? 0} para conferir`;
-    })
-    .join(" · ");
-}
-
-function HistoricoExecucoes({
-  service,
-  execucoes,
-  erro,
-  nomes,
-}: {
-  service: MlReconciliationService;
-  execucoes: MlExecucaoResumo[] | null;
-  erro: string | null;
-  nomes: Map<string, string>;
-}) {
-  const [aberta, setAberta] = useState<string | null>(null);
-  const [detalhe, setDetalhe] = useState<MlExecucaoDetalhe | null>(null);
-  const [detalheErro, setDetalheErro] = useState<string | null>(null);
-
-  async function alternar(id: string) {
-    if (aberta === id) {
-      setAberta(null);
-      return;
-    }
-    setAberta(id);
-    setDetalhe(null);
-    setDetalheErro(null);
-    try {
-      setDetalhe(await service.getExecucao(id));
-    } catch (e) {
-      setDetalheErro(erroDe(e, "Falha ao carregar o log."));
-    }
-  }
-
-  return (
-    <div className="panel">
-      <div className="flex items-center gap-2 border-b border-border p-3 sm:px-4">
-        <History size={15} className="text-primary" />
-        <h2 className="text-sm font-semibold text-foreground">Histórico de execuções</h2>
-        <span className="text-[11px] text-muted-foreground">rotina diária, execuções manuais e baixas</span>
-      </div>
-      {erro && (
-        <div className="p-3">
-          <SourceError message={erro} />
-        </div>
-      )}
-      {execucoes && execucoes.length === 0 && (
-        <div className="px-5 py-8 text-center text-xs text-muted-foreground">Nenhuma execução registrada ainda.</div>
-      )}
-      {execucoes && execucoes.length > 0 && (
-        <ul className="divide-y divide-border">
-          {execucoes.map((e) => {
-            const meta = statusExecucaoMeta(e.status);
-            const expandida = aberta === e.id;
-            return (
-              <li key={e.id}>
-                <button
-                  type="button"
-                  onClick={() => void alternar(e.id)}
-                  aria-expanded={expandida}
-                  className="flex w-full items-start gap-2 px-3 py-2.5 text-left text-xs transition hover:bg-muted/40 sm:px-4"
-                >
-                  {expandida ? (
-                    <ChevronDown size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
-                  )}
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-medium tabular-nums text-foreground">{formatDateTimeBR(e.iniciada_em)}</span>
-                      <Badge variant={meta.tone}>{meta.label}</Badge>
-                      <Badge variant="outline">
-                        {e.tipo === "baixa" ? "Baixa" : e.origem === "agendada" ? "Rotina diária" : "Execução manual"}
-                      </Badge>
-                      <span className="text-muted-foreground">liberações de {periodoTexto(e.periodo_de, e.periodo_ate)}</span>
-                      {e.usuario && <span className="text-muted-foreground">· {e.usuario}</span>}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">{resumoExecucao(e, nomes)}</p>
-                  </div>
-                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                    {e.erros_log > 0 && <span className="text-destructive">{e.erros_log} erro(s) · </span>}
-                    {e.avisos_log > 0 && <span className="text-amber-700 dark:text-amber-400">{e.avisos_log} aviso(s) · </span>}
-                    {e.linhas_log} linha(s)
-                  </span>
-                </button>
-                {expandida && (
-                  <div className="border-t border-border bg-muted/30 px-3 py-2 sm:px-4">
-                    {detalheErro && <SourceError message={detalheErro} />}
-                    {!detalhe && !detalheErro && <p className="py-2 text-[11px] text-muted-foreground">Carregando o log…</p>}
-                    {detalhe && (
-                      <ol className="max-h-80 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed">
-                        {detalhe.log.map((l, i) => (
-                          <li key={i} className="flex gap-2">
-                            <span className="shrink-0 tabular-nums text-muted-foreground">{formatDateTimeBR(l.em)}</span>
-                            <span className={cn("w-12 shrink-0 font-semibold", NIVEL_LOG[l.nivel].className)}>{NIVEL_LOG[l.nivel].label}</span>
-                            <span className="min-w-0 break-words">
-                              {l.empresa && <span className="text-muted-foreground">[{l.empresa}] </span>}
-                              {l.mensagem}
-                            </span>
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
+import { useDataPolling } from "@/lib/use-data-polling";
+import { isDemoSession } from "@/lib/demo-session";
+import { TabId, PAGINA, STATUS_POLL_MS, RECEBIMENTOS_DEFS, ATALHOS_RECEBIMENTOS, grupoCategoria, PARA_CONFERIR, VENDAS_DEFS, LANCAMENTOS_DEFS, PENDENCIAS_DEFS, ARQUIVOS, erroDe, horaRotina, hojeIso, Metric, JobProgress, Pilulas, unicaOpcao, MaisLinhas, HistoricoExecucoes } from "./ml-reconciliation-view-parts";
+import { RecebimentosTable, VendasTable, LancamentosTable, PendenciasTable } from "./ml-reconciliation-tables";
+import { MlTarifasPendentes } from "./ml-tarifas-pendentes";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tela
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Relógio isolado fora do componente (handlers de ação, não renderização). */
+const agora = () => Date.now();
 
 export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: string }) {
   const service = useMemo(() => createMlReconciliationService(apiBaseUrl), [apiBaseUrl]);
@@ -500,7 +113,9 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
   // Controle de exportação da planilha de lançamentos (evita importar duas vezes no Tiny).
   const [avisoExportacao, setAvisoExportacao] = useState<{ mensagem: string; permitirTodos: boolean } | null>(null);
 
-  const [decorrido, setDecorrido] = useState(0);
+  // Início (epoch ms) da tarefa em andamento; o cronômetro vive em <Elapsed>.
+  const [execStartedAt, setExecStartedAt] = useState(0);
+  const [baixaStartedAt, setBaixaStartedAt] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const [sincronizandoTokens, setSincronizandoTokens] = useState(false);
@@ -582,14 +197,21 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
   }, [service, aplicarStatus]);
 
   // A rotina diária pode estar rodando no servidor: acompanha o status enquanto estiver.
-  useEffect(() => {
-    if (!status?.em_execucao || executando) return;
-    const id = setInterval(() => {
-      void carregarStatus();
-      void carregarExecucoes();
-    }, STATUS_POLL_MS);
-    return () => clearInterval(id);
-  }, [status?.em_execucao, executando, carregarStatus, carregarExecucoes]);
+  // useDataPolling não sobrepõe ciclos (um fetch por vez), cancela ao desmontar e pausa com a aba oculta.
+  const acompanhandoRotina = Boolean(status?.em_execucao) && !executando && !isDemoSession();
+  useDataPolling(
+    async (signal) => {
+      const [s, e] = await Promise.allSettled([service.getStatus(signal), service.getExecucoes(20, signal)]);
+      if (signal.aborted) return;
+      if (s.status === "fulfilled") aplicarStatus(s.value);
+      else setStatusErro(erroDe(s.reason, "Falha ao consultar a conciliação."));
+      if (e.status === "fulfilled") {
+        setExecucoes(e.value.itens);
+        setExecucoesErro(null);
+      } else setExecucoesErro(erroDe(e.reason, "Falha ao consultar o histórico."));
+    },
+    { intervalMs: STATUS_POLL_MS, enabled: acompanhandoRotina, refetchOnVisible: false },
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -613,7 +235,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         // vendas, nos pagamentos para conferir quando existirem. Os demais filtros da aba ficam.
         setColFilters((prev) => {
           const recebimentos = { ...prev.recebimentos };
-          if (a.resumo.aptos_baixa > 0) recebimentos.grupo = ["Aptos para baixa"];
+          if (a.grupos.some(podeBaixar)) recebimentos.grupo = ["Aptos para baixa"];
           else delete recebimentos.grupo;
           const vendas = { ...prev.vendas };
           if (a.resumo.pagamentos_com_observacao > 0) vendas.conferir = [PARA_CONFERIR];
@@ -633,14 +255,6 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  // Tempo decorrido da tarefa em andamento, medido no navegador.
-  useEffect(() => {
-    if (!executando && !baixando) return;
-    const t0 = Date.now();
-    const id = setInterval(() => setDecorrido(Date.now() - t0), 1000);
-    return () => clearInterval(id);
-  }, [executando, baixando]);
-
   const periodoInvalido = execDe && execAte ? erroPeriodo(execDe, execAte, hojeIso()) : "Informe o período.";
   const ocupado = executando || Boolean(status?.em_execucao);
 
@@ -652,7 +266,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
     setExecutando(true);
     setExecErro(null);
     setExecJob(null);
-    setDecorrido(0);
+    setExecStartedAt(agora());
     try {
       const job = await service.executar(
         { empresas: execEmpresa === "todas" ? undefined : [execEmpresa], de: execDe, ate: execAte },
@@ -707,10 +321,10 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         pendenciasFiltradas.map((p) => [empresa, p.data, p.tipo_operacao, p.id_venda, p.nome_cliente, p.valor, p.motivo]));
     }
   }
-  const aptosVisiveis = gruposFiltrados.filter((g) => g.apto_baixa);
+  const aptosVisiveis = gruposFiltrados.filter(podeBaixar);
   const todosVisiveisMarcados = aptosVisiveis.length > 0 && aptosVisiveis.every((g) => selecionados.has(g.id));
   const algunsVisiveisMarcados = aptosVisiveis.some((g) => selecionados.has(g.id));
-  const gruposSelecionados = analise ? analise.grupos.filter((g) => selecionados.has(g.id) && g.apto_baixa) : [];
+  const gruposSelecionados = analise ? analise.grupos.filter((g) => selecionados.has(g.id) && podeBaixar(g)) : [];
   const empresaStatus = status?.empresas.find((e) => e.id === empresaId) ?? null;
 
   function trocarEmpresa(id: string) {
@@ -721,14 +335,14 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
     setAnaliseErro(null);
   }
 
-  function alternar(id: string) {
+  const alternar = useCallback((id: string) => {
     setSelecionados((atual) => {
       const novo = new Set(atual);
       if (novo.has(id)) novo.delete(id);
       else novo.add(id);
       return novo;
     });
-  }
+  }, [setSelecionados]);
 
   function alternarTodos() {
     setSelecionados((atual) => {
@@ -752,7 +366,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
     if (!analise || gruposSelecionados.length === 0) return;
     setBaixando(true);
     setBaixaErro(null);
-    setDecorrido(0);
+    setBaixaStartedAt(agora());
     try {
       const job = await service.startBaixa(analise.analise_id, gruposSelecionados.map((g) => g.id));
       const final = await waitForMlJob((id, s) => service.getJob(id, s), job, { onProgress: setBaixaJob });
@@ -773,7 +387,8 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
   }
 
   async function baixarArquivo(tipo: MlArquivoTipo, incluirExportados = false) {
-    if (!analise) return;
+    // Planilha de lançamentos marca o que foi exportado: só com a permissão de baixar.
+    if (!analise || (tipo === "lancamentos" && !canBaixar)) return;
     setDownloadErro(null);
     setAvisoExportacao(null);
     setBaixandoArquivo(tipo);
@@ -877,7 +492,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         {tokenSyncFeedback && (
           <div
             className={cn(
-              "flex items-center gap-2 rounded-md p-2.5 text-xs",
+              "flex items-center gap-2 rounded-none p-2.5 text-xs",
               tokenSyncFeedback.tipo === "sucesso"
                 ? "border border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 : "border border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300"
@@ -888,9 +503,12 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           </div>
         )}
 
-        {statusErro && <SourceError message={statusErro} />}
+        {statusErro && <SourceError message={statusErro} reportar={{ automationId: "ml-reconciliation", executionId: "status" }} />}
         {status?.erro_gravacao && (
-          <SourceError message={`A rotina não consegue gravar o resultado no servidor (permissão em data/): ${status.erro_gravacao}`} />
+          <SourceError
+            message={`A rotina não consegue gravar o resultado no servidor (permissão em data/): ${status.erro_gravacao}`}
+            reportar={{ automationId: "ml-reconciliation", executionId: "gravacao-em-data" }}
+          />
         )}
 
         {status && (
@@ -902,7 +520,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
               // destaque a falha ficava só no log e o selo "Mercado Livre" seguia verde.
               const falhaVendasMl = (ultima?.avisos ?? []).find((a) => a.startsWith("Vendas do Mercado Livre não lidas")) ?? null;
               return (
-                <div key={e.id} className="rounded-lg border border-border p-3 text-xs">
+                <div key={e.id} className="rounded-none border border-border p-3 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-semibold text-foreground">{e.nome}</span>
                     <div className="flex flex-wrap gap-1">
@@ -940,12 +558,12 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           </div>
         )}
 
-        <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/20 p-3 lg:flex-row lg:items-end">
+        <div className="flex flex-col gap-3 rounded-none border border-border bg-muted/20 p-3 lg:flex-row lg:items-end">
           <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-3">
             <label className="space-y-1 text-[11px] font-medium text-muted-foreground">
               Empresa
               <select
-                className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
+                className="h-8 w-full rounded-none border border-border bg-background px-2 text-xs text-foreground"
                 value={execEmpresa}
                 onChange={(e) => setExecEmpresa(e.target.value)}
                 disabled={ocupado}
@@ -977,8 +595,8 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         {periodoInvalido && execDe && execAte && <p className="text-[11px] text-destructive">{periodoInvalido}</p>}
 
         {executando && (
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
-            <JobProgress job={execJob} elapsedMs={decorrido} texto="Andamento da conciliação" />
+          <div className="rounded-none border border-border bg-muted/30 p-3">
+            <JobProgress job={execJob} startedAt={execStartedAt} texto="Andamento da conciliação" />
             <p className="mt-2 text-[11px] text-muted-foreground">
               O Mercado Pago gera o relatório de liberações em alguns minutos, e o Tiny limita a velocidade das consultas: a execução
               pode levar de 5 a 20 minutos. Pode sair da tela — o resultado fica no histórico.
@@ -986,14 +604,14 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           </div>
         )}
         {!executando && status?.em_execucao && (
-          <p className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs text-foreground">
+          <p className="flex items-center gap-2 rounded-none border border-border bg-muted/30 p-3 text-xs text-foreground">
             <RefreshCw size={13} className="animate-spin text-primary" />
             {status.em_execucao.origem === "agendada" ? "Rotina diária em andamento" : "Execução em andamento"}
             {status.progresso ? `: ${status.progresso.empresa ? `${status.progresso.empresa} · ` : ""}${status.progresso.etapa}` : "…"}
           </p>
         )}
         {execErro && (
-          <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+          <div role="alert" className="rounded-none border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
             {execErro}
           </div>
         )}
@@ -1010,7 +628,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
               aria-selected={empresaId === e.id}
               onClick={() => trocarEmpresa(e.id)}
               className={cn(
-                "rounded-md px-3 py-1.5 text-xs font-medium transition",
+                "rounded-none px-3 py-1.5 text-xs font-medium transition",
                 empresaId === e.id ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
               )}
             >
@@ -1022,7 +640,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             Análise
             <select
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+              className="h-8 rounded-none border border-border bg-background px-2 text-xs text-foreground"
               value={analiseId ?? ""}
               onChange={(e) => {
                 setAnaliseErro(null);
@@ -1033,7 +651,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
               {analises.map((a) => {
                 const isConsolidado = a.analise_id.startsWith("consolidado_");
                 const label = isConsolidado
-                  ? `Pendências (últimos 60 dias) · ${formatDateTimeBR(a.criada_em)}`
+                  ? `Pendências acumuladas (todas as rodadas) · ${formatDateTimeBR(a.criada_em)}`
                   : `${periodoTexto(a.periodo_de, a.periodo_ate)} · ${a.origem === "agendada" ? "rotina" : "manual"} · ${formatDateTimeBR(a.criada_em)}`;
                 return (
                   <option key={a.analise_id} value={a.analise_id}>
@@ -1046,7 +664,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         )}
       </div>
 
-      {analiseErro && <SourceError message={analiseErro} />}
+      {analiseErro && <SourceError message={analiseErro} reportar={{ automationId: "ml-reconciliation", executionId: "analise" }} />}
       {analises && analises.length === 0 && (
         <div className="panel px-5 py-10 text-center text-xs text-muted-foreground">
           Nenhuma análise de {empresaStatus?.nome ?? "esta empresa"} ainda. A rotina diária gera uma por dia; use “Executar agora” para
@@ -1063,14 +681,14 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           <div className="text-xs text-muted-foreground">
             <span className="font-semibold text-foreground">{analise.empresa_nome}</span> ·{" "}
             {analise.analise_id.startsWith("consolidado_")
-              ? "pendências dos últimos 60 dias"
+              ? "pendências acumuladas de todas as rodadas (vendas fora da janela de 60 dias continuam baixáveis)"
               : `liberações de ${periodoTexto(analise.periodo_de, analise.periodo_ate)}`}{" "}
             · {analise.fontes.liberacoes ?? 0} linha(s) do Mercado Pago, {analise.fontes.pedidos_ml ?? 0} venda(s) do Mercado Livre,{" "}
             {analise.fontes.pedidos_tiny ?? 0} pedido(s) do Tiny · {analise.resumo.total_movimentos} movimentos
           </div>
 
           {analise.avisos.length > 0 && (
-            <div className="space-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+            <div className="space-y-1.5 rounded-none border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
               {analise.avisos.map((a) => (
                 <p key={a} className="flex gap-2">
                   <Info size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
@@ -1121,7 +739,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           <div className="panel space-y-2 p-3 sm:px-4">
             <div className="flex flex-wrap items-center gap-2">
               <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Planilhas</span>
-              {ARQUIVOS.map((a) => (
+              {ARQUIVOS.filter((a) => a.tipo !== "lancamentos" || canBaixar).map((a) => (
                 <Button
                   key={a.tipo}
                   variant="outline"
@@ -1141,10 +759,10 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
               </p>
             )}
             {avisoExportacao && (
-              <output className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--status-pending-border)] bg-[var(--status-pending-bg)] px-3 py-2 text-xs text-[var(--status-pending-fg)]">
+              <output className="flex flex-wrap items-center gap-2 rounded-none border border-[var(--status-pending-border)] bg-[var(--status-pending-bg)] px-3 py-2 text-xs text-[var(--status-pending-fg)]">
                 <AlertTriangle size={13} className="shrink-0" />
                 <span>{avisoExportacao.mensagem}</span>
-                {avisoExportacao.permitirTodos && (
+                {avisoExportacao.permitirTodos && canBaixar && (
                   <Button
                     variant="outline"
                     size="xs"
@@ -1172,7 +790,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                       setLimite(PAGINA);
                     }}
                     className={cn(
-                      "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition",
+                      "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-none px-3 py-1.5 text-xs font-medium transition",
                       tab === t.id ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
                     )}
                   >
@@ -1224,154 +842,19 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                   </div>
                 ) : (
                   <>
-                    <Table className="min-w-[900px]">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-10">
-                            <Checkbox
-                              checked={todosVisiveisMarcados}
-                              indeterminate={algunsVisiveisMarcados && !todosVisiveisMarcados}
-                              onCheckedChange={alternarTodos}
-                              disabled={aptosVisiveis.length === 0}
-                              aria-label="Selecionar todos os aptos"
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Liberação"
-                              def={RECEBIMENTOS_DEFS.data}
-                              value={colFilters.recebimentos.data}
-                              onChange={(v) => updateColFilter("recebimentos", "data", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Cliente"
-                              def={RECEBIMENTOS_DEFS.cliente}
-                              value={colFilters.recebimentos.cliente}
-                              onChange={(v) => updateColFilter("recebimentos", "cliente", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Venda"
-                              def={RECEBIMENTOS_DEFS.venda}
-                              value={colFilters.recebimentos.venda}
-                              onChange={(v) => updateColFilter("recebimentos", "venda", v)}
-                            />
-                          </TableHead>
-                          <TableHead className="text-right">
-                            <ColumnFilterHeader
-                              title="Recebido (bruto)"
-                              align="right"
-                              def={RECEBIMENTOS_DEFS.valor}
-                              value={colFilters.recebimentos.valor}
-                              onChange={(v) => updateColFilter("recebimentos", "valor", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Conta a receber (Tiny)"
-                              def={RECEBIMENTOS_DEFS.conta}
-                              value={colFilters.recebimentos.conta}
-                              onChange={(v) => updateColFilter("recebimentos", "conta", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Situação"
-                              def={RECEBIMENTOS_DEFS.situacao}
-                              value={colFilters.recebimentos.situacao}
-                              onChange={(v) => updateColFilter("recebimentos", "situacao", v)}
-                              uniqueValues={obterValoresUnicos(analise.grupos, RECEBIMENTOS_DEFS.situacao.accessor)}
-                              counts={contarValores(analise.grupos, RECEBIMENTOS_DEFS.situacao.accessor)}
-                            />
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {gruposFiltrados.slice(0, limite).map((g) => {
-                          const meta = situacaoMeta(g.situacao);
-                          const marcado = selecionados.has(g.id);
-                          return (
-                            <TableRow
-                              key={g.id}
-                              data-state={marcado ? "selected" : undefined}
-                              onClick={g.apto_baixa ? () => alternar(g.id) : undefined}
-                              className={cn("align-top", g.apto_baixa && "cursor-pointer")}
-                            >
-                              <TableCell>
-                                {g.apto_baixa && (
-                                  <Checkbox
-                                    checked={marcado}
-                                    onCheckedChange={() => alternar(g.id)}
-                                    onClick={(e) => e.stopPropagation()}
-                                    aria-label={`Selecionar ${g.nome_cliente}, venda ${g.id_venda}`}
-                                  />
-                                )}
-                              </TableCell>
-                              <TableCell className="tabular-nums">{g.data}</TableCell>
-                              <TableCell>
-                                <div className="max-w-56 whitespace-normal font-medium text-foreground">{g.nome_cliente || "—"}</div>
-                              </TableCell>
-                              <TableCell>
-                                <code>{g.id_venda || "sem venda"}</code>
-                                {g.mlb && <div className="mt-0.5 text-[11px] font-mono text-muted-foreground">{g.mlb}</div>}
-                                {g.quantidade_movimentos > 1 && (
-                                  <div className="mt-1">
-                                    <Badge variant="secondary">{g.quantidade_movimentos} liberações</Badge>
-                                  </div>
-                                )}
-                              </TableCell>
-                              <TableCell className="text-right font-semibold tabular-nums">{money(g.valor_total)}</TableCell>
-                              <TableCell>
-                                {g.contas_vinculadas && g.contas_vinculadas.length > 1 ? (
-                                  <div className="max-w-72 whitespace-normal space-y-1">
-                                    <div className="flex items-center gap-1.5 flex-wrap">
-                                      <Badge variant="outline" className="text-[10px] font-mono border-primary/40 text-primary">
-                                        {g.contas_vinculadas.length} parcelas
-                                      </Badge>
-                                      <span className="text-[11px] text-muted-foreground">
-                                        {g.conta_saldo !== null && `saldo ${money(g.conta_saldo)}`}
-                                      </span>
-                                    </div>
-                                    <div className="text-[11px] text-muted-foreground font-mono">
-                                      {g.contas_vinculadas.map((c) => `#${c.id}${c.numero ? ` (${c.numero}ª)` : ""}`).join(", ")}
-                                    </div>
-                                    <p className="line-clamp-2 text-[11px] text-muted-foreground" title={g.conta_historico}>
-                                      {g.conta_historico}
-                                    </p>
-                                  </div>
-                                ) : g.conta_id ? (
-                                  <div className="max-w-72 whitespace-normal">
-                                    <code>#{g.conta_id}</code>
-                                    <span className="ml-1.5 text-[11px] text-muted-foreground">
-                                      {g.conta_valor !== null && `valor ${money(g.conta_valor)}`}
-                                      {g.conta_saldo !== null && ` · saldo ${money(g.conta_saldo)}`}
-                                    </span>
-                                    <p className="line-clamp-2 text-[11px] text-muted-foreground" title={g.conta_historico}>
-                                      {g.conta_historico}
-                                    </p>
-                                  </div>
-                                ) : (
-                                  <span className="text-muted-foreground">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell>
-                                <div className="max-w-60 space-y-1 whitespace-normal">
-                                  <Badge variant={meta.tone}>{meta.label}</Badge>
-                                  {g.mensagem && (
-                                    <p className="line-clamp-2 text-[11px] text-muted-foreground" title={g.mensagem}>
-                                      {g.mensagem}
-                                    </p>
-                                  )}
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
+                    <RecebimentosTable
+                      analise={analise}
+                      colFilters={colFilters}
+                      updateColFilter={updateColFilter}
+                      gruposFiltrados={gruposFiltrados}
+                      limite={limite}
+                      selecionados={selecionados}
+                      alternar={alternar}
+                      alternarTodos={alternarTodos}
+                      aptosVisiveis={aptosVisiveis}
+                      todosVisiveisMarcados={todosVisiveisMarcados}
+                      algunsVisiveisMarcados={algunsVisiveisMarcados}
+                    />
                     <MaisLinhas mostrando={limite} total={gruposFiltrados.length} onMais={() => setLimite((l) => l + PAGINA)} />
                   </>
                 )}
@@ -1406,96 +889,13 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                   <div className="px-5 py-10 text-center text-xs text-muted-foreground">Nenhum pagamento neste filtro.</div>
                 ) : (
                   <>
-                    <Table className="min-w-[980px]">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Liberação"
-                              def={VENDAS_DEFS.data}
-                              value={colFilters.vendas.data}
-                              onChange={(v) => updateColFilter("vendas", "data", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Pagamento (MP)"
-                              def={VENDAS_DEFS.pagamento}
-                              value={colFilters.vendas.pagamento}
-                              onChange={(v) => updateColFilter("vendas", "pagamento", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Venda (ML)"
-                              def={VENDAS_DEFS.venda}
-                              value={colFilters.vendas.venda}
-                              onChange={(v) => updateColFilter("vendas", "venda", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Cliente (Tiny)"
-                              def={VENDAS_DEFS.cliente}
-                              value={colFilters.vendas.cliente}
-                              onChange={(v) => updateColFilter("vendas", "cliente", v)}
-                            />
-                          </TableHead>
-                          <TableHead className="text-right">
-                            <ColumnFilterHeader
-                              title="Líquido liberado"
-                              align="right"
-                              def={VENDAS_DEFS.valor}
-                              value={colFilters.vendas.valor}
-                              onChange={(v) => updateColFilter("vendas", "valor", v)}
-                            />
-                          </TableHead>
-                          <TableHead>
-                            <ColumnFilterHeader
-                              title="Ligação"
-                              def={VENDAS_DEFS.ligacao}
-                              value={colFilters.vendas.ligacao}
-                              onChange={(v) => updateColFilter("vendas", "ligacao", v)}
-                              uniqueValues={obterValoresUnicos(analise.comparativo, VENDAS_DEFS.ligacao.accessor)}
-                              counts={contarValores(analise.comparativo, VENDAS_DEFS.ligacao.accessor)}
-                            />
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {comparativoFiltrado.slice(0, limite).map((c) => {
-                          const meta = casamentoMeta(c.casou_por);
-                          return (
-                            <TableRow key={`${c.id_pagamento}-${c.data}`} className="align-top">
-                              <TableCell className="tabular-nums">{c.data}</TableCell>
-                              <TableCell>
-                                <code>{c.id_pagamento || "—"}</code>
-                              </TableCell>
-                              <TableCell>
-                                {c.id_pedido ? (
-                                  <>
-                                    <code>{c.id_pedido}</code>
-                                    {c.id_pacote && <div className="text-[11px] text-muted-foreground">pacote {c.id_pacote}</div>}
-                                    {c.mlb && <div className="text-[11px] font-mono text-muted-foreground">{c.mlb}</div>}
-                                    {c.status_venda && <div className="text-[11px] text-muted-foreground">{c.status_venda}</div>}
-                                  </>
-                                ) : (
-                                  <span className="text-muted-foreground">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="max-w-48 whitespace-normal">{c.nome_cliente || "—"}</TableCell>
-                              <TableCell className="text-right tabular-nums">{money(c.valor_liberado)}</TableCell>
-                              <TableCell>
-                                <div className="max-w-72 space-y-1 whitespace-normal">
-                                  <Badge variant={meta.tone}>{meta.label}</Badge>
-                                  {c.observacao && <p className="text-[11px] text-muted-foreground">{c.observacao}</p>}
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
+                    <VendasTable
+                      analise={analise}
+                      colFilters={colFilters}
+                      updateColFilter={updateColFilter}
+                      comparativoFiltrado={comparativoFiltrado}
+                      limite={limite}
+                    />
                     <MaisLinhas mostrando={limite} total={comparativoFiltrado.length} onMais={() => setLimite((l) => l + PAGINA)} />
                   </>
                 )}
@@ -1526,95 +926,13 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                     <div className="px-5 py-10 text-center text-xs text-muted-foreground">Nenhum lançamento neste filtro de fluxo.</div>
                   ) : (
                     <>
-                      <Table className="min-w-[980px]">
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Data"
-                                def={LANCAMENTOS_DEFS.data}
-                                value={colFilters.lancamentos.data}
-                                onChange={(v) => updateColFilter("lancamentos", "data", v)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Fluxo MP"
-                                def={LANCAMENTOS_DEFS.fluxo}
-                                value={colFilters.lancamentos.fluxo}
-                                onChange={(v) => updateColFilter("lancamentos", "fluxo", v)}
-                                uniqueValues={["Recebimento MP", "Pagamento MP"]}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Categoria"
-                                def={LANCAMENTOS_DEFS.categoria}
-                                value={colFilters.lancamentos.categoria}
-                                onChange={(v) => updateColFilter("lancamentos", "categoria", v)}
-                                uniqueValues={obterValoresUnicos(analise.lancamentos, LANCAMENTOS_DEFS.categoria.accessor)}
-                                counts={contarValores(analise.lancamentos, LANCAMENTOS_DEFS.categoria.accessor)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Histórico"
-                                def={LANCAMENTOS_DEFS.historico}
-                                value={colFilters.lancamentos.historico}
-                                onChange={(v) => updateColFilter("lancamentos", "historico", v)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Contato"
-                                def={LANCAMENTOS_DEFS.contato}
-                                value={colFilters.lancamentos.contato}
-                                onChange={(v) => updateColFilter("lancamentos", "contato", v)}
-                              />
-                            </TableHead>
-                            <TableHead className="text-right">
-                              <ColumnFilterHeader
-                                title="Valor"
-                                align="right"
-                                def={LANCAMENTOS_DEFS.valor}
-                                value={colFilters.lancamentos.valor}
-                                onChange={(v) => updateColFilter("lancamentos", "valor", v)}
-                              />
-                            </TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {lancamentosFiltrados.slice(0, limite).map((l) => (
-                            <TableRow key={l.indice} className="align-top">
-                              <TableCell className="tabular-nums">{l.data}</TableCell>
-                              <TableCell>
-                                <Badge variant={l.tipo === "C" ? "success" : "secondary"}>
-                                  {l.tipo === "C" ? "Recebimento MP" : "Pagamento MP"}
-                                </Badge>
-                              </TableCell>
-                              <TableCell className="whitespace-normal">{l.categoria}</TableCell>
-                              <TableCell>
-                                <p className="line-clamp-2 max-w-96 whitespace-normal text-[11px]" title={l.historico}>
-                                  {l.historico}
-                                </p>
-                              </TableCell>
-                              <TableCell>
-                                <div className="max-w-48 whitespace-normal">{l.contato || "—"}</div>
-                                {l.cnpj && <code className="text-[11px]">{l.cnpj}</code>}
-                              </TableCell>
-                              <TableCell
-                                className={cn(
-                                  "text-right font-semibold tabular-nums",
-                                  l.tipo === "C" ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400",
-                                )}
-                              >
-                                {l.tipo === "C" ? "+" : "−"}
-                                {money(l.valor)}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
+                      <LancamentosTable
+                        analise={analise}
+                        colFilters={colFilters}
+                        updateColFilter={updateColFilter}
+                        lancamentosFiltrados={lancamentosFiltrados}
+                        limite={limite}
+                      />
                       <MaisLinhas mostrando={limite} total={lancamentosFiltrados.length} onMais={() => setLimite((l) => l + PAGINA)} />
                     </>
                   )}
@@ -1645,101 +963,13 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                     <div className="px-5 py-10 text-center text-xs text-muted-foreground">Nenhum movimento para conferir neste filtro.</div>
                   ) : (
                     <>
-                      <Table className="min-w-[920px]">
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Data"
-                                def={PENDENCIAS_DEFS.data}
-                                value={colFilters.pendencias.data}
-                                onChange={(v) => updateColFilter("pendencias", "data", v)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Fluxo MP"
-                                def={PENDENCIAS_DEFS.fluxo}
-                                value={colFilters.pendencias.fluxo}
-                                onChange={(v) => updateColFilter("pendencias", "fluxo", v)}
-                                uniqueValues={["Recebimento MP", "Pagamento MP"]}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Tipo de operação"
-                                def={PENDENCIAS_DEFS.tipo_operacao}
-                                value={colFilters.pendencias.tipo_operacao}
-                                onChange={(v) => updateColFilter("pendencias", "tipo_operacao", v)}
-                                uniqueValues={obterValoresUnicos(analise.pendencias, PENDENCIAS_DEFS.tipo_operacao.accessor)}
-                                counts={contarValores(analise.pendencias, PENDENCIAS_DEFS.tipo_operacao.accessor)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Pagamento / venda"
-                                def={PENDENCIAS_DEFS.referencia}
-                                value={colFilters.pendencias.referencia}
-                                onChange={(v) => updateColFilter("pendencias", "referencia", v)}
-                              />
-                            </TableHead>
-                            <TableHead className="text-right">
-                              <ColumnFilterHeader
-                                title="Valor"
-                                align="right"
-                                def={PENDENCIAS_DEFS.valor}
-                                value={colFilters.pendencias.valor}
-                                onChange={(v) => updateColFilter("pendencias", "valor", v)}
-                              />
-                            </TableHead>
-                            <TableHead>
-                              <ColumnFilterHeader
-                                title="Motivo da pendência"
-                                def={PENDENCIAS_DEFS.motivo}
-                                value={colFilters.pendencias.motivo}
-                                onChange={(v) => updateColFilter("pendencias", "motivo", v)}
-                              />
-                            </TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {pendenciasFiltradas.slice(0, limite).map((p) => {
-                            const meta = pendenciaMotivoMeta(p.motivo);
-                            const ehRecebimento = p.valor >= 0;
-                            return (
-                              <TableRow key={p.indice} className="align-top">
-                                <TableCell className="tabular-nums">{p.data}</TableCell>
-                                <TableCell>
-                                  <Badge variant={ehRecebimento ? "success" : "secondary"}>
-                                    {ehRecebimento ? "Recebimento MP" : "Pagamento MP"}
-                                  </Badge>
-                                </TableCell>
-                                <TableCell className="whitespace-normal font-medium">{p.tipo_operacao}</TableCell>
-                                <TableCell>
-                                  <code>{p.operacao_relacionada || "—"}</code>
-                                  {p.id_venda && <div className="text-[11px] text-muted-foreground">venda {p.id_venda}</div>}
-                                  {p.nome_cliente && <div className="text-[11px] text-muted-foreground">{p.nome_cliente}</div>}
-                                </TableCell>
-                                <TableCell
-                                  className={cn(
-                                    "text-right tabular-nums font-semibold",
-                                    ehRecebimento ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400",
-                                  )}
-                                >
-                                  {ehRecebimento ? "+" : "−"}
-                                  {money(Math.abs(p.valor))}
-                                </TableCell>
-                                <TableCell className="max-w-80 whitespace-normal">
-                                  <div className="space-y-1">
-                                    <Badge variant={meta.tone}>{meta.label}</Badge>
-                                    <p className="text-[11px] text-muted-foreground">{p.motivo}</p>
-                                  </div>
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
+                      <PendenciasTable
+                        analise={analise}
+                        colFilters={colFilters}
+                        updateColFilter={updateColFilter}
+                        pendenciasFiltradas={pendenciasFiltradas}
+                        limite={limite}
+                      />
                       <MaisLinhas mostrando={limite} total={pendenciasFiltradas.length} onMais={() => setLimite((l) => l + PAGINA)} />
                     </>
                   )}
@@ -1770,6 +1000,14 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
         </>
       )}
 
+      <MlTarifasPendentes
+        service={service}
+        empresaId={empresaId}
+        empresaNome={nomes.get(empresaId) ?? empresaId}
+        canLancar={canBaixar}
+        onConcluido={() => void carregarExecucoes()}
+      />
+
       <HistoricoExecucoes service={service} execucoes={execucoes} erro={execucoesErro} nomes={nomes} />
 
       <AlertDialog
@@ -1788,27 +1026,29 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
                 ? `${baixaResultado.total_sucessos} de ${baixaResultado.total_solicitados} recebimento(s) baixado(s).`
                 : baixando
                   ? "Cada conta é relida antes da baixa: se já não estiver em aberto, ou o saldo for menor que o recebido, é pulada."
-                  : `A baixa entra na conta ${analise?.lancamentos[0]?.conta ?? "do Mercado Livre"} de ${analise?.empresa_nome ?? ""}, na data da liberação, pelo valor bruto recebido.`}
+                  : `A baixa entra na conta ${analise?.lancamentos[0]?.conta ?? "do Mercado Livre"} de ${analise?.empresa_nome ?? ""}, na data da venda, pelo valor bruto recebido.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
 
           {baixando && (
-            <div className="rounded-lg border border-border bg-muted/40 p-3">
-              <JobProgress job={baixaJob} elapsedMs={decorrido} texto="Andamento da baixa" />
+            <div className="rounded-none border border-border bg-muted/40 p-3">
+              <JobProgress job={baixaJob} startedAt={baixaStartedAt} texto="Andamento da baixa" />
             </div>
           )}
 
           {!baixando && !baixaResultado && (
-            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-lg border border-border text-xs">
+            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-none border border-border text-xs">
               {gruposSelecionados.map((g) => (
                 <li key={g.id} className="flex items-start justify-between gap-3 p-2.5">
                   <div className="min-w-0">
                     <div className="font-medium text-foreground">{g.nome_cliente}</div>
                     <div className="text-[11px] text-muted-foreground">
-                      {g.contas_vinculadas && g.contas_vinculadas.length > 1
-                        ? `${g.contas_vinculadas.length} parcelas`
-                        : `Conta #${g.conta_id}`}{" "}
-                      · venda {g.id_venda} · {g.data}
+                      {vendaCancelada(g)
+                        ? `Cria a conta do pedido nº ${g.pedido_tiny_numero} (${money(g.pedido_tiny_valor ?? 0)}), baixa e lança estorno + tarifas`
+                        : g.contas_vinculadas && g.contas_vinculadas.length > 1
+                          ? `${g.contas_vinculadas.length} parcelas`
+                          : `Conta #${g.conta_id}`}{" "}
+                      · venda {g.id_venda} · {g.data_venda || g.data}
                     </div>
                   </div>
                   <span className="shrink-0 font-semibold tabular-nums">{money(g.valor_total)}</span>
@@ -1818,7 +1058,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           )}
 
           {baixaResultado && (
-            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-lg border border-border text-xs">
+            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-none border border-border text-xs">
               {baixaResultado.resultados.map((r) => (
                 <li key={r.grupo_id} className="flex items-start justify-between gap-3 p-2.5">
                   <div className="min-w-0">
@@ -1836,7 +1076,7 @@ export default function MlReconciliationView({ apiBaseUrl }: { apiBaseUrl?: stri
           )}
 
           {baixaErro && (
-            <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+            <div role="alert" className="rounded-none border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
               {baixaErro}
             </div>
           )}

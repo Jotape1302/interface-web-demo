@@ -56,6 +56,7 @@ export const SITUACAO_INFO: Record<SituacaoAnuncio, { label: string; variant: 's
   bloqueado: { label: 'A combinar (bloqueado)', variant: 'warning' },
   conferindo: { label: 'Conferindo', variant: 'info' },
   falha: { label: 'ML desfez', variant: 'danger' },
+  tipo_inconsistente: { label: 'Tipo errado pela embalagem', variant: 'warning' },
   ok: { label: 'Ok', variant: 'success' },
 };
 

@@ -1,4 +1,8 @@
 import type { Dashboard, OverviewResponse } from "../contracts.js";
+import { hasPermission } from "../permissions.js";
+import { semRoiNasMetricas } from "../roi.js";
+import { lerPeriodo } from "../periodo.js";
+import type { RoiPeriodo, RoiResponse } from "../contracts.js";
 import { methodNotAllowed, type RequestContext } from "../http.js";
 
 // Visão geral do Financeiro e painel de Contas a Pagar. Último módulo da cadeia:
@@ -6,11 +10,26 @@ import { methodNotAllowed, type RequestContext } from "../http.js";
 export function createDashboardRoutes(deps: {
   dashboard: { read(): Promise<Dashboard> };
   overview?: { read(): Promise<OverviewResponse> };
+  roi?: { read(periodo?: RoiPeriodo): Promise<RoiResponse> };
 }) {
-  const { dashboard, overview } = deps;
+  const { dashboard, overview, roi } = deps;
 
   return async function handleDashboard(ctx: RequestContext): Promise<boolean> {
     const { path, send } = ctx;
+
+    if (path === "/api/roi" && roi) {
+      if (ctx.method !== "GET") {
+        methodNotAllowed(ctx, "GET, OPTIONS");
+        return true;
+      }
+      const lido = lerPeriodo(ctx.url.searchParams);
+      if ("erro" in lido) return send(400, { error: lido.erro });
+      try {
+        return send(200, await roi.read(lido.periodo));
+      } catch {
+        return send(500, { error: "Falha interna ao calcular o ROI" });
+      }
+    }
 
     const isDashboardPath =
       path === "/api/accounts-payable/dashboard" || (path === "/api/overview" && !!overview);
@@ -21,7 +40,14 @@ export function createDashboardRoutes(deps: {
         return true;
       }
       try {
-        return send(200, path === "/api/overview" && overview ? await overview.read() : await dashboard.read());
+        // Horas e R$ economizados só vão para quem tem `roi:ver` (corte no servidor; sem sessão = sem ROI).
+        const veRoi = !!ctx.session && hasPermission(ctx.session, "roi:ver");
+        if (path === "/api/overview" && overview) {
+          const o = await overview.read();
+          return send(200, veRoi ? o : { ...o, automations: o.automations.map((a) => ({ ...a, dashboard: semRoiNasMetricas(a.dashboard) })) });
+        }
+        const d = await dashboard.read();
+        return send(200, veRoi ? d : semRoiNasMetricas(d));
       } catch {
         return send(500, { error: "Falha interna ao consultar o dashboard" });
       }

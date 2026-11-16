@@ -1,0 +1,18 @@
+# Coletor de incidentes (scripts/coletor-incidentes/coletor.py): segue os logs dos containers e
+# envia os erros ao orquestrador dos agentes Qwen pelo túnel SSH reverso aberto pelo PC do TI.
+# Unidade de USUÁRIO (systemctl --user), como o Docker rootless do servidor.
+# Ajuste o caminho do repositório em ExecStart antes de instalar.
+[Unit]
+Description=Norvia - coletor de incidentes para os agentes Qwen
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/norvia/interface-web/scripts/coletor-incidentes/coletor.py --env-file %h/norvia/interface-web/scripts/coletor-incidentes/coletor.env
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

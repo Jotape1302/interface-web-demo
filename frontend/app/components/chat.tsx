@@ -42,7 +42,7 @@ function initials(nome: string) {
   return nome.trim().charAt(0).toUpperCase() || '?';
 }
 
-export default function Chat({ config }: { config: DashboardConfig }) {
+export default function Chat({ config: _config }: { config: DashboardConfig }) {
   const { user, token, apiBaseUrl, isDemoMode } = useAuth();
 
   const [contacts, setContacts] = useState<ChatContact[]>([]);
@@ -87,6 +87,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
   }, [isDemoMode, apiBaseUrl, authHeaders]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     void loadContacts();
     if (isDemoMode) {
       void loadConversations();
@@ -138,6 +139,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
   useEffect(() => {
     if (selectedUserId === null) return;
     if (isDemoMode) {
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
       void loadMessages();
     } else {
       void refreshMessages();
@@ -153,7 +155,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSend = async (e: React.FormEvent) => {
+  const handleSend = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     const texto = draft.trim();
     if (!texto || selectedUserId === null || !user) return;
@@ -215,13 +217,13 @@ export default function Chat({ config }: { config: DashboardConfig }) {
 
       <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4 h-[calc(100vh-220px)] min-h-[420px]">
         {/* Lista de conversas */}
-        <div className="rounded-xl border border-border bg-card flex flex-col overflow-hidden">
+        <div className="rounded-none border border-border bg-card flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/60">
             <span className="text-xs font-bold text-foreground uppercase tracking-wider">Conversas</span>
             <button
               type="button"
               onClick={() => setShowContactPicker((v) => !v)}
-              className="rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-primary transition cursor-pointer"
+              className="rounded-none p-1 text-muted-foreground hover:bg-muted hover:text-primary transition cursor-pointer"
               title="Nova conversa"
             >
               {showContactPicker ? <X size={15} /> : <Plus size={15} />}
@@ -238,7 +240,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
                     value={contactSearch}
                     onChange={(e) => setContactSearch(e.target.value)}
                     placeholder="Buscar colaborador..."
-                    className="w-full rounded-lg border border-border bg-background pl-7 pr-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring/60"
+                    className="w-full rounded-none border border-border bg-background pl-7 pr-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring/60"
                   />
                 </div>
               </div>
@@ -256,7 +258,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
                     }}
                     className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-muted/40 transition cursor-pointer border-b border-border/30 last:border-0"
                   >
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-none text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
                       {initials(c.nome)}
                     </span>
                     <div className="min-w-0">
@@ -291,7 +293,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
                           isActive ? 'bg-[var(--marca-ambar-suave)]' : 'hover:bg-muted/40'
                         }`}
                       >
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-none text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
                           {initials(contact?.nome || `Usuário #${conv.outroUsuarioId}`)}
                         </span>
                         <div className="min-w-0 flex-1">
@@ -316,7 +318,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
         </div>
 
         {/* Thread de mensagens */}
-        <div className="rounded-xl border border-border bg-card flex flex-col overflow-hidden">
+        <div className="rounded-none border border-border bg-card flex flex-col overflow-hidden">
           {!selectedContact ? (
             <div className="flex-1 flex items-center justify-center text-center text-xs text-muted-foreground p-6">
               Selecione uma conversa ou inicie uma nova pra começar a conversar.
@@ -324,7 +326,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
           ) : (
             <>
               <div className="flex items-center gap-2.5 px-4 py-3 border-b border-border/60">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-none text-xs font-bold bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
                   {initials(selectedContact.nome)}
                 </span>
                 <div>
@@ -339,7 +341,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
                   return (
                     <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                       <div
-                        className={`max-w-[75%] rounded-xl px-3 py-2 text-xs ${
+                        className={`max-w-[75%] rounded-none px-3 py-2 text-xs ${
                           mine ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground'
                         }`}
                       >
@@ -360,7 +362,7 @@ export default function Chat({ config }: { config: DashboardConfig }) {
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder="Escreva uma mensagem..."
-                  className="flex-1 rounded-xl border border-border bg-background px-3.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
+                  className="flex-1 rounded-none border border-border bg-background px-3.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
                 />
                 <Button
                   type="submit"

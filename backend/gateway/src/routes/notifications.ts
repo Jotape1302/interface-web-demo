@@ -1,6 +1,7 @@
 import type { AuthService } from "../auth.js";
 import type { NotificationService } from "../notifications.js";
-import { requireSession, parseJsonBody, type RequestContext } from "../http.js";
+import type { PermissionArea } from "../permissions.js";
+import { requireSession, type RequestContext, asJsonObject, parseJsonObject, type JsonObject } from "../http.js";
 
 // Notificações do usuário logado (/api/notifications/*) — qualquer sessão válida.
 export function createNotificationRoutes(deps: { auth: AuthService; notifications?: NotificationService }) {
@@ -39,13 +40,13 @@ export function createNotificationRoutes(deps: { auth: AuthService; notification
       if (session.user.role !== "admin") {
         return send(403, { error: "Apenas administradores podem emitir notificações direcionadas." });
       }
-      let body: any;
+      let body: JsonObject;
       try {
-        body = await parseJsonBody<any>(ctx.request);
+        body = await parseJsonObject(ctx.request);
       } catch {
         return send(400, { error: "JSON inválido na requisição" });
       }
-      if (!body || !body.tipo || !body.titulo) {
+      if (!body.tipo || !body.titulo) {
         return send(400, { error: "Campos 'tipo' e 'titulo' são obrigatórios" });
       }
       const notifData = {
@@ -57,16 +58,17 @@ export function createNotificationRoutes(deps: { auth: AuthService; notification
 
       // Destino: usuário, permissão ("<aba>:<acao>" — quem tem a chave + admins), área (quem vê
       // alguma aba da área + admins), setor (rótulo de equipe, envio manual) ou perfil.
-      if (body.target?.userId) {
-        await notifications.notify(Number(body.target.userId), notifData);
-      } else if (typeof body.target?.permission === "string") {
-        await notifications.notifyPermission(body.target.permission, notifData);
-      } else if (body.target?.area) {
-        await notifications.notifyArea(body.target.area, notifData);
-      } else if (body.target?.setor) {
-        await notifications.notifySetor(body.target.setor, notifData);
-      } else if (body.target?.role === "admin" || body.target?.role === "gestor" || body.target?.role === "user") {
-        await notifications.notifyRole(body.target.role, notifData);
+      const target = asJsonObject(body.target);
+      if (target.userId) {
+        await notifications.notify(Number(target.userId), notifData);
+      } else if (typeof target.permission === "string") {
+        await notifications.notifyPermission(target.permission, notifData);
+      } else if (target.area) {
+        await notifications.notifyArea(target.area as PermissionArea, notifData);
+      } else if (target.setor) {
+        await notifications.notifySetor(target.setor as string, notifData);
+      } else if (target.role === "admin" || target.role === "gestor" || target.role === "user") {
+        await notifications.notifyRole(target.role, notifData);
       } else {
         await notifications.notifyRole("admin", notifData);
       }

@@ -280,7 +280,7 @@ class _StubClientOneCategoriaFlaky:
     def list_caixa_v3(self, token, id_categoria=None, data_inicial=None, data_final=None, max_pages=None):
         if id_categoria == self.FALHA_CATEGORIA_ID:
             raise TinyAPIError(
-                f"Falha de rede persistente ao chamar /caixa mesmo após 3 tentativas: timeout"
+                "Falha de rede persistente ao chamar /caixa mesmo após 3 tentativas: timeout"
             )
         if id_categoria is None or id_categoria == "483351497":  # Salários
             return [{"tipo": "D", "data": "2026-09-10", "valor": 2000.0}]

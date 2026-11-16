@@ -1,0 +1,15 @@
+# Teste mensal de restauração (scripts/backup/backup.sh verify-restore): carrega o último
+# backup bom num MariaDB descartável (docker/podman rootless) e confere que as tabelas voltam.
+# Unidade de USUÁRIO (systemctl --user). Ajuste o caminho do repositório em ExecStart.
+[Unit]
+Description=Norvia - teste de restauração do último backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/norvia/interface-web/scripts/backup/backup.sh verify-restore
+# Subir o MariaDB e carregar o dump demora; dá folga.
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

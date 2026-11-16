@@ -1,18 +1,14 @@
 import type { AuthService } from "../auth.js";
 import type { EventHub } from "../events.js";
 import type { AuditService } from "../audit.js";
-import { parseIncidentReport, type IncidentAutomationId, type IncidentService } from "../incidents.js";
+import { AUTOMACOES_REPORTAVEIS, parseIncidentReport, type IncidentService } from "../incidents.js";
+import { AGENTES_QWEN_PERMISSAO } from "../agentes-qwen.js";
 import { hasPermission } from "../permissions.js";
 import { parseJsonBody, requireSession, sendError, type RequestContext } from "../http.js";
 
-/** Aba de cada automação que gera incidentes — só quem vê a aba reporta/vê o incidente dela (GW-16). */
-const INCIDENT_VIEW: Record<IncidentAutomationId, string> = {
-  "accounts-payable": "contas_pagar:ver",
-  "danfe-tiny": "revisao_nfe:ver",
-};
-
-// Incidentes (/api/incidents/*) — listar: quem vê Erros & Falhas vê todos, os demais só os das
-// abas que veem; reportar: quem vê a aba da automação; resolver: erros:resolver (server.ts).
+// Reportes de erro (/api/incidents) — botão "Reportar erro" das abas; quem resolve são os agentes
+// Qwen (agentes-qwen.ts). Listar: quem vê a aba Agentes Qwen vê todos, os demais só os das abas que
+// veem; reportar: quem vê a aba da automação (GW-16).
 export function createIncidentRoutes(deps: {
   auth: AuthService;
   incidents?: IncidentService;
@@ -34,19 +30,16 @@ export function createIncidentRoutes(deps: {
       const all = await incidents.list({ status });
       return send(
         200,
-        hasPermission(session, "erros:ver")
+        hasPermission(session, AGENTES_QWEN_PERMISSAO)
           ? all
-          : all.filter((i) => {
-              const view = INCIDENT_VIEW[i.automationId];
-              return view ? hasPermission(session, view) : false;
-            }),
+          : all.filter((i) => hasPermission(session, AUTOMACOES_REPORTAVEIS[i.automationId].ver)),
       );
     }
 
     if (path === "/api/incidents" && method === "POST") {
       try {
         const input = parseIncidentReport(await parseJsonBody(request));
-        const view = INCIDENT_VIEW[input.automationId];
+        const view = AUTOMACOES_REPORTAVEIS[input.automationId].ver;
         if (!hasPermission(session, view)) {
           return send(403, { error: "Você não tem acesso à aba desta automação.", code: "forbidden", permission: view });
         }
@@ -58,7 +51,7 @@ export function createIncidentRoutes(deps: {
         void audit?.record({
           actor: session.user,
           acao: "incidente_reportado",
-          alvo: `${incident.automationTitle} · execução ${incident.executionId}`,
+          alvo: `${incident.automationTitle} · ${incident.executionId}`,
           detalhes: incident.stoppedNode ? { etapa: incident.stoppedNode } : undefined,
           ip: ctx.ip,
         });
@@ -66,19 +59,6 @@ export function createIncidentRoutes(deps: {
       } catch (e) {
         return sendError(ctx, e, "Falha ao reportar incidente.");
       }
-    }
-
-    const resolveMatch = path.match(/^\/api\/incidents\/([\w-]+)\/resolve$/);
-    if (resolveMatch && method === "POST") {
-      if (!hasPermission(session, "erros:resolver")) {
-        return send(403, { error: "Você não tem permissão para resolver incidentes.", code: "forbidden", permission: "erros:resolver" });
-      }
-      const ok = await incidents.resolve(resolveMatch[1] ?? "", session.user.nome);
-      if (ok) {
-        events?.publish("all", "incidents");
-        void audit?.record({ actor: session.user, acao: "incidente_resolvido", alvo: `Incidente #${resolveMatch[1]}`, ip: ctx.ip });
-      }
-      return send(ok ? 200 : 404, { success: ok });
     }
 
     return send(404, { error: "Endpoint de incidentes não encontrado" });

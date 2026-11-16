@@ -3,122 +3,74 @@ import json
 import logging
 import re
 import sys
-import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlencode
 
 import requests
 
+from app.fuso import hoje_sp
+from app.http_retry import MAX_TENTATIVAS, deve_repetir, espera_segundos, retry_after_segundos
 from app.categorization import GroupedLancamento
 from app.config import settings
 from app.http_errors import sufixo_erro
 from app.json_store import SECRET_FILE_MODE, write_json_atomic
 from app.nfe_client import NFeData, NFeDuplicate, calculate_marker_vencimento
-from app.tiny_categories import CATEGORY_BY_ID, TINY_CATEGORIES, _normalize
+from app.tiny_categories import CATEGORY_BY_ID, _normalize
 from app.token_repository import TokenRepository
 
 
 logger = logging.getLogger(__name__)
 
-# Configurações padronizadas de timeout para o Tiny ERP v3 (connect_timeout, read_timeout)
-DEFAULT_TINY_TIMEOUT: Tuple[float, float] = (5.0, 25.0)
-DEFAULT_TINY_QUERY_TIMEOUT: Tuple[float, float] = (5.0, 15.0)
-
-# Intervalo mínimo entre chamadas consecutivas à API REST do Tiny v3 (/public-api/v3/...),
-# em TODO o processo — não só dentro de uma instância de TinyClient (que é criada nova a
-# cada chamada em vários pontos, ex.: already_launched_in_tiny). Protege contra bloqueio
-# por volume de requisições quando muitas notas são processadas em sequência: varredura
-# SEFAZ (uma checagem de duplicidade por nota nova) e "Confirmar e Enviar" em lote (um
-# lançamento por nota, sem pausa nenhuma entre elas). Incidente real 2026-09-18: HTTP 403
-# SEM corpo de erro do Tiny (típico de bloqueio de infraestrutura/rate-limit, não de
-# validação de payload) em notas completamente diferentes — uma duplicata de verdade e
-# duas que não eram — na mesma sessão de lançamento em lote.
-_TINY_API_MIN_INTERVAL_SECONDS = 0.5
-_tiny_api_lock = threading.Lock()
-_tiny_api_last_call_at = 0.0
-
-
-def _throttle_tiny_api_call() -> None:
-    global _tiny_api_last_call_at
-    with _tiny_api_lock:
-        now = time.monotonic()
-        elapsed = now - _tiny_api_last_call_at
-        if elapsed < _TINY_API_MIN_INTERVAL_SECONDS:
-            time.sleep(_TINY_API_MIN_INTERVAL_SECONDS - elapsed)
-        _tiny_api_last_call_at = time.monotonic()
+from app.tiny.base import (  # noqa: F401  (reexportados: a fachada mantém os nomes públicos e privados)
+    _TINY_API_MIN_INTERVAL_SECONDS,
+    _TINY_DASHBOARD_MAX_CONSECUTIVE_BLOCK_FAILURES,
+    _TINY_DASHBOARD_MAX_NETWORK_RETRIES,
+    _TINY_DASHBOARD_MAX_RATE_LIMIT_RETRIES,
+    _TINY_DASHBOARD_MIN_INTERVAL_SECONDS,
+    _TINY_DASHBOARD_NETWORK_RETRY_BASE_WAIT_SECONDS,
+    _TINY_DASHBOARD_RATE_LIMIT_BASE_WAIT_SECONDS,
+    DEFAULT_TINY_QUERY_TIMEOUT,
+    DEFAULT_TINY_TIMEOUT,
+    TINY_V3_DEFAULT_HEADERS,
+    TinyAPIError,
+    TinyCadastroError,
+    _throttle_tiny_api_call,
+    _throttle_tiny_dashboard_call,
+    _valor_para_tiny,
+)
 
 
-# Intervalo mínimo próprio (bem mais folgado que o de cima) para a varredura em massa do
-# dashboard financeiro (_fetch_paginated_v3_itens): ~260 chamadas (65 categorias x 4
-# empresas) em sequência. Incidente real em produção (2026-09-21): com 1,5s (0,67 req/s),
-# uma sincronização real fez ~38 chamadas bem-sucedidas em 58s antes do Tiny começar a
-# devolver HTTP 429 — sugere um "estoque" de rajada de ~40 requisições e um limite
-# sustentado abaixo de 0,67 req/s. 2,0s (0,5 req/s) dá mais margem; o retry com backoff
-# em HTTP 429 (abaixo) é a rede de segurança de verdade caso ainda assim esbarre no
-# limite. Mantido separado do throttle de lançamento de NF-e acima para não deixar aquele
-# fluxo (que já funciona bem) mais lento por causa de um problema específico deste sync.
-_TINY_DASHBOARD_MIN_INTERVAL_SECONDS = 2.0
-# O intervalo vale POR CONTA do Tiny (chave = token): o limite do Tiny é da conta, e cada
-# filial tem a sua. Com uma fila única para o processo, a prévia de Contas a Pagar esperava
-# 2s por página somando todas as filiais, uma depois da outra (2026-09-28).
-_tiny_dashboard_lock = threading.Lock()
-_tiny_dashboard_key_locks: Dict[str, threading.Lock] = {}
-_tiny_dashboard_last_call: Dict[str, float] = {}
+def _get_com_retry(url: str, **kwargs: Any) -> requests.Response:
+    """
+    GET (leitura, idempotente) com até MAX_TENTATIVAS: em 429/5xx e falha de rede espera
+    com backoff exponencial + jitter, respeitando `Retry-After` (teto de 60 s). Devolve a última
+    resposta se esgotar (o chamador trata o status); relança a exceção de rede na última tentativa.
+    """
+    chave = str((kwargs.get("headers") or {}).get("Authorization") or "")
+    for tentativa in range(1, MAX_TENTATIVAS + 1):
+        _throttle_tiny_api_call(chave)
+        try:
+            resp = requests.get(url, **kwargs)
+        except requests.RequestException:
+            if tentativa == MAX_TENTATIVAS:
+                raise
+            time.sleep(espera_segundos(tentativa))
+            continue
+        if deve_repetir("GET", resp.status_code) and tentativa < MAX_TENTATIVAS:
+            time.sleep(espera_segundos(tentativa, retry_after_segundos(resp)))
+            continue
+        return resp
+    raise RuntimeError("inalcançável")  # pragma: no cover
 
-# HTTP 429 é rate-limit de verdade (diferente do 403 vazio, que é permissão — ver
-# comentário mais abaixo): se resolve sozinho com tempo, então vale a pena esperar e
-# tentar de novo (backoff crescente) em vez de desistir na primeira falha.
-_TINY_DASHBOARD_MAX_RATE_LIMIT_RETRIES = 4
-_TINY_DASHBOARD_RATE_LIMIT_BASE_WAIT_SECONDS = 20.0
-
-# Depois de N respostas seguidas de HTTP 403 sem corpo (assinatura de permissão/escopo
-# OAuth ausente, não bloqueio temporário — backoff não ajuda), para de insistir: é um
-# problema que só se resolve ajustando o escopo do aplicativo no Tiny ERP.
-_TINY_DASHBOARD_MAX_CONSECUTIVE_BLOCK_FAILURES = 5
-
-# Falha de rede/DNS (não é resposta HTTP nenhuma — requests levanta exceção antes disso)
-# durante o sync do dashboard: incidente real 2026-09-21, a VPS ficou alguns segundos sem
-# conseguir resolver api.tiny.com.br (rede/DNS do host, não o Tiny) no meio de uma
-# sincronização real. Costuma ser um blip curto, então vale tentar de novo com backoff
-# curto antes de desistir daquela página.
-_TINY_DASHBOARD_MAX_NETWORK_RETRIES = 3
-_TINY_DASHBOARD_NETWORK_RETRY_BASE_WAIT_SECONDS = 5.0
-
-
-def _throttle_tiny_dashboard_call(conta: str = "") -> None:
-    """Espera o intervalo mínimo desde a última chamada da mesma conta (`conta` = token)."""
-    with _tiny_dashboard_lock:
-        lock = _tiny_dashboard_key_locks.setdefault(conta, threading.Lock())
-    with lock:
-        elapsed = time.monotonic() - _tiny_dashboard_last_call.get(conta, float("-inf"))
-        if elapsed < _TINY_DASHBOARD_MIN_INTERVAL_SECONDS:
-            time.sleep(_TINY_DASHBOARD_MIN_INTERVAL_SECONDS - elapsed)
-        _tiny_dashboard_last_call[conta] = time.monotonic()
-
-
-TINY_V3_DEFAULT_HEADERS: Dict[str, str] = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (compatible; NorviaAutomacao/1.0; +https://norvia.example)",
-}
 
 # Tamanho máximo do filtro nomeCliente em GET /contas-receber da API v3 do Tiny.
 NOME_CLIENTE_MAX_TINY = 50
-
-
-class TinyAPIError(Exception):
-    """Exceção levantada em caso de erro retornado pela API do Tiny ERP."""
-
-    def __init__(self, message: str, errors: Optional[List[str]] = None, is_duplicate: bool = False) -> None:
-        super().__init__(message)
-        self.errors = errors or []
-        self.is_duplicate = is_duplicate
 
 
 @dataclass
@@ -310,6 +262,12 @@ def format_cpf_cnpj(digits: str) -> str:
     elif len(clean) == 11:
         return f"{clean[:3]}.{clean[3:6]}.{clean[6:9]}-{clean[9:]}"
     return clean
+
+
+def _nome_contato_normalizado(nome: str) -> str:
+    """Nome para comparar contatos: sem acento, caixa e pontuação, espaços únicos."""
+    sem_acento = unicodedata.normalize("NFKD", nome or "").encode("ascii", "ignore").decode()
+    return " ".join(re.sub(r"[^A-Z0-9]+", " ", sem_acento.upper()).split())
 
 
 def format_date_br(d: date) -> str:
@@ -568,6 +526,10 @@ def dividir_em_parcelas(valor: Decimal, total_parcelas: int) -> List[Decimal]:
     """Valor em N parcelas iguais (centavos); a diferença do arredondamento vai na última."""
     base = (Decimal(valor) / total_parcelas).quantize(Decimal("0.01"), rounding="ROUND_DOWN")
     return [base] * (total_parcelas - 1) + [Decimal(valor) - base * (total_parcelas - 1)]
+
+
+class LancamentoCaixaIncerto(TinyAPIError):
+    """POST /caixa sem resposta que diga se o lançamento gravou: conferir no caixa antes de repetir."""
 
 
 class TinyClient:
@@ -946,28 +908,32 @@ class TinyClient:
         url = "https://api.tiny.com.br/public-api/v3/contatos"
 
         itens: List[Dict[str, Any]] = []
+        # Busca que falhou (HTTP != 200 ou rede) não é "não cadastrado": sem isto um 429 do Tiny
+        # virava "Fornecedor não encontrado" com o fornecedor cadastrado.
+        falhas_busca: List[str] = []
+
+        def buscar(params: Dict[str, str], rotulo: str) -> List[Dict[str, Any]]:
+            try:
+                resp = _get_com_retry(url, headers=headers, params=params, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
+            except Exception as e:
+                logger.warning(f"[TINY_V3] Falha na consulta de contato por {rotulo}: {e}")
+                falhas_busca.append(f"{rotulo}: {type(e).__name__}")
+                return []
+            if resp.status_code != 200:
+                logger.warning(f"[TINY_V3] Consulta de contato por {rotulo}: HTTP {resp.status_code}")
+                falhas_busca.append(f"{rotulo}: HTTP {resp.status_code}")
+                return []
+            return resp.json().get("itens", []) or []
 
         # 1. Busca por CNPJ formatado (apenas se for um CNPJ real)
         if cnpj_digits:
             cnpj_formatted = format_cpf_cnpj(cnpj_digits)
             if cnpj_formatted:
-                try:
-                    _throttle_tiny_api_call()
-                    resp = requests.get(url, headers=headers, params={"cpfCnpj": cnpj_formatted}, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
-                    if resp.status_code == 200:
-                        itens = resp.json().get("itens", [])
-                except Exception as e:
-                    logger.warning(f"[TINY_V3] Falha na consulta de contato por CNPJ formatado: {e}")
+                itens = buscar({"cpfCnpj": cnpj_formatted}, "CNPJ formatado")
 
         # 2. Busca por CNPJ somente dígitos (se não encontrou formatado)
         if not itens and cnpj_digits:
-            try:
-                _throttle_tiny_api_call()
-                resp = requests.get(url, headers=headers, params={"cpfCnpj": cnpj_digits}, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
-                if resp.status_code == 200:
-                    itens = resp.json().get("itens", [])
-            except Exception as e:
-                logger.warning(f"[TINY_V3] Falha na consulta de contato por dígitos de CNPJ: {e}")
+            itens = buscar({"cpfCnpj": cnpj_digits}, "CNPJ (dígitos)")
 
         # Se encontrou por CNPJ, valida correspondência
         if itens and itens[0].get("id"):
@@ -977,7 +943,7 @@ class TinyClient:
             contato_doc = re.sub(r"\D", "", contato.get("cpfCnpj") or contato.get("cpf_cnpj") or "")
 
             if cnpj_digits and contato_doc and cnpj_digits != contato_doc:
-                raise TinyAPIError(
+                raise TinyCadastroError(
                     f"Divergência de CNPJ no Tiny ERP: A nota fiscal do emitente '{nfe_data.emitente_nome}' "
                     f"possui CNPJ '{nfe_data.emitente_cnpj}', mas o contato retornado no Tiny (ID {contato_id}, '{contato_nome}') "
                     f"possui CNPJ divergente '{contato.get('cpfCnpj')}'. A automação não cria nem altera cadastros."
@@ -987,32 +953,41 @@ class TinyClient:
             self._contato_cache[cache_key] = contato_id
             return contato_id
 
-        # 3. Se NÃO encontrou por CNPJ, mas o nome do emitente está preenchido:
-        # Busca por nome exato para verificar se o fornecedor existe no Tiny
+        # 3. Não achou pelo CNPJ (ou a nota não tem CNPJ): procura um contato com o MESMO nome, para
+        # explicar o bloqueio (cadastro sem CNPJ, outra filial) ou, no cupom sem CNPJ, achar o fornecedor.
         if nfe_data.emitente_nome:
             nome_clean = nfe_data.emitente_nome.strip()
-            try:
-                _throttle_tiny_api_call()
-                resp = requests.get(url, headers=headers, params={"nome": nome_clean}, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
-                if resp.status_code == 200:
-                    itens = resp.json().get("itens", [])
-            except Exception as e:
-                logger.warning(f"[TINY_V3] Falha na consulta de contato por nome: {e}")
+            itens = buscar({"nome": nome_clean}, "nome")
 
-            if itens and itens[0].get("id"):
-                contato = itens[0]
+            # A busca por nome do Tiny é parcial: "BZ MATERIAIS PARA CONSTRUCAO LTDA" trazia
+            # "Casa Exemplo Materiais Para Construcao Ltda" em primeiro, e o lançamento parava com uma
+            # "Divergência cadastral" enganosa (o contato achado nem é o fornecedor; corrigir o CNPJ
+            # dele estragaria outro cadastro). Sem CNPJ na nota, o primeiro parcial ainda emprestava o
+            # CNPJ de outra empresa ao cupom. Só vale o contato com o MESMO nome (sem acento, caixa,
+            # pontuação); ambíguo ou ausente cai em "não encontrado".
+            alvo = _nome_contato_normalizado(nome_clean)
+            iguais = [c for c in itens if c.get("id") and _nome_contato_normalizado(c.get("nome") or "") == alvo]
+            if len(iguais) > 1 and not cnpj_digits:
+                raise TinyCadastroError(
+                    f"Mais de um contato no Tiny ERP com o nome '{nome_clean}' "
+                    f"(IDs {', '.join(str(c['id']) for c in iguais[:5])}) e a nota não traz CNPJ para decidir. "
+                    f"Lance esta nota manualmente no Tiny ou deixe um único cadastro com esse nome."
+                )
+            if iguais:
+                contato = iguais[0]
                 contato_id = int(contato["id"])
                 contato_nome = contato.get("nome") or ""
                 contato_doc = re.sub(r"\D", "", contato.get("cpfCnpj") or contato.get("cpf_cnpj") or "")
 
                 if cnpj_digits and contato_doc and cnpj_digits != contato_doc:
-                    raise TinyAPIError(
+                    raise TinyCadastroError(
                         f"Divergência cadastral no Tiny ERP: O fornecedor '{nome_clean}' possui CNPJ '{nfe_data.emitente_cnpj}' "
                         f"na nota fiscal, mas o contato localizado no Tiny ERP (ID {contato_id}, '{contato_nome}') "
-                        f"possui CNPJ divergente '{contato.get('cpfCnpj')}'. Cadastre o fornecedor com o CNPJ correto no Tiny."
+                        f"possui CNPJ divergente '{contato.get('cpfCnpj')}'. Se for outra filial ou outra empresa com o mesmo nome, "
+                        f"cadastre o CNPJ {format_cpf_cnpj(cnpj_digits)} como um contato próprio no Tiny."
                     )
                 if cnpj_digits and not contato_doc:
-                    raise TinyAPIError(
+                    raise TinyCadastroError(
                         f"Cadastro incompleto no Tiny ERP: O fornecedor '{nome_clean}' foi localizado no Tiny ERP (ID {contato_id}), "
                         f"mas não possui CNPJ preenchido, enquanto a nota fiscal possui CNPJ '{nfe_data.emitente_cnpj}'. "
                         f"Preencha o CNPJ no cadastro do fornecedor no Tiny ERP para autorizar o lançamento."
@@ -1030,8 +1005,13 @@ class TinyClient:
                 return contato_id
 
         # Se não encontrou nem por CNPJ nem por nome:
+        if falhas_busca:
+            raise TinyAPIError(
+                f"O Tiny ERP não respondeu à busca do fornecedor '{nfe_data.emitente_nome}' "
+                f"({'; '.join(falhas_busca)}). Não dá para saber se ele está cadastrado: nada foi lançado, tente de novo."
+            )
         msg_doc = f" (CNPJ: {nfe_data.emitente_cnpj})" if nfe_data.emitente_cnpj else ""
-        raise TinyAPIError(
+        raise TinyCadastroError(
             f"Fornecedor '{nfe_data.emitente_nome}'{msg_doc} não encontrado nos contatos do Tiny ERP. "
             f"A automação está configurada para não criar novos fornecedores ou cadastros automaticamente. "
             f"Cadastre previamente o fornecedor e seu CNPJ no Tiny ERP para permitir o lançamento."
@@ -1057,8 +1037,7 @@ class TinyClient:
         all_itens: List[Dict[str, Any]] = []
         for page in range(max_pages):
             page_params = {**params, "limit": limit, "offset": page * limit}
-            _throttle_tiny_api_call()
-            resp = requests.get(url, headers=headers, params=page_params, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
+            resp = _get_com_retry(url, headers=headers, params=page_params, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
             if resp.status_code != 200:
                 break
             data = resp.json()
@@ -1330,7 +1309,7 @@ class TinyClient:
         payload = [{"descricao": m} for m in valid_marcadores]
 
         try:
-            _throttle_tiny_api_call()
+            _throttle_tiny_api_call(headers.get("Authorization", ""))
             resp = requests.put(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
             if resp.status_code in (200, 204):
                 logger.info(f"[TINY_V3] Marcador(es) {valid_marcadores} vinculado(s) com sucesso à conta {conta_id}.")
@@ -1553,7 +1532,7 @@ class TinyClient:
         erro = ""
         for attempt in range(1, max_retries + 1):
             try:
-                _throttle_tiny_api_call()
+                _throttle_tiny_api_call(headers.get("Authorization", ""))
                 resp = requests.get(url, headers=headers, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
             except requests.RequestException as e:
                 erro = str(e)
@@ -1602,7 +1581,7 @@ class TinyClient:
             data: Optional[Dict[str, Any]] = None
             for attempt in range(1, max_retries + 1):
                 try:
-                    _throttle_tiny_api_call()
+                    _throttle_tiny_api_call(headers.get("Authorization", ""))
                     logger.info(
                         f"[TINY_V3] Consultando contas financeiras, página {pagina + 1} "
                         f"(tentativa {attempt}/{max_retries})..."
@@ -1740,7 +1719,7 @@ class TinyClient:
         }
 
         # Formata data caso esteja em date ou YYYY-MM-DD
-        data_str = str(data_pagamento or date.today().isoformat())
+        data_str = str(data_pagamento or hoje_sp().isoformat())
         if len(data_str) == 10 and data_str[4] == "-" and data_str[7] == "-":
             y, m, d = data_str.split("-")
             data_formatada = f"{d}/{m}/{y}"  # Tiny aceita formato dd/mm/yyyy
@@ -1810,7 +1789,7 @@ class TinyClient:
 
         for attempt in range(1, max_retries + 1):
             try:
-                _throttle_tiny_api_call()
+                _throttle_tiny_api_call(headers.get("Authorization", ""))
                 logger.info(f"[TINY_V3] Baixando conta #{conta_id} (R$ {valor_pago:.2f}, tentativa {attempt}/{max_retries})...")
                 response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
             except requests.ConnectTimeout as e:
@@ -1881,9 +1860,11 @@ class TinyClient:
         max_pages: int = 300,
         nome_cliente: Optional[str] = None,
         estrito: bool = False,
+        id_nota: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Lista contas a receber (GET /contas-receber), espelhando `list_contas_pagar_v3`.
-        `nome_cliente` filtra pelo cliente (conciliação Mercado Livre)."""
+        `nome_cliente` filtra pelo cliente (conciliação Mercado Livre); `id_nota`, pela nota fiscal
+        que gerou a conta (a conta da venda do ML fica ligada à nota, não ao pedido)."""
         url = "https://api.tiny.com.br/public-api/v3/contas-receber"
         headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
         params: Dict[str, Any] = {}
@@ -1898,6 +1879,8 @@ class TinyClient:
             # longo"). Vão os 50 primeiros; a conciliação escolhe a conta pelo número da venda no
             # histórico, então outro cliente com o mesmo começo de nome não atrapalha.
             params["nomeCliente"] = nome_cliente.strip()[:NOME_CLIENTE_MAX_TINY].rstrip()
+        if id_nota is not None:
+            params["idNota"] = int(id_nota)
         return self._fetch_paginated_v3_itens(url, headers, params, max_pages=max_pages, estrito=estrito)
 
     def list_pedidos_v3(
@@ -1924,12 +1907,205 @@ class TinyClient:
             params["numeroPedidoEcommerce"] = numero_pedido_ecommerce
         return self._fetch_paginated_v3_itens(url, headers, params, max_pages=max_pages, estrito=True)
 
+    def criar_lancamento_caixa_v3(
+        self,
+        token: str,
+        *,
+        historico: str,
+        data: str,
+        valor: Union[Decimal, float, str],
+        tipo: str,
+        categoria_id: int,
+        conta_id: int,
+        contato_id: Optional[int] = None,
+        max_retries: int = 3,
+    ) -> int:
+        """
+        POST /caixa: um lançamento de caixa (tipo 'C' entrada, 'D' saída), data AAAA-MM-DD.
+        Devolve o id criado. Só repete quando o pedido certamente não chegou ao Tiny (ConnectTimeout)
+        ou em HTTP 429. Resposta que não deixa saber se gravou (timeout de leitura, conexão caída,
+        HTTP 5xx) levanta `LancamentoCaixaIncerto`: quem chama confere no caixa antes de repetir.
+        """
+        if tipo not in ("C", "D"):
+            raise ValueError(f"tipo de lançamento inválido: {tipo!r}")
+        url = "https://api.tiny.com.br/public-api/v3/caixa"
+        headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
+        payload: Dict[str, Any] = {
+            "historico": historico,
+            "data": data,
+            "dataCompetencia": data[:7],
+            "valor": _valor_para_tiny(valor),
+            "tipo": tipo,
+            "categoria": {"id": int(categoria_id)},
+            "conta": {"id": int(conta_id)},
+        }
+        if contato_id:
+            payload["contato"] = {"id": int(contato_id)}
+        for attempt in range(1, max_retries + 1):
+            _throttle_tiny_api_call(headers.get("Authorization", ""))
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
+            except requests.ConnectTimeout as e:
+                if attempt >= max_retries:
+                    raise TinyAPIError(f"Sem conexão com o Tiny ao lançar no caixa: {e}") from e
+                time.sleep(attempt * 2)
+                continue
+            except requests.RequestException as e:
+                raise LancamentoCaixaIncerto(f"Resposta do Tiny interrompida ao lançar no caixa ({type(e).__name__}: {e})") from e
+            if response.status_code == 429 and attempt < max_retries:
+                time.sleep(attempt * 5)
+                continue
+            if response.status_code >= 500:
+                raise LancamentoCaixaIncerto(
+                    f"Tiny ERP respondeu HTTP {response.status_code} ao lançar no caixa" + sufixo_erro(response)
+                )
+            if response.status_code not in (200, 201):
+                raise TinyAPIError(f"Tiny ERP recusou o lançamento de caixa (HTTP {response.status_code})" + sufixo_erro(response))
+            try:
+                return int(response.json()["id"])
+            except Exception as e:
+                raise LancamentoCaixaIncerto(f"Tiny respondeu {response.status_code} sem o id do lançamento: {e}") from e
+        raise TinyAPIError("Tiny ERP sem resposta válida ao lançar no caixa (HTTP 429 repetido).")
+
+    def criar_conta_receber_v3(
+        self,
+        token: str,
+        *,
+        historico: str,
+        data: str,
+        valor: Union[Decimal, float, str],
+        contato_id: int,
+        categoria_id: int,
+        numero_documento: str = "",
+        max_retries: int = 3,
+    ) -> int:
+        """
+        POST /contas-receber: uma conta única (ocorrência 'U'), emissão e vencimento em `data`
+        (AAAA-MM-DD). Devolve o id criado. Só repete quando o pedido certamente não chegou ao Tiny
+        (ConnectTimeout) ou em HTTP 429; resposta que não deixa saber se gravou levanta
+        `LancamentoCaixaIncerto` — quem chama procura a conta antes de tentar de novo.
+        """
+        url = "https://api.tiny.com.br/public-api/v3/contas-receber"
+        headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
+        payload: Dict[str, Any] = {
+            "data": data,
+            "dataVencimento": data,
+            "dataCompetencia": data[:7],
+            "valor": _valor_para_tiny(valor),
+            "historico": historico,
+            "contato": {"id": int(contato_id)},
+            "categoria": {"id": int(categoria_id)},
+            "ocorrencia": "U",
+        }
+        if numero_documento:
+            payload["numeroDocumento"] = str(numero_documento)
+        for attempt in range(1, max_retries + 1):
+            _throttle_tiny_api_call(headers.get("Authorization", ""))
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
+            except requests.ConnectTimeout as e:
+                if attempt >= max_retries:
+                    raise TinyAPIError(f"Sem conexão com o Tiny ao criar a conta a receber: {e}") from e
+                time.sleep(attempt * 2)
+                continue
+            except requests.RequestException as e:
+                raise LancamentoCaixaIncerto(
+                    f"Resposta do Tiny interrompida ao criar a conta a receber ({type(e).__name__}: {e})"
+                ) from e
+            if response.status_code == 429 and attempt < max_retries:
+                time.sleep(attempt * 5)
+                continue
+            if response.status_code >= 500:
+                raise LancamentoCaixaIncerto(
+                    f"Tiny ERP respondeu HTTP {response.status_code} ao criar a conta a receber" + sufixo_erro(response)
+                )
+            if response.status_code not in (200, 201):
+                raise TinyAPIError(
+                    f"Tiny ERP recusou a conta a receber (HTTP {response.status_code})" + sufixo_erro(response)
+                )
+            try:
+                return int(response.json()["id"])
+            except Exception as e:
+                raise LancamentoCaixaIncerto(f"Tiny respondeu {response.status_code} sem o id da conta: {e}") from e
+        raise TinyAPIError("Tiny ERP sem resposta válida ao criar a conta a receber (HTTP 429 repetido).")
+
+    def criar_conta_pagar_v3(
+        self,
+        token: str,
+        *,
+        historico: str,
+        data: str,
+        data_vencimento: str,
+        valor: Union[Decimal, float, str],
+        contato_id: int,
+        categoria_id: int,
+        numero_documento: str = "",
+        max_retries: int = 3,
+    ) -> int:
+        """
+        POST /contas-pagar de um boleto do DDA sem conta no Tiny (criada pelo painel): conta única,
+        forma de pagamento boleto. Mesma política do `criar_conta_receber_v3`: só repete quando o
+        pedido certamente não chegou; resposta ambígua levanta `LancamentoCaixaIncerto`.
+        """
+        url = "https://api.tiny.com.br/public-api/v3/contas-pagar"
+        headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
+        payload: Dict[str, Any] = {
+            "data": data,
+            "dataVencimento": data_vencimento,
+            "dataCompetencia": data[:7],
+            "valor": _valor_para_tiny(valor),
+            "historico": historico,
+            "contato": {"id": int(contato_id)},
+            "categoria": {"id": int(categoria_id)},
+            "formaPagamento": SEFAZ_TPAG_TO_TINY_FORMA_PAGAMENTO["15"],
+            "ocorrencia": "U",
+        }
+        if numero_documento:
+            payload["numeroDocumento"] = str(numero_documento)
+        for attempt in range(1, max_retries + 1):
+            _throttle_tiny_api_call(headers.get("Authorization", ""))
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
+            except requests.ConnectTimeout as e:
+                if attempt >= max_retries:
+                    raise TinyAPIError(f"Sem conexão com o Tiny ao criar a conta a pagar: {e}") from e
+                time.sleep(attempt * 2)
+                continue
+            except requests.RequestException as e:
+                raise LancamentoCaixaIncerto(
+                    f"Resposta do Tiny interrompida ao criar a conta a pagar ({type(e).__name__}: {e})"
+                ) from e
+            if response.status_code == 429 and attempt < max_retries:
+                time.sleep(attempt * 5)
+                continue
+            if response.status_code >= 500:
+                raise LancamentoCaixaIncerto(
+                    f"Tiny ERP respondeu HTTP {response.status_code} ao criar a conta a pagar" + sufixo_erro(response)
+                )
+            if response.status_code not in (200, 201):
+                raise TinyAPIError(f"Tiny ERP recusou a conta a pagar (HTTP {response.status_code})" + sufixo_erro(response))
+            try:
+                return int(response.json()["id"])
+            except Exception as e:
+                raise LancamentoCaixaIncerto(f"Tiny respondeu {response.status_code} sem o id da conta: {e}") from e
+        raise TinyAPIError("Tiny ERP sem resposta válida ao criar a conta a pagar (HTTP 429 repetido).")
+
+    def obter_pedido_v3(self, token: str, pedido_id: int) -> Dict[str, Any]:
+        """GET /pedidos/{id}: o pedido completo, com a nota fiscal (`notaFiscal.id`/`idNotaFiscal`)."""
+        url = f"https://api.tiny.com.br/public-api/v3/pedidos/{pedido_id}"
+        headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
+        response = _get_com_retry(url, headers=headers, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
+        if response.status_code != 200:
+            raise TinyAPIError(
+                f"Tiny ERP respondeu HTTP {response.status_code} ao ler o pedido #{pedido_id}" + sufixo_erro(response)
+            )
+        return response.json()
+
     def obter_conta_receber_v3(self, token: str, conta_id: int) -> Dict[str, Any]:
         """GET /contas-receber/{id}: situação, valor, saldo e valor pago atuais da conta."""
         url = f"https://api.tiny.com.br/public-api/v3/contas-receber/{conta_id}"
         headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
-        _throttle_tiny_api_call()
-        response = requests.get(url, headers=headers, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
+        response = _get_com_retry(url, headers=headers, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
         if response.status_code != 200:
             raise TinyAPIError(
                 f"Tiny ERP respondeu HTTP {response.status_code} ao ler a conta a receber #{conta_id}"
@@ -1941,7 +2117,7 @@ class TinyClient:
         self,
         token: str,
         conta_id: int,
-        valor_pago: float,
+        valor_pago: Union[Decimal, float, str],
         data_pagamento: str,
         conta_destino_id: int,
         categoria_id: int,
@@ -1963,7 +2139,7 @@ class TinyClient:
             "contaDestino": {"id": int(conta_destino_id)},
             "data": data_pagamento,
             "categoria": {"id": int(categoria_id)},
-            "valorPago": round(float(valor_pago), 2),
+            "valorPago": _valor_para_tiny(valor_pago),
         }
         antes: Optional[Dict[str, Any]] = conta_atual
 
@@ -1997,7 +2173,7 @@ class TinyClient:
             return None
 
         for attempt in range(1, max_retries + 1):
-            _throttle_tiny_api_call()
+            _throttle_tiny_api_call(headers.get("Authorization", ""))
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
             except requests.ConnectTimeout as e:
@@ -2037,7 +2213,7 @@ class TinyClient:
                     continue
 
             if response.status_code in (200, 204):
-                logger.info(f"[TINY_V3] Conta a receber #{conta_id} baixada (R$ {valor_pago:.2f}).")
+                logger.info(f"[TINY_V3] Conta a receber #{conta_id} baixada (R$ {payload['valorPago']:.2f}).")
                 return
 
             if response.status_code >= 500:
@@ -2097,6 +2273,21 @@ class TinyClient:
             params["tipo"] = tipo
         return self._fetch_paginated_v3_itens(url, headers, params, max_pages=max_pages)
 
+    def buscar_contatos_v3(self, token: str, nome: str = "", cpf_cnpj: str = "") -> List[Dict[str, Any]]:
+        """GET /contatos (só leitura, primeira página): busca parcial por nome e/ou CPF/CNPJ. Quem chama
+        decide o que é o mesmo contato; a automação nunca cria contatos."""
+        url = "https://api.tiny.com.br/public-api/v3/contatos"
+        headers = {**TINY_V3_DEFAULT_HEADERS, "Authorization": f"Bearer {token}"}
+        params: Dict[str, str] = {}
+        if nome:
+            params["nome"] = nome
+        if cpf_cnpj:
+            params["cpfCnpj"] = cpf_cnpj
+        response = _get_com_retry(url, headers=headers, params=params, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
+        if response.status_code != 200:
+            raise TinyAPIError(f"Tiny ERP respondeu HTTP {response.status_code} ao buscar contatos" + sufixo_erro(response))
+        return list(response.json().get("itens") or [])
+
     def list_categorias_receita_despesa_v3(self, token: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Consulta as categorias de receita e despesa cadastradas no Tiny ERP v3 para a conta autenticada.
@@ -2126,7 +2317,7 @@ class TinyClient:
 
         for _ in range(max_pages):
             try:
-                _throttle_tiny_api_call()
+                _throttle_tiny_api_call(headers.get("Authorization", ""))
                 params = {"limit": limit, "offset": offset}
                 resp = requests.get(url, headers=headers, params=params, timeout=DEFAULT_TINY_QUERY_TIMEOUT)
                 if resp.status_code == 401:
@@ -2438,7 +2629,7 @@ class TinyClient:
         for attempt in range(1, max_retries + 1):
             try:
                 logger.debug(f"[TINY_V3] Enviando conta '{nro_documento}' (Tentativa {attempt}/{max_retries})...")
-                _throttle_tiny_api_call()
+                _throttle_tiny_api_call(headers.get("Authorization", ""))
                 response = requests.post(url, headers=headers, json=payload, timeout=DEFAULT_TINY_TIMEOUT)
 
                 # Tratamento de token expirado prematuramente (401)
@@ -2536,7 +2727,7 @@ class TinyClient:
                     )
                     payload_without_cat = dict(payload)
                     payload_without_cat.pop("categoria", None)
-                    _throttle_tiny_api_call()
+                    _throttle_tiny_api_call(headers.get("Authorization", ""))
                     retry_resp = requests.post(url, headers=headers, json=payload_without_cat, timeout=DEFAULT_TINY_TIMEOUT)
                     if retry_resp.status_code in (200, 201):
                         return self._handle_conta_success_v3(
@@ -2664,7 +2855,7 @@ class TinyClient:
         for attempt in range(1, max_retries + 1):
             try:
                 logger.debug(f"Enviando conta '{nro_documento}' ao Tiny (Tentativa {attempt}/{max_retries})...")
-                _throttle_tiny_api_call()
+                _throttle_tiny_api_call(headers.get("Authorization", ""))
                 response = requests.post(
                     self.api_url,
                     data=post_data,

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.config import settings, Settings
 
@@ -114,11 +114,45 @@ def mark_failure_resolved(error_file: str, cfg: Optional[Settings] = None) -> Op
     resolved = load_resolved_failures(cfg)
     resolved_at = resolved.get(error_file) or datetime.now(timezone.utc).isoformat()
     resolved[error_file] = resolved_at
+    _gravar_resolvidas(resolved, cfg)
+    logger.info(f"[AUDIT] Falha {error_file} marcada como resolvida")
+    return resolved_at
 
+
+def _gravar_resolvidas(resolved: Dict[str, str], cfg: Settings) -> None:
     path = cfg.FAILED_DIR / RESOLVED_FAILURES_FILENAME
     tmp_path = path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(resolved, f, indent=2, ensure_ascii=False)
     tmp_path.replace(path)
-    logger.info(f"[AUDIT] Falha {error_file} marcada como resolvida")
-    return resolved_at
+
+
+def resolve_failures_for_chave(chave: str, cfg: Optional[Settings] = None) -> List[str]:
+    """
+    Marca como resolvidas todas as falhas ainda abertas da nota `chave` (qualquer etapa). Chamada
+    quando a nota é lançada com sucesso: a falha anterior (ex.: fornecedor sem cadastro no Tiny,
+    corrigido e reenviado) deixa de contar como pendência sem alguém clicar em "Marcar como
+    resolvida". Devolve os arquivos marcados.
+    """
+    cfg = cfg or settings
+    if not chave or not chave.isalnum():
+        return []
+    cfg.ensure_directories()
+    resolved = load_resolved_failures(cfg)
+    novos: List[str] = []
+    # O nome do .error.json leva a chave (record_audit_error); o conteúdo confirma.
+    for f in sorted(cfg.FAILED_DIR.glob(f"*_{chave}.error.json")):
+        if f.name in resolved:
+            continue
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("chave_acesso") != chave:
+                continue
+        except (OSError, ValueError):
+            continue
+        novos.append(f.name)
+    if novos:
+        agora = datetime.now(timezone.utc).isoformat()
+        resolved.update({nome: agora for nome in novos})
+        _gravar_resolvidas(resolved, cfg)
+        logger.info(f"[AUDIT] {len(novos)} falha(s) da chave {chave} resolvidas pelo lançamento: {', '.join(novos)}")
+    return novos

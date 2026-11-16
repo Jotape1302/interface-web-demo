@@ -69,6 +69,7 @@ import { generateFinancialInsights, type FinancialInsight, type FinancialInsight
 import { apiErrorMessage, readApiError } from '@/lib/api-errors';
 import { useAuth } from '@/lib/auth-context';
 import { ConfirmImpactDialog } from './confirm-impact-dialog';
+import { ReportarErro } from '@/components/reportar-erro';
 
 const FORCE_SYNC_RISK = 'Ignora o intervalo entre sincronizações e consome a cota da API do Tiny das 3 empresas.';
 
@@ -213,7 +214,7 @@ function CategoryRankingChart({ entries, palette }: { entries: FinancialDashboar
               if (!active || !payload || !payload.length) return null;
               const row = payload[0].payload as FinancialDashboardCategoryEntry & { color: string };
               return (
-                <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
+                <div className="rounded-none border border-border bg-popover px-3 py-2 text-xs shadow-md">
                   <p className="font-semibold text-popover-foreground">{row.categoria_nome}</p>
                   <p className="text-muted-foreground">{row.grupo}</p>
                   <p className="mt-1 font-mono text-popover-foreground">{money(row.valor)} ({percentage(row.percentual_do_total)})</p>
@@ -279,7 +280,7 @@ function TopEntitiesChart({
               if (!active || !payload || !payload.length) return null;
               const row = payload[0].payload as { nome: string; valor: number; qtd: number };
               return (
-                <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
+                <div className="rounded-none border border-border bg-popover px-3 py-2 text-xs shadow-md">
                   <p className="font-semibold text-popover-foreground">{row.nome}</p>
                   <p className="font-mono text-popover-foreground">{money(row.valor)}</p>
                   <p className="text-muted-foreground">{row.qtd} conta(s)</p>
@@ -335,7 +336,7 @@ function CashFlowChart({
             content={({ active, payload, label }) => {
               if (!active || !payload || !payload.length) return null;
               return (
-                <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md space-y-0.5">
+                <div className="rounded-none border border-border bg-popover px-3 py-2 text-xs shadow-md space-y-0.5">
                   <p className="font-semibold text-popover-foreground mb-1">{label}</p>
                   {payload.map((p) => (
                     <p key={p.dataKey as string} className="font-mono" style={{ color: p.color }}>
@@ -411,7 +412,7 @@ function ProjectionCard({ projecao, palette }: { projecao: FinancialDashboardPro
       </div>
       <div className="grid grid-cols-3 gap-2 my-4">
         {projecao.horizontes.map((h) => (
-          <div key={h.dias} className="rounded-lg border border-border/60 p-2.5">
+          <div key={h.dias} className="rounded-none border border-border/60 p-2.5">
             <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{h.dias} dias</p>
             <p
               className="text-sm font-bold tabular-nums"
@@ -450,7 +451,7 @@ function ProjectionCard({ projecao, palette }: { projecao: FinancialDashboardPro
                 if (!active || !payload || !payload.length) return null;
                 const row = payload[0].payload as FinancialDashboardProjection['semanal'][number];
                 return (
-                  <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md space-y-0.5">
+                  <div className="rounded-none border border-border bg-popover px-3 py-2 text-xs shadow-md space-y-0.5">
                     <p className="font-semibold text-popover-foreground mb-1">Semana de {row.label}</p>
                     <p className="font-mono" style={{ color: palette.entrada }}>A receber: {money(row.a_receber)}</p>
                     <p className="font-mono" style={{ color: palette.saida }}>A pagar: {money(row.a_pagar)}</p>
@@ -491,7 +492,7 @@ function StaleDataBanner({
   const byCompany = new Map<string, FinancialDashboardStaleSource[]>();
   for (const s of stale) byCompany.set(s.label, [...(byCompany.get(s.label) ?? []), s]);
   return (
-    <div className="flex gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2.5 text-xs">
+    <div className="flex gap-2 rounded-none border border-amber-500/40 bg-amber-500/5 px-3 py-2.5 text-xs">
       <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
       <div className="space-y-1">
         <p className="font-semibold text-amber-700 dark:text-amber-300">
@@ -512,7 +513,14 @@ function StaleDataBanner({
             .filter((c) => !byCompany.has(c.label))
             .map((c) => (
               <li key={c.label}>
-                <strong className="text-foreground">{c.label}</strong>: {c.erro ?? 'falha na sincronização'}
+                <strong className="text-foreground">{c.label}</strong>: {c.erro ?? 'falha na sincronização'}{' '}
+                <ReportarErro
+                  className="ml-1 align-middle"
+                  automationId="financial-dashboard"
+                  executionId={`sincronizacao-${c.label}`}
+                  stoppedNode="Sincronização com o Tiny"
+                  errorMessage={`${c.label}: ${c.erro ?? 'falha na sincronização'}`}
+                />
               </li>
             ))}
         </ul>
@@ -560,7 +568,7 @@ function AgingCard({
         </div>
       </div>
       {aging.taxa_inadimplencia_pct !== undefined && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+        <div className="mb-4 flex items-center gap-2 rounded-none border border-border bg-muted/40 px-3 py-2">
           <AlertTriangle size={14} className="text-amber-700 dark:text-amber-400 shrink-0" />
           <p className="text-xs">
             Taxa de inadimplência: <strong>{percentage(aging.taxa_inadimplencia_pct)}</strong> do saldo em aberto
@@ -589,7 +597,7 @@ function InsightCard({ insight }: { insight: FinancialInsight }) {
   const style = INSIGHT_TONE_STYLES[insight.tone];
   const { Icon } = style;
   return (
-    <div className={`rounded-lg border ${style.border} ${style.bg} p-4 flex gap-3`}>
+    <div className={`rounded-none border ${style.border} ${style.bg} p-4 flex gap-3`}>
       <Icon size={18} className={`shrink-0 mt-0.5 ${style.fg}`} />
       <div>
         <p className={`text-sm font-semibold ${style.fg}`}>{insight.title}</p>
@@ -722,6 +730,7 @@ export default function FinancialDashboardPanel({ config }: { config: DashboardC
   }, [apiBase, company, config.mode, dateFrom, dateTo, getStoredAuthHeaders]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     void loadStatus();
     void loadDashboard();
   }, [loadStatus, loadDashboard]);
@@ -897,7 +906,7 @@ export default function FinancialDashboardPanel({ config }: { config: DashboardC
         </div>
 
         {errorMessage && (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="flex items-center gap-2 rounded-none border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <AlertTriangle size={14} className="shrink-0" />
             {errorMessage}
           </div>
@@ -1020,7 +1029,7 @@ export default function FinancialDashboardPanel({ config }: { config: DashboardC
                     </div>
                   </div>
                   {dailyFlow !== null && (
-                    <div className="inline-flex rounded-md border border-border p-0.5 text-xs">
+                    <div className="inline-flex rounded-none border border-border p-0.5 text-xs">
                       {(['diario', 'mensal'] as const).map((view) => (
                         <button
                           key={view}
@@ -1265,7 +1274,7 @@ export default function FinancialDashboardPanel({ config }: { config: DashboardC
                           if (!active || !payload || !payload.length) return null;
                           const row = payload[0].payload as { marcador: string; valor: number; percentual: number };
                           return (
-                            <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
+                            <div className="rounded-none border border-border bg-popover px-3 py-2 text-xs shadow-md">
                               <p className="font-semibold text-popover-foreground">{row.marcador}</p>
                               <p className="font-mono text-popover-foreground">{money(row.valor)} ({percentage(row.percentual)})</p>
                             </div>

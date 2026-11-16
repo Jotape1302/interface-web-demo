@@ -16,7 +16,8 @@ COPY src/ ./src/
 RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 
 FROM ${NODE_IMAGE} AS runtime
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    TZ=America/Sao_Paulo
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
@@ -25,5 +26,9 @@ COPY --from=build --chown=node:node /app/dist ./dist
 USER node
 
 EXPOSE 3100
+
+# GET /health no endereço em que o gateway escuta (HOST; 0.0.0.0 → loopback).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=20s --retries=3 \
+    CMD node -e "const h = process.env.HOST; const host = !h || h === '0.0.0.0' || h === '::' ? '127.0.0.1' : h; fetch('http://' + host + ':' + (process.env.PORT || 3100) + '/health', { signal: AbortSignal.timeout(4000) }).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
 
 CMD ["node", "dist/index.js"]

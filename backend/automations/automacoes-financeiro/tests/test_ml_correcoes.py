@@ -1,5 +1,6 @@
 """Correções da revisão de 2026-10-07 na conciliação Mercado Livre (ML-1 a ML-7)."""
 import io
+import json
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
@@ -10,7 +11,8 @@ from openpyxl import load_workbook
 
 from app import ml_reconciliation as ml
 from app import ml_reconciliation_rotina as rot
-from tests.test_ml_reconciliation import LIBERACOES, _Tiny, _lib, _rotina
+from app.ml_apis import SemCredencial
+from tests.test_ml_reconciliation import NORVIA, LIBERACOES, _Tiny, _lib, _rotina
 
 DIA = (date(2025, 9, 1), date(2025, 9, 2))
 
@@ -59,7 +61,7 @@ def test_ml1_reprocessar_periodo_nao_baixa_de_novo_conta_parcial(tmp_path):
         def baixar_conta_receber_v3(self, token, cid, **kw):
             self.baixas.append((cid, kw))
             if cid == 10:
-                self.saldo[10] -= kw["valor_pago"]
+                self.saldo[10] -= float(kw["valor_pago"])
 
     tiny = TinyParcial()
     r = _rotina(tmp_path, tiny=tiny)
@@ -99,7 +101,7 @@ class _TinyComValorPago(_Tiny):
     def baixar_conta_receber_v3(self, token, cid, **kw):
         self.baixas.append((cid, kw))
         if self.entra:
-            self.pago[cid] += kw["valor_pago"]
+            self.pago[cid] += float(kw["valor_pago"])
         if self.falha:
             raise TimeoutError(self.falha)
 
@@ -197,7 +199,7 @@ def test_ml7_linha_repetida_nao_some_nem_vira_lancamento():
 
 
 def test_ml6_conta_sem_saldo_nem_valor_nao_fica_apta():
-    g = ml.GrupoRecebimento(id="G-1", id_venda="1", indices=[0], chaves=["k"], valor_total=Decimal("50"),
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", id="G-1", id_venda="1", indices=[0], chaves=["k"], valor_total=Decimal("50"),
                             data="01/09/2025", nome_cliente="X")
     ml.aplicar_conta_ao_grupo(g, {"id": 1, "situacao": "aberto"})
     ml.avaliar_conta(g)
@@ -211,24 +213,40 @@ def test_ml5_planilha_de_lancamentos_nao_repete_o_que_ja_foi_exportado(tmp_path)
     from app.api import app
 
     r = _rotina(tmp_path)
-    with patch("app.api.ml_rotina", r), patch("app.api.ml_token_tiny", return_value="tok"):
+    with patch("app.routers.conciliacao_ml.ml_rotina", r), patch("app.routers.conciliacao_ml.ml_token_tiny", return_value="tok"):
         client = TestClient(app)
         analise, _ = _executar(r)
-        url = f"/api/v1/conciliacao-ml/analises/{analise.id}/arquivos/lancamentos"
+        url = f"/api/v1/conciliacao-ml/analises/{analise.id}/arquivos/lancamentos/exportar"
         total = len(analise.lancamentos.lancamentos)
         assert total > 0
 
-        primeira = client.get(url)
+        primeira = client.post(url)
         assert primeira.status_code == 200
         assert primeira.headers["x-lancamentos-na-planilha"] == str(total)
         assert load_workbook(io.BytesIO(primeira.content)).active.max_row == total + 1
 
-        segunda = client.get(url)
+        segunda = client.post(url, json={"incluir_exportados": False})
         assert segunda.status_code == 409 and "já foram exportados" in segunda.json()["detail"]
 
-        todos = client.get(url + "?incluir_exportados=true")
+        todos = client.post(url, json={"incluir_exportados": True})
         assert todos.status_code == 200 and todos.headers["x-lancamentos-ja-exportados"] == str(total)
         assert load_workbook(io.BytesIO(todos.content)).active.max_row == total + 1
+
+
+def test_sec06_get_de_lancamentos_responde_405_e_nao_registra_exportados(tmp_path):
+    from app.api import app
+
+    r = _rotina(tmp_path)
+    with patch("app.routers.conciliacao_ml.ml_rotina", r), patch("app.routers.conciliacao_ml.ml_token_tiny", return_value="tok"):
+        client = TestClient(app)
+        analise, _ = _executar(r)
+        base = f"/api/v1/conciliacao-ml/analises/{analise.id}/arquivos/lancamentos"
+        resp = client.get(base)
+        assert resp.status_code == 405
+        assert "POST" in resp.json()["detail"] and resp.headers["allow"] == "POST"
+        assert r.estado.lancamentos_exportados() == {}  # GET não tem efeito colateral
+        # O POST ainda funciona depois do GET recusado.
+        assert client.post(base + "/exportar").status_code == 200
 
 
 # ─── Matching de reservas, mensagens claras e transferências ────────────────
@@ -305,7 +323,7 @@ def test_motivos_especificos_sem_par_tiny_ou_ml():
 
 
 def test_venda_parcelada_2x_agrupa_parcelas_e_fica_apta():
-    venda_id = "2000014584857665"
+    venda_id = "2000029709298543"
     contas = [
         {
             "id": 824398571,
@@ -330,7 +348,7 @@ def test_venda_parcelada_2x_agrupa_parcelas_e_fica_apta():
     assert achadas[0]["id"] == 824398571
     assert achadas[1]["id"] == 824398572
 
-    g = ml.GrupoRecebimento(
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-1",
         id_venda=venda_id,
         indices=[0],
@@ -359,14 +377,14 @@ def test_venda_parcelada_2x_agrupa_parcelas_e_fica_apta():
 
 
 def test_venda_parcelada_3x_agrupa_parcelas():
-    venda_id = "2000014684449453"
+    venda_id = "2000049283014711"
     contas = [
         {"id": 824407117, "situacao": "aberto", "valor": 20.14, "saldo": 20.14, "historico": f"Venda {venda_id} parcela 1/3"},
         {"id": 824407118, "situacao": "aberto", "valor": 20.14, "saldo": 20.14, "historico": f"Venda {venda_id} parcela 2/3"},
         {"id": 824407119, "situacao": "aberto", "valor": 20.14, "saldo": 20.14, "historico": f"Venda {venda_id} parcela 3/3"},
     ]
 
-    g = ml.GrupoRecebimento(
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-2",
         id_venda=venda_id,
         indices=[0],
@@ -396,8 +414,8 @@ def test_rotina_baixa_distribui_valor_entre_todas_as_parcelas(tmp_path):
 
     # Mock do TinyClient
     contas_db = {
-        824398571: {"id": 824398571, "situacao": "aberto", "valor": 31.47, "saldo": 31.47, "valorPago": 0, "historico": "Venda 2000014584857665 parcela 1/2"},
-        824398572: {"id": 824398572, "situacao": "aberto", "valor": 31.47, "saldo": 31.47, "valorPago": 0, "historico": "Venda 2000014584857665 parcela 2/2"},
+        824398571: {"id": 824398571, "situacao": "aberto", "valor": 31.47, "saldo": 31.47, "valorPago": 0, "historico": "Venda 2000029709298543 parcela 1/2"},
+        824398572: {"id": 824398572, "situacao": "aberto", "valor": 31.47, "saldo": 31.47, "valorPago": 0, "historico": "Venda 2000029709298543 parcela 2/2"},
     }
     baixas_chamadas = []
 
@@ -405,6 +423,8 @@ def test_rotina_baixa_distribui_valor_entre_todas_as_parcelas(tmp_path):
         return dict(contas_db[cid])
 
     def fake_baixar(token, cid, valor_pago, data_pagamento, conta_destino_id, categoria_id):
+        assert isinstance(valor_pago, Decimal)  # AUT-01: a rotina entrega Decimal ao tiny_client
+        valor_pago = float(valor_pago)
         baixas_chamadas.append({"cid": cid, "valor_pago": valor_pago})
         contas_db[cid]["saldo"] = max(0.0, contas_db[cid]["saldo"] - valor_pago)
         contas_db[cid]["valorPago"] += valor_pago
@@ -417,9 +437,9 @@ def test_rotina_baixa_distribui_valor_entre_todas_as_parcelas(tmp_path):
 
     # Cria análise com grupo parcelado
     empresa = ml.EMPRESAS_ML["revesta"]
-    g = ml.GrupoRecebimento(
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-100",
-        id_venda="2000014584857665",
+        id_venda="2000029709298543",
         indices=[0],
         chaves=["chave_mov_1"],
         valor_total=Decimal("62.94"),
@@ -436,7 +456,7 @@ def test_rotina_baixa_distribui_valor_entre_todas_as_parcelas(tmp_path):
         valor=Decimal("62.94"),
         data="08/10/2026",
         descricao_mp="payment",
-        id_pedido="2000014584857665",
+        id_pedido="2000029709298543",
         id_pacote="",
         id_pagamento="999",
         linha_relatorio=1,
@@ -478,3 +498,83 @@ def test_rotina_baixa_distribui_valor_entre_todas_as_parcelas(tmp_path):
     assert "2 parcelas" in resultado["resultados"][0]["mensagem"]
 
 
+
+
+# ─── data da venda em grupos antigos (2026-10-21) ─────────────────────────────
+
+
+def test_grupo_sem_data_da_venda_nao_fica_apto():
+    def grupo(**extra):
+        return ml.GrupoRecebimento(id="G-1", id_venda="1", indices=[0], chaves=["k"], valor_total=Decimal("50"),
+                                   valor_produtos=Decimal("50"), data="10/09/2025", nome_cliente="x",
+                                   conta_id=1, conta_situacao="aberto", conta_saldo=Decimal("50"), **extra)
+    sem = grupo()
+    ml.avaliar_conta(sem)
+    assert sem.situacao == ml.SIT_SEM_DATA_VENDA and not sem.apto_baixa
+    com = grupo(data_venda="01/09/2025")
+    ml.avaliar_conta(com)
+    assert com.situacao == ml.SIT_APTO_BAIXA
+
+
+class _MPPagamentos:
+    def __init__(self, datas=None, erro=None):
+        self.datas, self.erro, self.consultados = datas or {}, erro, []
+
+    def data_aprovacao(self, pagamento_id):
+        self.consultados.append(pagamento_id)
+        if self.erro:
+            raise self.erro
+        return self.datas.get(pagamento_id)
+
+
+def _apagar_data_venda(tmp_path):
+    """Simula análises anteriores a 2026-10-21: nenhum grupo salvo tem a data da venda."""
+    for arq in (tmp_path / "conciliacao_ml" / "analises").glob("*.json"):
+        dados = json.loads(arq.read_text(encoding="utf-8"))
+        for g in dados["grupos"]:
+            g.pop("data_venda", None)
+        arq.write_text(json.dumps(dados), encoding="utf-8")
+
+
+def test_completa_data_da_venda_pelas_analises_salvas_e_pelo_mercado_pago(tmp_path):
+    r = _rotina(tmp_path)
+    r.executar("manual", ["norvia_campinas"], date(2025, 9, 1), date(2025, 9, 2))  # Ana: venda em 30/08
+    mp = _MPPagamentos({"777": "2025-08-21T01:30:00Z"})
+    r.fabrica_mp = lambda e: mp
+
+    def grupo(id_venda, id_operacao, situacao=""):
+        return ml.GrupoRecebimento(id="G", id_venda=id_venda, indices=[0], chaves=["k"], valor_total=Decimal("1"),
+                                   data="01/09/2025", nome_cliente="x", id_operacao=id_operacao, situacao=situacao)
+    ana, antiga, baixada = grupo("3000000000000001", "5001"), grupo("999", "777"), grupo("888", "666", ml.SIT_CONCILIADO)
+
+    assert r._completar_data_venda(NORVIA, [ana, antiga, baixada]) == 2
+    assert ana.data_venda == "30/08/2025"  # da análise salva, sem chamar o Mercado Pago
+    assert antiga.data_venda == "20/08/2025"  # do pagamento no Mercado Pago (01:30 UTC = 22:30 de 20/08 em SP)
+    assert baixada.data_venda == "" and mp.consultados == ["777"]
+
+
+def test_baixa_de_analise_antiga_usa_a_data_da_venda_do_mercado_pago(tmp_path):
+    tiny = _Tiny()
+    r = _rotina(tmp_path, tiny=tiny)
+    ex = r.executar("manual", ["norvia_campinas"], date(2025, 9, 1), date(2025, 9, 2))
+    analise_id = ex["empresas"]["norvia_campinas"]["analise_id"]
+    _apagar_data_venda(tmp_path)
+    r.fabrica_mp = lambda e: _MPPagamentos({"5001": "2025-08-29T12:00:00.000-03:00"})
+    ana = next(g.id for g in r.estado.analise(analise_id).grupos if g.conta_id == 10)
+
+    r.baixar(analise_id, [ana])
+    assert [b[1]["data_pagamento"] for b in tiny.baixas] == ["29/08/2025"]
+
+
+def test_sem_data_da_venda_em_lugar_nenhum_nao_baixa(tmp_path):
+    tiny = _Tiny()
+    r = _rotina(tmp_path, tiny=tiny)
+    ex = r.executar("manual", ["norvia_campinas"], date(2025, 9, 1), date(2025, 9, 2))
+    analise_id = ex["empresas"]["norvia_campinas"]["analise_id"]
+    _apagar_data_venda(tmp_path)
+    r.fabrica_mp = lambda e: _MPPagamentos(erro=SemCredencial("sem token"))
+    ana = next(g.id for g in r.estado.analise(analise_id).grupos if g.conta_id == 10)
+
+    res = r.baixar(analise_id, [ana])
+    assert tiny.baixas == [] and res["total_sucessos"] == 0
+    assert "Data da venda não encontrada" in res["resultados"][0]["mensagem"]

@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.codigo import ler_codigos
@@ -359,6 +360,11 @@ def _remove_quietly(*paths: Path | None) -> None:
 
 
 async def _log_unhandled(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Falha de rede no getUpdates (Bad Gateway, timeout do Telegram): o polling tenta de novo
+    # sozinho, então fica em WARNING e não vira incidente para os agentes Qwen.
+    if update is None and isinstance(context.error, NetworkError) and not isinstance(context.error, BadRequest):
+        logger.warning("falha de rede no polling do Telegram, tentando de novo: %s", context.error)
+        return
     logger.error("erro não tratado no bot", exc_info=context.error)
 
 

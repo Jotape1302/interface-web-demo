@@ -121,7 +121,9 @@ export function createAdminRoutes(deps: {
       if (path === "/api/admin/users" && method === "GET") {
         const users = await auth.listUsers();
         const byId = new Map(users.map((u) => [u.id, u]));
-        return send(200, users.map((u) => toAdminView(u, byId)));
+        // SEC-09: quem não é Admin/ROOT não vê dados de contas Admin e ROOT.
+        const visiveis = isAdmin ? users : users.filter((u) => u.role !== "admin" && !u.is_root);
+        return send(200, visiveis.map((u) => toAdminView(u, byId)));
       }
 
       if (path === "/api/admin/users" && method === "POST") {
@@ -196,6 +198,9 @@ export function createAdminRoutes(deps: {
       const permMatch = path.match(/^\/api\/admin\/users\/(\d+)\/permissions$/);
       if (permMatch && method === "GET") {
         const target = await loadTarget(Number(permMatch[1]));
+        if (!isAdmin && (target.role === "admin" || target.is_root)) {
+          throw new PublicError(403, "Só o administrador vê as permissões de Administradores.", "target_forbidden");
+        }
         const state = await auth.getPermissionState(target.id);
         if (!state) return send(404, { error: "Usuário não encontrado.", code: "not_found" });
         return send(200, { ...state, role: target.role, is_root: Boolean(target.is_root) });

@@ -44,15 +44,23 @@ const BANNER_CLASS: Record<HealthState, string> = {
 function HistoryStrip({ check, hours, now }: { check: HealthCheckResult; hours: number; now: number }) {
   const buckets = bucketHistory(check.history, hours, HISTORY_BUCKETS, now);
   const bucketMinutes = (hours * 60) / HISTORY_BUCKETS;
+  const temAmostraBoa = buckets.some((b) => b === 'ok');
   return (
     <div>
-      <div className="flex h-5 items-stretch gap-px" role="img" aria-label={`Histórico das últimas ${hours} horas`}>
+      {/* Barra contínua: verde quando há amostra boa; só queda (vermelho) e instabilidade (amarelo) viram risco. */}
+      <div
+        className={`flex h-2.5 items-stretch overflow-hidden ${temAmostraBoa ? 'bg-emerald-500/70' : 'bg-muted'}`}
+        // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- barra feita de <span> (um por faixa de horário): <img> não tem filhos
+        role="img"
+        aria-label={`Histórico das últimas ${hours} horas`}
+      >
         {buckets.map((state, i) => {
           const from = new Date(now - (HISTORY_BUCKETS - i) * bucketMinutes * 60_000);
+          const risco = state === 'error' ? 'bg-rose-500' : state === 'warning' ? 'bg-amber-400' : '';
           return (
             <span
               key={i}
-              className={`flex-1 rounded-[2px] ${state ? DOT_CLASS[state] : 'bg-muted'} ${state === 'ok' ? 'opacity-70' : ''}`}
+              className={`flex-1 ${risco}`}
               title={`${formatTimeBR(from)} · ${state ? HEALTH_STATE_LABEL[state] : 'Sem amostra'}`}
             />
           );
@@ -71,7 +79,7 @@ function HistoryStrip({ check, hours, now }: { check: HealthCheckResult; hours: 
 
 function CheckCard({ check, hours, now }: { check: HealthCheckResult; hours: number; now: number }) {
   return (
-    <article className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
+    <article className="flex flex-col gap-3 rounded-none border border-border bg-card p-4">
       <header className="flex items-start justify-between gap-3">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${DOT_CLASS[check.state]}`} aria-hidden="true" />
@@ -172,6 +180,7 @@ export default function SystemHealth() {
     );
   }
 
+  // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
   const now = report ? Date.parse(report.generatedAt) : Date.now();
 
   return (
@@ -192,7 +201,7 @@ export default function SystemHealth() {
           type="button"
           onClick={() => void load(true)}
           disabled={loading}
-          className="flex cursor-pointer items-center gap-1.5 self-start rounded-xl border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-60 sm:self-auto"
+          className="flex cursor-pointer items-center gap-1.5 self-start rounded-none border border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground transition hover:bg-muted disabled:opacity-60 sm:self-auto"
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           Verificar agora
@@ -200,14 +209,14 @@ export default function SystemHealth() {
       </div>
 
       {error && (
-        <div role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-600 dark:text-rose-400">
+        <div role="alert" className="rounded-none border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-600 dark:text-rose-400">
           {error}
         </div>
       )}
 
       {report && (
         <>
-          <div className={`flex items-center justify-between gap-3 rounded-lg border p-4 text-sm font-medium ${BANNER_CLASS[report.overall]}`}>
+          <div className={`flex items-center justify-between gap-3 rounded-none border p-4 text-sm font-medium ${BANNER_CLASS[report.overall]}`}>
             <span className="flex items-center gap-2">
               <span className={`h-2.5 w-2.5 rounded-full ${DOT_CLASS[report.overall]}`} aria-hidden="true" />
               {OVERALL_MESSAGE[report.overall]}

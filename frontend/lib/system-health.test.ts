@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bucketHistory, makeDemoSystemHealth } from './system-health';
 
-test('bucketHistory: pior estado por faixa e faixas sem amostra ficam vazias', () => {
+void test('bucketHistory: pior estado por faixa e faixas sem amostra ficam vazias', () => {
   const now = Date.parse('2026-09-25T12:00:00Z');
   const at = (hoursAgo: number) => new Date(now - hoursAgo * 3600_000).toISOString();
   const buckets = bucketHistory(
@@ -20,13 +20,13 @@ test('bucketHistory: pior estado por faixa e faixas sem amostra ficam vazias', (
   assert.deepEqual(buckets, ['error', null, 'warning', 'ok']);
 });
 
-test('demonstração: estado geral é o pior dos serviços', () => {
+void test('demonstração: estado geral é o pior dos serviços', () => {
   const report = makeDemoSystemHealth();
   const states = new Set(report.checks.map((c) => c.state));
   assert.equal(report.overall, states.has('error') ? 'error' : states.has('warning') ? 'warning' : 'ok');
 });
 
-test('demonstração: inclui verificações de circuit-breakers e motor de marketplace', () => {
+void test('demonstração: inclui verificações de circuit-breakers e motor de marketplace', () => {
   const report = makeDemoSystemHealth();
   const checkIds = report.checks.map((c) => c.id);
   assert.ok(checkIds.includes('circuit-breakers'), 'Deve incluir verificação de circuit-breakers');

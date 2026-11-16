@@ -57,6 +57,13 @@ export const fretesACombinar: AutomationDefinition = {
   enabled: true,
 };
 
+export const emailMarketing: AutomationDefinition = {
+  id: "email-marketing",
+  title: "E-mail Marketing",
+  providers: ["RD Station", "Instagram", "Norvia Acabamentos"],
+  enabled: true,
+};
+
 export const futureAutomations: AutomationDefinition = {
   id: "future",
   title: "Novas automações",

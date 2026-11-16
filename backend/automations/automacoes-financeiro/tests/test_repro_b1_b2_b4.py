@@ -201,7 +201,7 @@ def test_b2_produto_e_frete_tentativa_unica_descarta_pendencia_e_baixa_duplo(tmp
 
     tiny.baixar_conta_receber_v3 = baixar_conta_receber_v3_com_falha_frete
 
-    grupo = ml.GrupoRecebimento(
+    grupo = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G1",
         id_venda="VENDA-1",
         indices=[0, 1],
@@ -315,7 +315,7 @@ def test_b2_falha_frete_com_releitura_indisponivel_mantem_pendencia(tmp_path):
 
     tiny.baixar_conta_receber_v3 = baixar_conta_receber_v3_com_falha
 
-    grupo = ml.GrupoRecebimento(
+    grupo = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G1",
         id_venda="VENDA-1",
         indices=[0, 1],
@@ -415,7 +415,7 @@ def test_b2_caminho_feliz_dois_posts_e_grupo_conciliado(tmp_path):
         obter_token_tiny=lambda emp: "tok-tiny",
     )
 
-    grupo = ml.GrupoRecebimento(
+    grupo = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G1",
         id_venda="VENDA-1",
         indices=[0, 1],
@@ -541,16 +541,16 @@ def test_sa08_tokens_sincronizar_contrato_sem_token_prefixo_e_com_cooldown():
     """
     from fastapi.testclient import TestClient
     from app.api import app
-    import app.api as api_mod
+    from app.routers import conciliacao_ml as api_mod
 
     api_mod._ML_TOKENS_SYNC_LAST_TS = 0.0
 
     client = TestClient(app)
 
     # 1. Mock de sincronização com apenas 1 conta renovada
-    with patch("app.api.sincronizar_todos_tokens_ml", return_value={"norvia": {"access_token": "token_norvia"}}), \
-         patch("app.api._candidatos_ml_tokens_files", return_value=[]), \
-         patch("app.api.token_esta_valido", side_effect=lambda d: bool(d.get("access_token"))):
+    with patch("app.routers.conciliacao_ml.sincronizar_todos_tokens_ml", return_value={"norvia": {"access_token": "token_norvia"}}), \
+         patch("app.routers.conciliacao_ml._candidatos_ml_tokens_files", return_value=[]), \
+         patch("app.routers.conciliacao_ml.token_esta_valido", side_effect=lambda d: bool(d.get("access_token"))):
         resp = client.post("/api/v1/conciliacao-ml/tokens/sincronizar")
         assert resp.status_code == 200
         dados = resp.json()
@@ -567,7 +567,7 @@ def test_sa08_tokens_sincronizar_contrato_sem_token_prefixo_e_com_cooldown():
 
     # 3. Exceção inesperada gera 500 genérico com erro_id sem vazar stack trace
     api_mod._ML_TOKENS_SYNC_LAST_TS = 0.0
-    with patch("app.api.sincronizar_todos_tokens_ml", side_effect=Exception("DB_PASSWORD_LEAK")):
+    with patch("app.routers.conciliacao_ml.sincronizar_todos_tokens_ml", side_effect=Exception("DB_PASSWORD_LEAK")):
         resp3 = client.post("/api/v1/conciliacao-ml/tokens/sincronizar")
         assert resp3.status_code == 500
         d3 = resp3.json()
@@ -712,7 +712,7 @@ def test_i4_mesmo_instante_rejeita_janela_diferente():
 
 def test_s2_parcelas_com_saldo_desconhecido_deixa_grupo_com_saldo_none():
     """S2: Parcela sem saldo nem valor informados deixa grupo.conta_saldo None."""
-    g = ml.GrupoRecebimento(
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G1",
         id_venda="123",
         indices=[1],

@@ -117,3 +117,84 @@ def test_medidas_vao_com_o_peso_e_sem_peso_nem_chama_o_ml(estado):
     with pytest.raises(MLAPIError, match="peso"):
         cliente.enviar_medidas("MLB1", Dimensoes(10, 20, 30))
     assert len(http.chamadas) == 1
+
+
+def test_anuncio_sem_embalagem_no_lote_e_relido_sozinho(estado):
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    pacote = [{"id": "SELLER_PACKAGE_HEIGHT", "value_name": "5 cm"}]
+    http = HTTPFalso([
+        ("GET", "/items/bulk", Resp(200, [
+            {"code": 200, "body": {"id": "MLB1", "attributes": pacote}},
+            {"code": 200, "body": {"id": "MLB2", "attributes": [], "shipping": {"dimensions": "84x9x5,1000"}}},
+        ])),
+        ("GET", "/items/MLB2", Resp(200, {"id": "MLB2", "attributes": pacote, "shipping": {"dimensions": "84x9x5,1000"}})),
+    ])
+    itens = list(ClienteML("norvia", estado, http=http, base_url="http://ml").anuncios(["MLB1", "MLB2"]))
+    assert [i["attributes"] for i in itens] == [pacote, pacote]
+    assert [c[1] for c in http.chamadas] == ["http://ml/items/bulk", "http://ml/items/MLB2"], "MLB1 já veio com a embalagem"
+    assert http.chamadas[0][2]["params"]["attributes"].startswith("body.id,body.title")
+    assert http.chamadas[1][2]["params"] == {"include_attributes": "all"}
+
+
+def test_medidas_de_envio_do_me1_mantem_o_resto_do_envio_e_campo_travado_nao_e_erro(estado):
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    http = HTTPFalso([
+        ("PUT", "/items/MLB1", Resp(200, {"id": "MLB1"})),
+        ("PUT", "/items/MLB2", Resp(400, {"message": "x", "cause": [{"code": "field_not_updatable"}]})),
+    ])
+    cliente = ClienteML("norvia", estado, http=http, base_url="http://ml")
+    envio = {"mode": "me1", "local_pick_up": True, "free_shipping": False}
+    assert cliente.enviar_dimensoes_envio("MLB1", Dimensoes(5, 5, 300, 250), envio) is True
+    assert http.chamadas[0][2]["json"] == {"shipping": {"mode": "me1", "dimensions": "5x5x300,250", "local_pick_up": True, "free_shipping": False}}
+    assert cliente.enviar_dimensoes_envio("MLB2", Dimensoes(5, 5, 300, 250), envio) is False
+
+
+
+def test_lote_recusado_pelo_ml_le_um_a_um_sem_reler_de_novo(estado):
+    """06/11: Campinas recebeu 403 ResourceDeprecated na leitura em lote."""
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    deprecado = {"message": "Resource deprecated - client no longer allowed to consume this resource",
+                 "error": "ResourceDeprecated", "status": 403}
+    http = HTTPFalso([
+        ("GET", "/items/bulk", Resp(403, deprecado)),
+        ("GET", "/items/MLB1", Resp(200, {"id": "MLB1", "attributes": []})),
+        ("GET", "/items/MLB2", Resp(404, {"message": "not found"})),
+        ("GET", "/items/MLB3", Resp(200, {"id": "MLB3", "attributes": []})),
+    ])
+    cliente = ClienteML("norvia", estado, http=http, base_url="http://ml")
+    itens = list(cliente.anuncios(["MLB1", "MLB2", "MLB3"]))
+    assert [i["id"] for i in itens] == ["MLB1", "MLB3"], "o 404 é pulado, o resto segue"
+    assert [c[1] for c in http.chamadas] == [
+        "http://ml/items/bulk", "http://ml/items/MLB1", "http://ml/items/MLB2", "http://ml/items/MLB3",
+    ], "sem embalagem, mas já lido sozinho: não relê"
+
+
+def test_lote_que_volta_sem_um_anuncio_le_o_que_faltou(estado):
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    pacote = [{"id": "SELLER_PACKAGE_HEIGHT", "value_name": "5 cm"}]
+    http = HTTPFalso([
+        ("GET", "/items/bulk", Resp(200, [{"code": 200, "body": {"id": "MLB1", "attributes": pacote}},
+                                          {"code": 404, "body": {"message": "x"}}])),
+        ("GET", "/items/MLB2", Resp(200, {"id": "MLB2", "attributes": pacote})),
+    ])
+    itens = list(ClienteML("norvia", estado, http=http, base_url="http://ml").anuncios(["MLB1", "MLB2"]))
+    assert [i["id"] for i in itens] == ["MLB1", "MLB2"]
+
+
+def test_lote_com_erro_do_servidor_nao_cai_no_um_a_um(estado, monkeypatch):
+    from app import retry
+    monkeypatch.setattr(retry, "dormir", lambda s: None)
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    http = HTTPFalso([("GET", "/items/bulk", Resp(503, "fora"))] * 10)
+    with pytest.raises(MLAPIError, match="HTTP 503"):
+        list(ClienteML("norvia", estado, http=http, base_url="http://ml").anuncios(["MLB1"]))
+
+
+def test_um_a_um_recusado_derruba_a_verificacao_em_vez_de_dar_ok_com_zero(estado):
+    estado.salvar_token("norvia", {"access_token": "t", "user_id": 1})
+    http = HTTPFalso([
+        ("GET", "/items/bulk", Resp(403, {"error": "ResourceDeprecated"})),
+        ("GET", "/items/MLB1", Resp(403, {"error": "forbidden"})),
+    ])
+    with pytest.raises(MLAPIError, match="HTTP 403"):
+        list(ClienteML("norvia", estado, http=http, base_url="http://ml").anuncios(["MLB1", "MLB2"]))

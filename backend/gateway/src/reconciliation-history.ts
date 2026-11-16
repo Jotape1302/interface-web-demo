@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "mariadb";
 import type { Config } from "./config.js";
-import type { Account, DatabaseSnapshot, Execution, HistoryWindow } from "./contracts.js";
-import { metricsFromCounts } from "./database.js";
+import { periodoSql } from "./periodo.js";
+import type { Account, DatabaseSnapshot, Execution, HistoryWindow, RoiPeriodo } from "./contracts.js";
+import { metricsFromCounts, type DbRow } from "./database.js";
 
 /**
  * Histórico das baixas executadas pela conciliação Inter × Tiny (tela Contas a Pagar).
@@ -143,7 +144,8 @@ export interface ReconciliationHistoryService {
   /** Lotes ainda pendentes (para retomar o acompanhamento depois de reiniciar o gateway). */
   pendingLotes(): Promise<string[]>;
   list(query: BaixaHistoricoQuery): Promise<BaixaHistoricoPage>;
-  resumo(): Promise<BaixaResumo | null>;
+  /** Com `periodo`, só as baixas cujo `executado_em` caiu nele (dias de São Paulo). */
+  resumo(periodo?: RoiPeriodo): Promise<BaixaResumo | null>;
   /**
    * Métricas de ROI e falhas recentes do painel Contas a Pagar (DatabaseAdapter). Substitui a
    * leitura da tabela conciliacao_contas_pagar do antigo fluxo n8n. Rejeita sem MariaDB, para o
@@ -154,8 +156,6 @@ export interface ReconciliationHistoryService {
   readHistory(window: HistoryWindow): Promise<{ complete: boolean; executions: Execution[] }>;
 }
 
-/** Minutos de trabalho manual poupados por conta baixada (mesma hipótese de docs/metrics.md). */
-export const MINUTOS_POR_BAIXA = 5;
 
 /** "2026-09-28 14:03:00" (DATETIME em UTC, dateStrings) -> ISO com Z. */
 function utcDatetimeToIso(value: unknown): string | null {
@@ -225,7 +225,7 @@ export function createReconciliationHistoryService(
   config: Config,
   pool: Pool | undefined,
 ): ReconciliationHistoryService {
-  async function query<T = any>(sql: string, values: unknown[] = []): Promise<T[]> {
+  async function query<T = DbRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     if (!pool) throw new Error("Pool de banco não configurado");
     const conn = await pool.getConnection();
     try {
@@ -235,17 +235,17 @@ export function createReconciliationHistoryService(
     }
   }
 
-  function mapRow(r: any): BaixaHistoricoItem {
+  function mapRow(r: DbRow): BaixaHistoricoItem {
     const dateOnly = (v: unknown) => (v ? String(v).slice(0, 10) : null);
     return {
       id: Number(r.id),
       lote_id: String(r.lote_id),
       executado_em: String(r.executado_em),
-      usuario_nome: r.usuario_nome ?? null,
+      usuario_nome: (r.usuario_nome as string | null | undefined) ?? null,
       empresa: String(r.empresa),
       conta_pagar_id: Number(r.conta_pagar_id),
-      numero_documento: r.numero_documento ?? null,
-      fornecedor_nome: r.fornecedor_nome ?? null,
+      numero_documento: (r.numero_documento as string | null | undefined) ?? null,
+      fornecedor_nome: (r.fornecedor_nome as string | null | undefined) ?? null,
       data_vencimento: dateOnly(r.data_vencimento),
       data_pagamento: dateOnly(r.data_pagamento),
       valor_tiny: r.valor_tiny === null || r.valor_tiny === undefined ? null : Number(r.valor_tiny),
@@ -253,10 +253,10 @@ export function createReconciliationHistoryService(
       juros: Number(r.juros),
       multa: Number(r.multa),
       desconto: Number(r.desconto),
-      inter_transacao_id: r.inter_transacao_id ?? null,
-      metodo_match: r.metodo_match ?? null,
+      inter_transacao_id: (r.inter_transacao_id as string | null | undefined) ?? null,
+      metodo_match: (r.metodo_match as string | null | undefined) ?? null,
       status: r.status === "sucesso" || r.status === "pendente" ? r.status : "erro",
-      mensagem: r.mensagem ?? null,
+      mensagem: (r.mensagem as string | null | undefined) ?? null,
     };
   }
 
@@ -300,21 +300,57 @@ export function createReconciliationHistoryService(
     ];
   }
 
-  async function insertRows(rows: unknown[][]): Promise<void> {
-    const conn = await pool!.getConnection();
-    try {
-      await conn.batch(
-        {
-          sql: `INSERT INTO conciliacao_baixas_historico
+  const INSERT_SQL = `INSERT INTO conciliacao_baixas_historico
             (lote_id, executado_em, usuario_id, usuario_nome, empresa, conta_pagar_id, numero_documento,
              fornecedor_nome, data_vencimento, data_pagamento, valor_tiny, valor_pago, juros, multa, desconto,
              inter_transacao_id, metodo_match, status, mensagem)
-            VALUES (?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          // Sem `timeout`: o driver mariadb recusa batch() com ele ("Cannot use timeout for
-          // Batch statement") e, com a opção, nenhuma baixa chegava a ser gravada.
-        },
-        rows,
-      );
+            VALUES (?, UTC_TIMESTAMP(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+  /**
+   * DB-03: a conta com baixa `sucesso` é única por empresa (UNIQUE em `chave_sucesso`). Uma
+   * duplicata (errno 1062) significa "já registrado" e nunca derruba as demais linhas do lote.
+   */
+  function isDupEntry(err: unknown): boolean {
+    const e = err as { errno?: number; code?: string } | null;
+    return e?.errno === 1062 || e?.code === "ER_DUP_ENTRY";
+  }
+
+  async function insertRows(rows: unknown[][]): Promise<void> {
+    const conn = await pool!.getConnection();
+    try {
+      // Em transação: se o batch parar numa duplicata, o rollback desfaz as linhas já gravadas
+      // antes de regravar linha a linha (senão as linhas `erro` do lote ficariam em dobro).
+      await conn.beginTransaction();
+      try {
+        await conn.batch(
+          {
+            sql: INSERT_SQL,
+            // Sem `timeout`: o driver mariadb recusa batch() com ele ("Cannot use timeout for
+            // Batch statement") e, com a opção, nenhuma baixa chegava a ser gravada.
+          },
+          rows,
+        );
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback().catch(() => undefined);
+        if (!isDupEntry(err)) throw err;
+        // O batch para na 1ª duplicata: regrava linha a linha, pulando só as já registradas.
+        for (const row of rows) {
+          try {
+            await conn.query({ sql: INSERT_SQL }, row);
+          } catch (rowErr) {
+            if (!isDupEntry(rowErr)) throw rowErr;
+            console.warn(
+              JSON.stringify({
+                event: "baixa_historico_ja_registrada",
+                message: "Baixa com sucesso já registrada para esta conta; linha ignorada.",
+                empresa: row[3],
+                conta_pagar_id: row[4],
+              }),
+            );
+          }
+        }
+      }
     } finally {
       conn.release();
     }
@@ -408,6 +444,7 @@ export function createReconciliationHistoryService(
           const mensagem = res
             ? str(res.mensagem, 4000)
             : `Situação desconhecida, confira no Tiny: ${erroGeral ?? "sem resultado da API de conciliação para esta conta"}`;
+          try {
           if (res && num(res.valor_pago) !== null) {
             // Grava os valores que a automação de fato usou na baixa (extrato da prévia).
             await query(
@@ -431,6 +468,22 @@ export function createReconciliationHistoryService(
             await query(`UPDATE conciliacao_baixas_historico SET status = ?, mensagem = ? WHERE id = ?`, [
               status,
               mensagem,
+              row.id,
+            ]);
+          }
+          } catch (err) {
+            if (!isDupEntry(err)) throw err;
+            // Outro lote já registrou sucesso para esta conta: esta linha vira "já registrada".
+            console.warn(
+              JSON.stringify({
+                event: "baixa_historico_ja_registrada",
+                message: "Baixa com sucesso já registrada para esta conta; linha pendente encerrada.",
+                empresa: row.empresa,
+                conta_pagar_id: Number(row.conta_pagar_id),
+              }),
+            );
+            await query(`UPDATE conciliacao_baixas_historico SET status = 'erro', mensagem = ? WHERE id = ?`, [
+              "Baixa já registrada em outro lote (duplicada).",
               row.id,
             ]);
           }
@@ -522,9 +575,8 @@ export function createReconciliationHistoryService(
       const total = String(counts?.total ?? 0);
       const sucessos = String(counts?.sucessos ?? 0);
       const base = metricsFromCounts(total, sucessos, sucessos);
-      const hoursSaved = (base.paidCount * MINUTOS_POR_BAIXA) / 60;
       return {
-        metrics: { ...base, hoursSaved, estimatedSavings: hoursSaved * 11 },
+        metrics: base,
         approvals: [],
         failures: falhas.map((r): Account => {
           const item = mapRow(r);
@@ -575,12 +627,14 @@ export function createReconciliationHistoryService(
       };
     },
 
-    async resumo() {
+    async resumo(periodo) {
       if (!pool) return null;
       try {
+        const f = periodoSql("executado_em", periodo);
         const [row] = await query<{ contas: number | bigint; valor: string | number | null }>(
           `SELECT COUNT(*) AS contas, COALESCE(SUM(valor_pago), 0) AS valor
-             FROM conciliacao_baixas_historico WHERE status = 'sucesso'`,
+             FROM conciliacao_baixas_historico WHERE ${["status = 'sucesso'", ...f.where].join(" AND ")}`,
+          f.values,
         );
         return { contasBaixadas: Number(row?.contas ?? 0), valorBaixado: Number(row?.valor ?? 0) };
       } catch (err) {

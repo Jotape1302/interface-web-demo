@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from app.config import settings
+from app.config import FUSO_SP, settings
 from app.dimensoes import e_carrinho
 from app.json_store import SECRET_FILE_MODE, write_json_atomic
 
@@ -32,13 +32,13 @@ MAX_AVISOS = 500
 
 def agora() -> str:
     # Com o fuso (-03:00): sem ele o frontend lê o horário como UTC e mostra 3 h a menos.
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now(FUSO_SP).isoformat(timespec="seconds")
 
 
 def ler_data(texto: str) -> datetime:
     """ISO gravado pela automação; os antigos, sem fuso, são horário local."""
     dt = datetime.fromisoformat(texto)
-    return dt if dt.tzinfo else dt.astimezone()
+    return dt if dt.tzinfo else dt.replace(tzinfo=FUSO_SP)
 
 
 def chave_anuncio(filial: str, mlb: str) -> str:
@@ -124,6 +124,13 @@ class Estado:
     def registrar_troca(dados: Dict[str, Any], troca: Dict[str, Any]) -> Dict[str, Any]:
         troca = {"id": uuid.uuid4().hex[:12], **troca}
         dados["trocas"].append(troca)
+        # Troca ok que sai do histórico (limite MAX_TROCAS) vira contador por dia e filial, para o
+        # ROI não cair quando o histórico gira.
+        arquivadas = dados.setdefault("trocas_ok_arquivadas", {})
+        for t in dados["trocas"][:-MAX_TROCAS]:
+            if t.get("status") == "ok" and t.get("feita_em"):
+                por_filial = arquivadas.setdefault(str(t["feita_em"])[:10], {})
+                por_filial[t["filial"]] = int(por_filial.get(t["filial"]) or 0) + 1
         del dados["trocas"][:-MAX_TROCAS]
         return troca
 

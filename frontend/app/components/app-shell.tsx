@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
   Activity,
-  AlertTriangle,
+  Bot,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -14,10 +14,12 @@ import {
   KeyRound,
   LayoutGrid,
   LogOut,
+  Mail,
   Menu,
   PackageSearch,
   MessageCircle,
   Ruler,
+  TrendingUp,
   Truck,
   ScanBarcode,
   Settings as SettingsIcon,
@@ -38,6 +40,7 @@ import {
   accountsPayable,
   danfeAutomation,
   financialDashboard,
+  emailMarketing,
   fretesACombinar,
   mlReconciliation,
   padronizacaoDimensoes,
@@ -55,7 +58,6 @@ import {
 import { ROLE_LABEL } from '@/lib/permissions';
 import { useAuth } from '@/lib/auth-context';
 import { useIsMobile } from '@/hooks/use-mobile';
-import { getPendingIncidentsCount, subscribeToIncidents } from '@/lib/incidents-store';
 import UserProfileModal, { getStatusPreset } from './user-profile-modal';
 import SettingsModal from './settings-modal';
 import NotificationBell from './notification-bell';
@@ -125,11 +127,13 @@ const NAV_HINTS: Record<AppShellPage, string> = {
   'danfe-tiny': 'Notas fiscais da SEFAZ para revisar, categorizar e lançar no Tiny ERP.',
   'financial-dashboard': 'Receitas, despesas, fluxo de caixa e contas em aberto das empresas no Tiny.',
   'stock-count': 'Contagem de pacotes na prateleira por foto, pelo bot do Telegram.',
-  'shipping-review': 'Tipo de envio dos anúncios do ML pelas dimensões padronizadas, com conferência.',
-  'dimension-standardization': 'Medidas dos produtos no ML e no Tiny comparadas, revisadas e padronizadas.',
+  'shipping-review': 'Tipo de envio dos anúncios do ML pela embalagem (1 m/2 m ME2, 3 m ME1), com conferência.',
+  'email-marketing': 'Geração semanal de rascunhos de e-mail marketing (RD Station) e kits Instagram de produtos Norvia.',
+  'dimension-standardization': 'Medidas e peso bruto do Tiny enviados à ficha e à embalagem dos anúncios do ML, com confirmação.',
   'admin-users': 'Aprovar cadastros, definir perfis e permissões e encerrar sessões.',
-  'admin-errors': 'Falhas reportadas nas automações, com diagnóstico e ação recomendada.',
   'admin-health': 'Situação dos serviços, integrações, rotinas diárias e do backup.',
+  'admin-roi': 'Horas e reais economizados por todas as automações.',
+  'admin-agentes-qwen': 'Correções dos agentes Qwen: PRs para aprovar, loops que precisam de você, deploy e acompanhamento.',
   'admin-audit': 'Histórico de quem fez o quê na plataforma.',
   'admin-tokens': 'Renovação automática dos tokens das integrações (n8n).',
 };
@@ -150,9 +154,11 @@ const NAV_PAGES: Record<Exclude<AppShellPage, 'home' | 'chat' | 'admin-users'>, 
   'marketplace-overview': { href: '/marketplace', label: 'Visão geral', icon: <LayoutGrid size={18} /> },
   'dimension-standardization': { href: '/padronizacao-dimensoes', label: padronizacaoDimensoes.title, icon: <Ruler size={18} /> },
   'shipping-review': { href: '/fretes-a-combinar', label: fretesACombinar.title, icon: <Truck size={18} /> },
+  'email-marketing': { href: '/email-marketing', label: emailMarketing.title, icon: <Mail size={18} /> },
   'producao-overview': { href: '/producao', label: 'Visão geral', icon: <LayoutGrid size={18} /> },
-  'admin-errors': { href: '/admin/erros', label: 'Erros & Falhas', icon: <AlertTriangle size={18} /> },
   'admin-health': { href: '/admin/saude', label: 'Saúde do Sistema', icon: <Activity size={18} /> },
+  'admin-roi': { href: '/admin/roi', label: 'ROI das automações', icon: <TrendingUp size={18} /> },
+  'admin-agentes-qwen': { href: '/admin/agentes-qwen', label: 'Agentes Qwen', icon: <Bot size={18} /> },
   'admin-audit': { href: '/admin/auditoria', label: 'Log de Auditoria', icon: <History size={18} /> },
   'admin-tokens': { href: '/admin/tokens', label: 'Tokens n8n', icon: <KeyRound size={18} /> },
 };
@@ -227,10 +233,12 @@ const PAGE_TITLES: Record<AppShellPage, string> = {
   'stock-count': stockCount.title,
   'shipping-review': fretesACombinar.title,
   'dimension-standardization': padronizacaoDimensoes.title,
+  'email-marketing': emailMarketing.title,
   'admin-users': 'Gestão de Usuários',
-  'admin-errors': 'Erros & Falhas',
   'admin-audit': 'Log de Auditoria',
   'admin-health': 'Saúde do Sistema',
+  'admin-roi': 'ROI das automações',
+  'admin-agentes-qwen': 'Agentes Qwen',
   'admin-tokens': 'Tokens n8n',
   chat: 'Chat',
 };
@@ -245,7 +253,6 @@ export default function AppShell({
   mode: 'demo' | 'live';
 }) {
   const { user, logout, pendingCount, token, apiBaseUrl, isDemoMode, session } = useAuth();
-  const [reportedIncidentsCount, setReportedIncidentsCount] = useState(0);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -256,13 +263,6 @@ export default function AppShell({
   const systemPages = visibleSystemPages(session);
   const showAdministration = canSeeAdministration(session);
   const pageArea = PAGE_AREA[page];
-
-  useEffect(() => {
-    setReportedIncidentsCount(getPendingIncidentsCount());
-    return subscribeToIncidents(() => {
-      setReportedIncidentsCount(getPendingIncidentsCount());
-    });
-  }, []);
 
   useDataPolling(
     async (signal) => {
@@ -296,6 +296,7 @@ export default function AppShell({
 
   useEffect(() => {
     try {
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
       setSidebarCollapsed(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true');
     } catch {
       // localStorage indisponível (modo privado, etc) — mantém expandido por padrão.
@@ -305,6 +306,7 @@ export default function AppShell({
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(CLOSED_FOLDERS_STORAGE_KEY) ?? '[]');
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
       if (Array.isArray(saved)) setClosedFolders(saved);
     } catch {
       // localStorage indisponível ou valor inválido — todas as pastas abertas.
@@ -348,6 +350,7 @@ export default function AppShell({
       <Sidebar
         collapsible="none"
         className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`}
+        // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
         role="complementary"
         aria-label="NORVIA AUTOMAÇÕES"
       >
@@ -440,7 +443,6 @@ export default function AppShell({
                   {!collapsed && <p className="nav-label mb-2">SISTEMA</p>}
                   {systemPages.map((p) => {
                     const nav = NAV_PAGES[p as keyof typeof NAV_PAGES];
-                    const count = p === 'admin-errors' ? reportedIncidentsCount : 0;
                     return (
                       <NavItem
                         key={p}
@@ -450,8 +452,6 @@ export default function AppShell({
                         icon={nav.icon}
                         label={nav.label}
                         hint={NAV_HINTS[p]}
-                        count={count}
-                        countLabel={`${count} falha${count > 1 ? 's' : ''} pendente${count > 1 ? 's' : ''}`}
                       />
                     );
                   })}
@@ -485,11 +485,11 @@ export default function AppShell({
                 render={
                   <button
                     type="button"
-                    className={`flex items-center gap-2.5 overflow-hidden text-left p-1 rounded-lg hover:bg-muted/70 transition cursor-pointer group ${collapsed ? '' : 'flex-1'}`}
+                    className={`flex items-center gap-2.5 overflow-hidden text-left p-1 rounded-none hover:bg-muted/70 transition cursor-pointer group ${collapsed ? '' : 'flex-1'}`}
                     title="Perfil e configurações"
                   >
                     <div className="relative shrink-0">
-                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--marca-ambar-suave)] text-xs font-bold text-[var(--marca-ambar)] border border-[var(--marca-ambar)]/30 overflow-hidden">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-none bg-[var(--marca-ambar-suave)] text-xs font-bold text-[var(--marca-ambar)] border border-[var(--marca-ambar)]/30 overflow-hidden">
                         {user?.foto_perfil ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img src={user.foto_perfil} alt={user.nome} className="h-full w-full object-cover" />
@@ -543,7 +543,7 @@ export default function AppShell({
               <button
                 type="button"
                 onClick={() => void logout()}
-                className={`rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-rose-500 transition cursor-pointer shrink-0 ${collapsed ? '' : 'ml-1'}`}
+                className={`rounded-none p-1.5 text-muted-foreground hover:bg-muted hover:text-rose-500 transition cursor-pointer shrink-0 ${collapsed ? '' : 'ml-1'}`}
                 title="Encerrar Sessão"
               >
                 <LogOut size={16} />

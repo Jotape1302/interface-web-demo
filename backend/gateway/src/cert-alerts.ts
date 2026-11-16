@@ -47,3 +47,19 @@ export async function checkCertificateAlerts(
   }
   return notified;
 }
+
+/**
+ * GW-08: no boot, marca como já avisados os marcos em que os certificados estão agora, para um
+ * restart do gateway não repetir o aviso. Só os marcos futuros voltam a notificar.
+ */
+export async function primeCertificateAlerts(
+  readStatus: () => Promise<DanfeSefazStatus>,
+  sent: Set<string>,
+): Promise<void> {
+  const status = await readStatus();
+  for (const cert of status.certificados ?? []) {
+    if (!cert.alerta || cert.dias_restantes === null || !cert.valido_ate) continue;
+    const milestone = milestoneFor(cert.dias_restantes);
+    if (milestone !== null) sent.add(`${cert.arquivo}:${cert.valido_ate}:${milestone}`);
+  }
+}

@@ -55,6 +55,11 @@ export function ColumnFilterHeader<T>({
   className,
 }: ColumnFilterHeaderProps<T>) {
   const [open, setOpen] = React.useState(false);
+  const gatilhoRef = React.useRef<HTMLButtonElement>(null);
+  const fechar = () => {
+    setOpen(false);
+    gatilhoRef.current?.focus();
+  };
   const ativo = isFiltroAtivo(value, def.tipo);
   const displayTitle = title ?? def.label;
   const listOptions = uniqueValues ?? options ?? [];
@@ -69,6 +74,7 @@ export function ColumnFilterHeader<T>({
         <PopoverTrigger
           render={
             <button
+              ref={gatilhoRef}
               type="button"
               className={cn(
                 'inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius)] border transition-colors',
@@ -78,6 +84,7 @@ export function ColumnFilterHeader<T>({
               )}
               aria-label={`Filtrar ${def.label}${ativo ? ' (filtrado)' : ''}`}
               aria-expanded={open}
+              aria-haspopup="dialog"
             >
               <Filter size={12} className={ativo ? 'text-amber-600 dark:text-amber-400' : ''} />
             </button>
@@ -87,6 +94,12 @@ export function ColumnFilterHeader<T>({
           align={align === 'right' ? 'end' : 'start'}
           side="bottom"
           sideOffset={6}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              fechar();
+            }
+          }}
           className="w-72 rounded-[var(--radius)] border-border bg-popover p-3 text-xs shadow-md"
         >
           <div className="flex items-center justify-between border-b border-border/70 pb-2">

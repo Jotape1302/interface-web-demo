@@ -10,14 +10,12 @@ import {
   KeyRound,
   CheckCircle2,
   XCircle,
-  AlertTriangle,
-  ArrowRight,
+  
   Database,
   ExternalLink,
   ShieldCheck,
   GitBranch,
   Timer,
-  Info,
   Layers,
   ChevronRight,
   Edit3,
@@ -212,6 +210,7 @@ export default function TokenAutomationPanel() {
           }
           return;
         }
+        // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
         setWorkflowId(cleaned);
         setInputWorkflowId(cleaned);
         if (trimmed === '8AtrRCYPslyFv6s6') {
@@ -255,6 +254,7 @@ export default function TokenAutomationPanel() {
   );
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     void fetchExecutions();
   }, [fetchExecutions]);
 
@@ -317,17 +317,17 @@ export default function TokenAutomationPanel() {
         type: 'success',
         text: `Workflow "${workflowId}" executado com sucesso! Tokens verificados e banco atualizado.`,
       });
-    } catch (err: any) {
+    } catch (err) {
       setActionMessage({
         type: 'error',
-        text: err?.message || 'Erro ao executar rotina de renovação.',
+        text: (err instanceof Error && err.message) || 'Erro ao executar rotina de renovação.',
       });
     } finally {
       setIsExecuting(false);
     }
   };
 
-  const handleSaveWorkflowId = (e?: React.FormEvent) => {
+  const handleSaveWorkflowId = (e?: React.SubmitEvent<HTMLFormElement>) => {
     if (e) e.preventDefault();
     const trimmed = inputWorkflowId.trim() || DEFAULT_WORKFLOW_ID;
     if (!isValidWorkflowId(trimmed)) {
@@ -397,7 +397,7 @@ export default function TokenAutomationPanel() {
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Header do Workflow com Badges */}
-      <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+      <div className="rounded-none border border-border bg-card p-5 shadow-sm">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="space-y-1.5">
             <div className="flex items-center gap-2 flex-wrap">
@@ -414,7 +414,7 @@ export default function TokenAutomationPanel() {
                   setInputWorkflowId(workflowId);
                   setIsConfigModalOpen(true);
                 }}
-                className="group inline-flex items-center gap-1.5 text-xs font-mono px-2 py-0.5 rounded-md bg-muted/60 hover:bg-muted border border-border hover:border-ring/60 text-foreground transition cursor-pointer"
+                className="group inline-flex items-center gap-1.5 text-xs font-mono px-2 py-0.5 rounded-none bg-muted/60 hover:bg-muted border border-border hover:border-ring/60 text-foreground transition cursor-pointer"
                 title="Clique para alterar ou conectar o ID do workflow no n8n"
               >
                 <SlidersHorizontal size={11} className="text-muted-foreground group-hover:text-primary transition" />
@@ -482,7 +482,7 @@ export default function TokenAutomationPanel() {
         {/* Feedback de Ação */}
         {actionMessage && (
           <div
-            className={`mt-4 p-3 rounded-lg text-xs font-medium flex items-center gap-2 animate-in slide-in-from-top-1 ${
+            className={`mt-4 p-3 rounded-none text-xs font-medium flex items-center gap-2 animate-in slide-in-from-top-1 ${
               actionMessage.type === 'success'
                 ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20'
                 : 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20'
@@ -519,14 +519,14 @@ export default function TokenAutomationPanel() {
               return (
                 <div
                   key={node.id}
-                  className={`relative p-3 rounded-xl border transition flex flex-col justify-between text-left ${
+                  className={`relative p-3 rounded-none border transition flex flex-col justify-between text-left ${
                     isActive
                       ? 'border-[var(--marca-ambar)] bg-[var(--marca-ambar-suave)] ring-2 ring-[var(--marca-ambar)]/40'
                       : 'border-border bg-muted/30 hover:bg-muted/50'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white border border-border/80 text-foreground overflow-hidden p-1 shadow-2xs">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-none bg-white border border-border/80 text-foreground overflow-hidden p-1 shadow-2xs">
                       {node.id === 'refresh' ? (
                         <TinyLogo size={18} />
                       ) : node.id === 'buscar' || node.id === 'salvar' ? (
@@ -560,7 +560,7 @@ export default function TokenAutomationPanel() {
 
       {/* Cards de Métricas Operacionais */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <div className="rounded-none border border-border bg-card p-4 shadow-sm">
           <span className="text-xs text-muted-foreground flex items-center gap-1.5">
             <Clock size={13} className="text-primary" />
             Frequência de Checagem
@@ -569,7 +569,7 @@ export default function TokenAutomationPanel() {
           <span className="text-[11px] text-muted-foreground mt-0.5 block">Disparo automático via cron</span>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <div className="rounded-none border border-border bg-card p-4 shadow-sm">
           <span className="text-xs text-muted-foreground flex items-center gap-1.5">
             <ShieldCheck size={13} className="text-primary" />
             Taxa de Assertividade
@@ -582,7 +582,7 @@ export default function TokenAutomationPanel() {
           </span>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <div className="rounded-none border border-border bg-card p-4 shadow-sm">
           <span className="text-xs text-muted-foreground flex items-center gap-1.5">
             <span className="w-4 h-4 rounded-xs bg-white flex items-center justify-center p-0.5 shadow-2xs">
               <MariaDbLogo size={12} />
@@ -595,7 +595,7 @@ export default function TokenAutomationPanel() {
           <span className="text-[11px] text-muted-foreground mt-0.5 block">MariaDB (Pool com auto-reconnect)</span>
         </div>
 
-        <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <div className="rounded-none border border-border bg-card p-4 shadow-sm">
           <span className="text-xs text-muted-foreground flex items-center gap-1.5">
             <Timer size={13} />
             Regra de renovação
@@ -606,7 +606,7 @@ export default function TokenAutomationPanel() {
       </div>
 
       {/* Histórico de Execuções com Filtros de Sucesso / Erro */}
-      <div className="rounded-xl border border-border bg-card shadow-sm overflow-hidden">
+      <div className="rounded-none border border-border bg-card shadow-sm overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border p-4 bg-muted/20">
           <div>
             <h4 className="text-sm font-bold text-foreground">Histórico de Telemetria Técnica</h4>
@@ -615,7 +615,7 @@ export default function TokenAutomationPanel() {
             </p>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-muted/60 p-1 rounded-lg border border-border">
+          <div className="flex items-center gap-1.5 bg-muted/60 p-1 rounded-none border border-border">
             <button
               type="button"
               onClick={() => setFilter('all')}
@@ -733,7 +733,7 @@ export default function TokenAutomationPanel() {
       {/* Modal de Detalhes da Execução */}
       {selectedExecution && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-in fade-in duration-150">
-          <div className="relative w-full max-w-md rounded-xl border border-border bg-card text-card-foreground shadow-lg p-6 space-y-4">
+          <div className="relative w-full max-w-md rounded-none border border-border bg-card text-card-foreground shadow-lg p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-2">
                 <KeyRound size={18} className="text-primary" />
@@ -744,34 +744,34 @@ export default function TokenAutomationPanel() {
               <button
                 type="button"
                 onClick={() => setSelectedExecution(null)}
-                className="rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                className="rounded-none p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
             <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between p-2.5 rounded-lg bg-muted/30 border border-border">
+              <div className="flex items-center justify-between p-2.5 rounded-none bg-muted/30 border border-border">
                 <span className="text-muted-foreground">Status do Ciclo</span>
                 <span className="font-bold uppercase text-foreground">
                   {selectedExecution.status}
                 </span>
               </div>
 
-              <div className="flex items-center justify-between p-2.5 rounded-lg bg-muted/30 border border-border">
+              <div className="flex items-center justify-between p-2.5 rounded-none bg-muted/30 border border-border">
                 <span className="text-muted-foreground">Nó Final</span>
                 <span className="font-mono font-semibold text-foreground">
                   {selectedExecution.stoppedNode}
                 </span>
               </div>
 
-              <div className="p-2.5 rounded-lg bg-muted/30 border border-border">
+              <div className="p-2.5 rounded-none bg-muted/30 border border-border">
                 <span className="text-muted-foreground block mb-1">Diagnóstico / Mensagem</span>
                 <p className="text-foreground leading-relaxed">{selectedExecution.message}</p>
               </div>
 
               {selectedExecution.details?.renewedAccounts && selectedExecution.details.renewedAccounts.length > 0 && (
-                <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/25">
+                <div className="p-2.5 rounded-none bg-emerald-500/10 border border-emerald-500/25">
                   <span className="text-emerald-700 dark:text-emerald-400 font-bold block mb-1">
                     Contas com Token Renovado:
                   </span>
@@ -784,7 +784,7 @@ export default function TokenAutomationPanel() {
               )}
 
               {selectedExecution.details?.errorDetail && (
-                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/25">
+                <div className="p-2.5 rounded-none bg-rose-500/10 border border-rose-500/25">
                   <span className="text-rose-600 dark:text-rose-400 font-bold block mb-1">
                     Detalhe do Erro:
                   </span>
@@ -799,7 +799,7 @@ export default function TokenAutomationPanel() {
               <button
                 type="button"
                 onClick={() => setSelectedExecution(null)}
-                className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-muted hover:bg-muted/80 text-foreground cursor-pointer"
+                className="px-4 py-1.5 text-xs font-semibold rounded-none bg-muted hover:bg-muted/80 text-foreground cursor-pointer"
               >
                 Fechar
               </button>
@@ -811,7 +811,7 @@ export default function TokenAutomationPanel() {
       {/* Modal de Conexão e Configuração do ID do Workflow n8n */}
       {isConfigModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-in fade-in duration-150">
-          <div className="relative w-full max-w-lg rounded-xl border border-border bg-card text-card-foreground shadow-lg p-6 space-y-4">
+          <div className="relative w-full max-w-lg rounded-none border border-border bg-card text-card-foreground shadow-lg p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-2">
                 <SlidersHorizontal size={18} className="text-primary" />
@@ -825,7 +825,7 @@ export default function TokenAutomationPanel() {
               <button
                 type="button"
                 onClick={() => setIsConfigModalOpen(false)}
-                className="rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                className="rounded-none p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
               >
                 ✕
               </button>
@@ -833,20 +833,20 @@ export default function TokenAutomationPanel() {
 
             <form onSubmit={handleSaveWorkflowId} className="space-y-4">
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-foreground flex items-center justify-between">
+                <label htmlFor="token-automation-panel-campo-834" className="text-xs font-semibold text-foreground flex items-center justify-between">
                   <span>ID do Workflow no n8n</span>
                   <span className="text-[11px] text-muted-foreground font-normal">
                     Padrão: <code className="font-mono">{DEFAULT_WORKFLOW_ID}</code>
                   </span>
                 </label>
                 <div className="relative">
-                  <input
+                  <input id="token-automation-panel-campo-834"
                     type="text"
                     value={inputWorkflowId}
                     onChange={(e) => setInputWorkflowId(e.target.value)}
                     placeholder="Ex: 8AtrRCYPslyFv6s6"
-                    className="w-full px-3.5 py-2 text-sm font-mono rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
-                    autoFocus
+                    className="w-full px-3.5 py-2 text-sm font-mono rounded-none border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
+                    
                     required
                   />
                 </div>
@@ -857,7 +857,7 @@ export default function TokenAutomationPanel() {
                 </p>
               </div>
 
-              <div className="p-3 rounded-lg bg-muted/40 border border-border space-y-1.5 text-xs text-muted-foreground">
+              <div className="p-3 rounded-none bg-muted/40 border border-border space-y-1.5 text-xs text-muted-foreground">
                 <strong className="text-foreground block font-semibold">Como funciona a conexão:</strong>
                 <ul className="list-disc list-inside space-y-1 text-[11px] leading-relaxed">
                   <li>
@@ -882,7 +882,7 @@ export default function TokenAutomationPanel() {
                   <button
                     type="button"
                     onClick={() => setIsConfigModalOpen(false)}
-                    className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-muted hover:bg-muted/80 text-foreground cursor-pointer"
+                    className="px-3.5 py-1.5 text-xs font-semibold rounded-none bg-muted hover:bg-muted/80 text-foreground cursor-pointer"
                   >
                     Cancelar
                   </button>

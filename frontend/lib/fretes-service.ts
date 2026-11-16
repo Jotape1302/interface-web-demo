@@ -1,5 +1,5 @@
 import { resolveApiBaseUrl } from './contracts';
-import type { AnuncioFrete, AnunciosPage, FretesStatus, HistoricoFretes, Medidas } from './fretes-contracts';
+import type { AnuncioFrete, AnunciosPage, FretesStatus, HistoricoFretes } from './fretes-contracts';
 import { demoFretes } from './demo-marketplace';
 import { demoDelay, isDemoSession } from './demo-session';
 import { apiErrorMessage } from './api-errors';
@@ -20,13 +20,15 @@ export class FretesService {
   private async request<T>(path: string, init: RequestInit = {}, timeoutMs = 20000): Promise<T> {
     const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}/api/marketplace/fretes${path}`, {
       ...init,
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders(), ...init.headers },
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders(), ...(init.headers as Record<string, string> | undefined) },
       credentials: 'same-origin',
       cache: 'no-store',
       signal: init.signal ?? AbortSignal.timeout(timeoutMs),
     });
-    const body = (await res.json().catch(() => null)) as any;
+    const body: unknown = await res.json().catch(() => null);
     if (!res.ok) throw new Error(apiErrorMessage(body, res.status, 'Falha na automação de fretes'));
+    // 200 sem JSON: resposta cortada (ex.: serviço reiniciando no deploy).
+    if (body === null) throw new Error('Resposta incompleta do serviço (pode estar reiniciando). Clique em Atualizar.');
     return body as T;
   }
 
@@ -73,6 +75,11 @@ export class FretesService {
   executar(): Promise<{ status: string }> {
     return this.request('/executar', { method: 'POST', body: '{}' });
   }
+
+  /** Varredura: além dos a combinar, corrige ME1/ME2 que não batem com a embalagem (1 m/2 m ME2, 3 m ME1). */
+  corrigirTipo(): Promise<{ status: string }> {
+    return this.request('/corrigir-tipo', { method: 'POST', body: '{}' });
+  }
 }
 
 /** Modo demonstração: mesmos métodos, com dados fictícios em memória (lib/demo-marketplace.ts). */
@@ -83,6 +90,7 @@ class DemoFretesService extends FretesService {
   retentar(anuncios: Array<Pick<AnuncioFrete, 'filial' | 'mlb'>>) { return demoDelay(demoFretes.retentar(anuncios)); }
   historico(status = '') { return demoDelay(demoFretes.historico(status)); }
   executar() { return demoDelay(demoFretes.executar()); }
+  corrigirTipo() { return demoDelay(demoFretes.corrigirTipo()); }
 }
 
 export function createFretesService(apiBaseUrl?: string): FretesService {

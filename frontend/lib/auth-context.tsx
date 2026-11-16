@@ -5,7 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { resolveApiBaseUrl } from './contracts';
 import { readApiError } from './api-errors';
 import { hasPermission, type PermissionSession, type Role } from './permissions';
-import { DEMO_ROOT_USERNAME, demoAdminStore, demoSessionFor } from './demo-permissions';
+import { DEMO_ROOT_USERNAME, loadDemoPermissions } from './demo-permissions-loader';
 import { subscribeRealtime } from './realtime';
 import { toast } from '@/components/ui/toast';
 import {
@@ -66,7 +66,7 @@ export interface AuthContextType {
   refreshSession: () => Promise<void>;
   login: (login: string, senha: string) => Promise<void>;
   /** Entra no modo demo com um dos perfis de lib/demo-permissions.ts (padrão: Admin ROOT). */
-  loginDemo: (username?: string) => void;
+  loginDemo: (username?: string) => void | Promise<void>;
   isDemoMode: boolean;
   register: (data: { nome: string; email: string; setor: string; senha: string }) => Promise<{ message: string }>;
   logout: () => Promise<void>;
@@ -109,7 +109,8 @@ function readDemoProfile(): string {
 }
 
 /** Usuário + permissões da sessão demo (perfil guardado no login). */
-function demoSession(username: string): { user: User; permissions: string[] } {
+async function demoSession(username: string): Promise<{ user: User; permissions: string[] }> {
+  const { demoSessionFor } = await loadDemoPermissions();
   const s = demoSessionFor(username) ?? demoSessionFor(DEMO_ROOT_USERNAME)!;
   const { grants, ...profile } = s.user;
   const stored = getStoredProfile(profile.id);
@@ -307,7 +308,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const currentToken = localStorage.getItem(TOKEN_STORAGE_KEY);
     if (!currentToken) return;
     if (currentToken === 'mock-demo-token') {
-      const s = demoSession(readDemoProfile());
+      const s = await demoSession(readDemoProfile());
+      const { demoAdminStore } = await loadDemoPermissions();
       setPendingCount(demoAdminStore.pendingCount({ id: s.user.id, role: s.user.role, permissions: s.permissions }));
       return;
     }
@@ -324,7 +326,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [apiBaseUrl]);
 
-  const loginDemo = useCallback((username: string = DEMO_ROOT_USERNAME) => {
+  const loginDemo = useCallback(async (username: string = DEMO_ROOT_USERNAME) => {
     // FE-03: fora de localhost e de build demo, nada de sessão fictícia.
     if (!demoAllowedHere()) return;
     localStorage.setItem(TOKEN_STORAGE_KEY, 'mock-demo-token');
@@ -333,7 +335,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // sem localStorage: fica o Admin ROOT
     }
-    const s = demoSession(username);
+    const s = await demoSession(username);
+    const { demoAdminStore } = await loadDemoPermissions();
     setUser(s.user);
     setPermissions(s.permissions);
     setToken('mock-demo-token');
@@ -375,7 +378,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (storedToken === 'mock-demo-token') {
-        const s = demoSession(readDemoProfile());
+        const s = await demoSession(readDemoProfile());
+        const { demoAdminStore } = await loadDemoPermissions();
         setUser(s.user);
         setPermissions(s.permissions);
         setToken('mock-demo-token');
@@ -465,7 +469,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const currentToken = readStoredToken();
     if (!currentToken) return;
     if (currentToken === 'mock-demo-token') {
-      const s = demoSession(readDemoProfile());
+      const s = await demoSession(readDemoProfile());
       setUser((prev) => (prev ? { ...prev, role: s.user.role, is_root: s.user.is_root, setor: s.user.setor } : prev));
       setPermissions(s.permissions);
       return;
@@ -670,13 +674,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Atalho offline (build demo, ou credenciais "demo" em localhost/127.0.0.1). Em produção
     // as mesmas credenciais seguem para o gateway como qualquer outra (FE-03).
     // No demo, "<perfil demo>" + senha "demo" entra com aquele perfil (ver lib/demo-permissions.ts).
-    const demoProfile = demoSessionFor(email.trim()) ? email.trim() : undefined;
-    if (
-      demoAllowedHere() &&
-      (process.env.NEXT_PUBLIC_DATA_MODE === 'demo' || email === 'demo' || (demoProfile !== undefined && pass === 'demo'))
-    ) {
-      loginDemo(demoProfile);
-      return;
+    // As fixtures do demo só são baixadas (chunk separado) quando o demo é permitido aqui.
+    if (demoAllowedHere()) {
+      const { demoSessionFor } = await loadDemoPermissions();
+      const demoProfile = demoSessionFor(email.trim()) ? email.trim() : undefined;
+      if (process.env.NEXT_PUBLIC_DATA_MODE === 'demo' || email === 'demo' || (demoProfile !== undefined && pass === 'demo')) {
+        await loginDemo(demoProfile);
+        return;
+      }
     }
 
     // Sem timeout no cliente: sob muitas tentativas o gateway atrasa a resposta (até ~8 s)

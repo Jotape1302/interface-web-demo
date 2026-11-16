@@ -7,10 +7,20 @@ import { createDashboardService } from "../src/service.js";
 import { createApi } from "../src/server.js";
 import { createAuthService } from "../src/auth.js";
 import { createIncidentService } from "../src/incidents.js";
+import { createAgentesQwenService, type AgentesQwenIncidente } from "../src/agentes-qwen.js";
 
 const TEST_ADMIN_PASSWORD = "test-admin-bootstrap-password";
 
-test("Incidentes: reportados por qualquer usuário, visíveis e resolvíveis pelo admin", async (t) => {
+function incidenteQwen(grupo: AgentesQwenIncidente["grupo"], reportes: number[]): AgentesQwenIncidente {
+  return {
+    id: 9, servico: "automacao-nfe", evento: "reporte_operador", rota: null, mensagem: "Falha ao lançar", estado: grupo === "resolvido" ? "resolvido" : "novo",
+    grupo, volta: 1, ocorrencias: 1, primeiroEm: null, ultimoEm: null, atualizadoEm: null, diagnostico: null, nota: null, pr: null,
+    deployEm: null, deploy: [], acompanhamento: null, historico: [],
+    reportes: reportes.map((id) => ({ id, automacao: "danfe-tiny", referencia: "EXEC-1", por: "Ana Operadora", em: null })),
+  };
+}
+
+test("Reportar erro: qualquer aba com automação, vai aos agentes Qwen pelo repasse e fecha quando eles resolvem", async (t) => {
   const config = readConfig();
   const demo = createDemo();
   const previousBootstrapPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD;
@@ -21,12 +31,13 @@ test("Incidentes: reportados por qualquer usuário, visíveis e resolvíveis pel
   });
   const authService = createAuthService(config);
   await authService.bootstrap();
-  const adminNotifications: string[] = [];
+  const avisos: string[] = [];
   const incidents = createIncidentService(config, undefined, {
-    notifyAdmins: async (data) => {
-      adminNotifications.push(data.titulo);
+    notify: async (data) => {
+      avisos.push(data.titulo);
     },
   });
+  const agentesQwen = createAgentesQwenService(config, undefined, { notify: async () => {}, reportes: incidents });
 
   const server = createApi(config, {
     dashboard: createDashboardService("demo", demo.database, demo.n8n),
@@ -59,7 +70,7 @@ test("Incidentes: reportados por qualquer usuário, visíveis e resolvíveis pel
   await fetch(`${base}/api/admin/users/${ana.id}/approve`, {
     method: "POST",
     headers: { ...json, Authorization: `Bearer ${adminToken}` },
-    // RBAC por usuário: reportar incidente da NF-e exige ver a aba Revisão NF-e.
+    // RBAC por usuário: reportar erro da NF-e exige ver a aba Revisão NF-e.
     body: JSON.stringify({ username: "ana_op", grants: ["revisao_nfe:ver"] }),
   });
   const userToken = ((await (
@@ -69,66 +80,69 @@ test("Incidentes: reportados por qualquer usuário, visíveis e resolvíveis pel
       body: JSON.stringify({ login: "ana_op", senha: "senhaSegura123" }),
     })
   ).json()) as any).token as string;
+  const comoAna = { ...json, Authorization: `Bearer ${userToken}` };
 
   // Sem sessão: 401
   assert.equal((await fetch(`${base}/api/incidents`)).status, 401);
 
-  // Payload inválido: 400
-  const invalid = await fetch(`${base}/api/incidents`, {
+  // Automação desconhecida ou sem a mensagem de erro: 400
+  for (const corpo of [{ executionId: "X", automationId: "inexistente", errorMessage: "x" }, { executionId: "X", automationId: "danfe-tiny" }]) {
+    assert.equal((await fetch(`${base}/api/incidents`, { method: "POST", headers: comoAna, body: JSON.stringify(corpo) })).status, 400);
+  }
+  // Aba que ela não vê: 403
+  const semAba = await fetch(`${base}/api/incidents`, {
     method: "POST",
-    headers: { ...json, Authorization: `Bearer ${userToken}` },
-    body: JSON.stringify({ executionId: "X", automationId: "inexistente" }),
+    headers: comoAna,
+    body: JSON.stringify({ executionId: "MLB1", automationId: "shipping-review", errorMessage: "x" }),
   });
-  assert.equal(invalid.status, 400);
+  assert.equal(semAba.status, 403);
 
-  // Usuário comum reporta; quem reportou vem da sessão, não do corpo.
+  // Quem reportou vem da sessão, não do corpo; o título vem do catálogo.
   const report = {
     executionId: "EXEC-1",
     automationId: "danfe-tiny",
-    automationTitle: "NF-e & DANFE",
     stoppedNode: "Lançar no Tiny",
-    diagnosticExplanation: "diag",
-    recommendedAction: "ação",
+    errorMessage: "Falha ao lançar: CPF 123.456.789-09 sem cadastro",
     reportedBy: "Nome Forjado",
+    automationTitle: "Forjado",
   };
-  const created = await fetch(`${base}/api/incidents`, {
-    method: "POST",
-    headers: { ...json, Authorization: `Bearer ${userToken}` },
-    body: JSON.stringify(report),
-  });
+  const created = await fetch(`${base}/api/incidents`, { method: "POST", headers: comoAna, body: JSON.stringify(report) });
   assert.equal(created.status, 201);
   const incident = (await created.json()) as any;
   assert.equal(incident.reportedBy, "Ana Operadora");
+  assert.equal(incident.automationTitle, "NF-e & DANFE");
   assert.equal(incident.status, "pending");
-  assert.deepEqual(adminNotifications, ["Incidente reportado: NF-e & DANFE"]);
+  assert.equal(incident.agentIncidentId, null);
+  assert.deepEqual(avisos, ["Erro reportado em NF-e & DANFE"]);
 
-  // Reportar a mesma execução de novo atualiza, não duplica.
-  await fetch(`${base}/api/incidents`, {
-    method: "POST",
-    headers: { ...json, Authorization: `Bearer ${userToken}` },
-    body: JSON.stringify({ ...report, operatorNote: "de novo" }),
-  });
+  // Reportar a mesma referência de novo atualiza, não duplica (nem reavisa).
+  await fetch(`${base}/api/incidents`, { method: "POST", headers: comoAna, body: JSON.stringify({ ...report, operatorNote: "de novo" }) });
+  assert.equal(avisos.length, 1);
 
-  // Admin (outra sessão/máquina) enxerga o reporte.
-  const pending = (await (
-    await fetch(`${base}/api/incidents?status=pending`, { headers: { Authorization: `Bearer ${adminToken}` } })
-  ).json()) as any[];
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0].operatorNote, "de novo");
+  // O repasse leva o reporte ao PC (dados de pessoa física mascarados) até o PC confirmar.
+  const ida = await agentesQwen.receber({ geradoEm: "x", commitProducao: null, incidentes: [] });
+  assert.equal(ida.comandos.length, 1);
+  const comando = ida.comandos[0]!;
+  assert.equal(comando.acao, "reportar");
+  assert.ok(comando.acao === "reportar");
+  assert.equal(comando.reporte.servico, "automacao-nfe");
+  assert.equal(comando.reporte.nota, "de novo");
+  assert.equal(comando.reporte.mensagem, "Falha ao lançar: CPF <pf> sem cadastro");
 
-  // Usuário comum não pode resolver.
-  const forbidden = await fetch(`${base}/api/incidents/${pending[0].id}/resolve`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${userToken}` },
-  });
-  assert.equal(forbidden.status, 403);
+  // O PC devolveu o reporte no incidente #9: sai da fila e fica ligado.
+  const volta = await agentesQwen.receber({ geradoEm: "x", commitProducao: null, incidentes: [incidenteQwen("em_andamento", [Number(incident.id)])] });
+  assert.equal(volta.comandos.length, 0);
+  const lista = (await (await fetch(`${base}/api/incidents`, { headers: comoAna })).json()) as any[];
+  assert.equal(lista.length, 1);
+  assert.equal(lista[0].agentIncidentId, 9);
+  assert.equal(lista[0].agentGroup, "em_andamento");
+  assert.equal(lista[0].status, "pending");
 
-  const resolved = await fetch(`${base}/api/incidents/${pending[0].id}/resolve`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${adminToken}` },
-  });
-  assert.equal(resolved.status, 200);
-  const all = (await (await fetch(`${base}/api/incidents`, { headers: { Authorization: `Bearer ${userToken}` } })).json()) as any[];
-  assert.equal(all[0].status, "resolved");
-  assert.equal(all[0].resolvedBy, "Autor");
+  // Os agentes resolveram: o reporte fecha sozinho (não precisa mais estar no `reportes`).
+  await agentesQwen.receber({ geradoEm: "x", commitProducao: null, incidentes: [incidenteQwen("resolvido", [])] });
+  const fim = (await (await fetch(`${base}/api/incidents`, { headers: { Authorization: `Bearer ${adminToken}` } })).json()) as any[];
+  assert.equal(fim[0].status, "resolved");
+
+  // Endpoint antigo de resolver não existe mais.
+  assert.equal((await fetch(`${base}/api/incidents/${incident.id}/resolve`, { method: "POST", headers: { Authorization: `Bearer ${adminToken}` } })).status, 404);
 });

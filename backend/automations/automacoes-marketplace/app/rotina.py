@@ -3,17 +3,18 @@ Automação 2 — Tipo de frete.
 
 Rotina diária (por conta do Mercado Livre):
 1. Sincroniza o catálogo de anúncios (menos carrinhos): tipo de envio, tags, SKUs.
-2. Cada anúncio pega as dimensões PADRONIZADAS do seu SKU (dimensoes_produtos, validadas na
-   automação 1). Delas sai a embalagem padrão (5 x 7 x 100/200/300 cm) e o envio indicado:
-   ME2 se o ML diz que aceita (tag me2_available) ou se a embalagem cabe nos limites de ME2;
-   senão ME1 (só nas contas com ME1).
-3. Anúncio "a combinar" com envio indicado: envia as medidas da embalagem (com o peso do
-   produto) e troca para o envio indicado.
+2. Cada anúncio pega as medidas e o peso bruto do seu SKU no Tiny da mesma empresa (lidos pela
+   coleta da automação 1). Elas são a embalagem (como no Tiny) e dão o envio indicado:
+   maior lado até 2 m → ME2; maior → ME1 (só nas contas com ME1).
+3. Anúncio "a combinar" com envio indicado: envia as medidas da embalagem (com o peso bruto) e
+   troca para o envio indicado. A varredura (botão "Corrigir tipo de frete", `varredura=True`)
+   também troca os anúncios já em ME1/ME2 cujo tipo não bate com a embalagem (ex.: 2 m em ME1);
+   a rotina diária não.
 4. Toda alteração é conferida FRETES_MINUTOS_CONFERENCIA minutos depois: o ML aceita o PUT e às
    vezes volta o anúncio para "a combinar" ou desfaz as medidas. Isso vira "ML desfez" na tela
    (com nova tentativa em lote) e notificação.
 
-Sem dimensões padronizadas o anúncio não é alterado: primeiro padroniza, depois o frete.
+Sem medidas e peso bruto no Tiny o anúncio não é alterado.
 """
 import logging
 import threading
@@ -21,10 +22,10 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
-from app.config import FILIAIS, settings
+from app.config import FILIAIS, FUSO_SP, settings
 from app.dimensoes import Dimensoes, e_carrinho, embalagem_no_ml, embalagem_para, envio_indicado, mesmo_tamanho
 from app.estado import Estado, agora, chave_anuncio, ler_data
-from app.ml_client import ClienteML, ContaNaoConectada, MLAPIError
+from app.ml_client import ClienteML, ContaNaoConectada
 
 logger = logging.getLogger("marketplace.rotina")
 
@@ -34,10 +35,10 @@ STATUS_IGNORADOS = {"closed", "inactive"}
 FabricaCliente = Callable[[str], ClienteML]
 
 BLOQUEIO_TEXTO = {
-    "sem_padrao": "Produto sem dimensões padronizadas: padronize em Padronização de dimensões.",
-    "sem_sku": "Anúncio sem SKU no Mercado Livre: não dá para achar as dimensões padronizadas.",
-    "sem_embalagem": "O produto não cabe na embalagem padrão (5 x 7 x até 300 cm): defina o envio manualmente.",
-    "sem_peso": "Dimensões padronizadas sem peso: o ML exige o peso junto com as medidas.",
+    "sem_padrao": "Produto sem medidas ou peso bruto no Tiny da empresa: corrija o cadastro no Tiny.",
+    "sem_sku": "Anúncio sem SKU no Mercado Livre: não dá para achar as medidas no Tiny.",
+    "sem_embalagem": "Produto sem as três medidas no Tiny da empresa: corrija o cadastro no Tiny.",
+    "sem_peso": "Produto sem peso bruto no Tiny: o ML exige o peso junto com as medidas.",
     "sem_me1": "Pelo tamanho só cabe no ME1, que não está ativo nesta conta.",
 }
 
@@ -46,24 +47,37 @@ class Rotina:
     def __init__(
         self,
         estado: Estado,
-        repositorio: Any = None,
+        fonte_padroes: Optional[Callable[[], Dict[str, Dict[str, Dict[str, Any]]]]] = None,
         fabrica_cliente: Optional[FabricaCliente] = None,
         pausa: Optional[float] = None,
     ) -> None:
         self.estado = estado
-        self.repo = repositorio
+        # {filial: {sku: medidas do Tiny}} — Padronizacao.padroes_por_filial
+        self.fonte_padroes = fonte_padroes
         self.fabrica_cliente = fabrica_cliente or (lambda filial: ClienteML(filial, estado))
         self.pausa = settings.ML_PAUSA_ENTRE_ALTERACOES_S if pausa is None else pausa
         self._executando = threading.Lock()
         self.em_execucao: Optional[str] = None
+        self._aviso_padroes_em = -1e9
 
-    def padroes(self) -> Dict[str, Dict[str, Any]]:
-        if self.repo is None:
+    def padroes(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if self.fonte_padroes is None:
             return {}
         try:
-            return self.repo.listar()
+            return self.fonte_padroes()
         except Exception as e:
-            logger.error(f"[FRETES] Não consegui ler dimensoes_produtos: {e}")
+            logger.error(f"[FRETES] Não consegui ler as medidas do Tiny: {e}")
+            # Sem as medidas todo anúncio fica bloqueado: o erro vai para o aviso, não só para o log.
+            # No máximo um aviso por hora (a conferência chama isto a cada minuto).
+            if time.monotonic() - self._aviso_padroes_em > 3600:
+                self._aviso_padroes_em = time.monotonic()
+                try:
+                    with self.estado.alterar() as dados:
+                        self.estado.registrar_aviso(
+                            dados, "fretes_erro", "Medidas do Tiny indisponíveis", f"Não consegui ler as medidas do Tiny: {e}"[:500]
+                        )
+                except Exception:
+                    logger.error("[FRETES] Não consegui registrar o aviso das medidas do Tiny.", exc_info=True)
             return {}
 
     # ------------------------------------------------------------------------------------------
@@ -91,9 +105,10 @@ class Rotina:
         )
 
     @staticmethod
-    def avaliar(reg: Dict[str, Any], padroes: Dict[str, Dict[str, Any]]) -> None:
-        """Dimensões padronizadas, embalagem, envio indicado e o que impede a troca (sem rede)."""
-        encontrados = [padroes[s] for s in reg.get("skus") or [] if s in padroes]
+    def avaliar(reg: Dict[str, Any], padroes: Dict[str, Dict[str, Dict[str, Any]]]) -> None:
+        """Medidas do Tiny, embalagem, envio indicado e o que impede a troca (sem rede)."""
+        por_sku = padroes.get(reg.get("filial") or "") or {}
+        encontrados = [por_sku[s] for s in reg.get("skus") or [] if s in por_sku]
         reg["padrao"] = None
         reg["embalagem"] = None
         reg["envio_indicado"] = None
@@ -113,7 +128,7 @@ class Rotina:
         p, emb, dims = melhor  # type: ignore[misc]
         reg["padrao"] = {"sku": p["sku"], **dims.para_dict()}
         reg["embalagem"] = emb.para_dict() if emb else None
-        indicado = envio_indicado(emb, reg.get("tags_envio") or [])
+        indicado = envio_indicado(emb)
         reg["envio_indicado"] = indicado
         if emb is None:
             reg["bloqueio"] = "sem_embalagem"
@@ -128,17 +143,24 @@ class Rotina:
     # Rotina diária
     # ------------------------------------------------------------------------------------------
 
-    def executar(self, origem: str = "agendada") -> Dict[str, Any]:
+    def executar(self, origem: str = "agendada", varredura: bool = False) -> Dict[str, Any]:
+        """
+        Rotina diária: troca os anúncios "a combinar". Com `varredura`, também corrige os já em
+        ME1/ME2 cujo tipo não bate com a embalagem (precisa_corrigir).
+        """
         if not self._executando.acquire(blocking=False):
             return {"status": "ignorada", "mensagem": "Já existe uma verificação em andamento."}
         inicio = agora()
         self.em_execucao = inicio
-        resumo: Dict[str, Any] = {"contas": {}, "novos": 0, "trocas": 0, "erros": []}
+        # Marca no disco: um restart no meio deixa rastro (lifespan registra a execução interrompida).
+        with self.estado.alterar() as dados:
+            dados["execucao_em_andamento"] = inicio
+        resumo: Dict[str, Any] = {"contas": {}, "novos": 0, "trocas": 0, "corrigidos": 0, "erros": []}
         try:
             padroes = self.padroes()
             for filial in FILIAIS:
                 try:
-                    self._executar_conta(filial, resumo, padroes)
+                    self._executar_conta(filial, resumo, padroes, varredura)
                 except ContaNaoConectada as e:
                     resumo["contas"][filial] = {"status": "nao_conectada", "mensagem": str(e)}
                 except Exception as e:  # uma conta com problema não impede a outra
@@ -153,6 +175,7 @@ class Rotina:
             self._executando.release()
 
         with self.estado.alterar() as dados:
+            dados["execucao_em_andamento"] = None
             self.estado.registrar_execucao(
                 dados, {"iniciada_em": inicio, "concluida_em": agora(), "origem": origem, "status": status, "resumo": resumo}
             )
@@ -162,7 +185,9 @@ class Rotina:
                 )
         return {"status": status, "iniciada_em": inicio, "resumo": resumo}
 
-    def _executar_conta(self, filial: str, resumo: Dict[str, Any], padroes: Dict[str, Dict[str, Any]]) -> None:
+    def _executar_conta(
+        self, filial: str, resumo: Dict[str, Any], padroes: Dict[str, Dict[str, Dict[str, Any]]], varredura: bool = False
+    ) -> None:
         cliente = self.fabrica_cliente(filial)
         itens = list(cliente.anuncios(cliente.ids_dos_anuncios()))
 
@@ -190,18 +215,21 @@ class Rotina:
                 for k, r in dados["anuncios"].items()
                 if r["filial"] == filial
                 and r.get("status") == "active"
-                and r.get("modo_envio") == A_COMBINAR
+                and (r.get("modo_envio") == A_COMBINAR or (varredura and precisa_corrigir(r)))
                 and r.get("envio_indicado")
                 and not r.get("bloqueio")
                 and k not in aguardando
             ]
 
-        trocas = 0
+        trocas = corrigidos = 0
         erros_troca: List[str] = []
         for reg in candidatos:
             try:
-                self._trocar_envio(cliente, reg, reg["envio_indicado"], origem="rotina")
-                trocas += 1
+                self._trocar_envio(cliente, reg, reg["envio_indicado"], origem="varredura" if varredura else "rotina")
+                if reg.get("modo_envio") == A_COMBINAR:
+                    trocas += 1
+                else:
+                    corrigidos += 1
             except Exception as e:
                 erros_troca.append(f"{reg['mlb']}: {e}")
                 self._registrar_falha(reg, str(e))
@@ -212,10 +240,12 @@ class Rotina:
             "anuncios": len(itens),
             "novos": novos,
             "a_combinar_trocados": trocas,
+            "tipo_corrigido": corrigidos,
             "falhas_de_troca": len(erros_troca),
         }
         resumo["novos"] += novos
         resumo["trocas"] += trocas
+        resumo["corrigidos"] += corrigidos
         if erros_troca:
             resumo["erros"].append(f"{settings.rotulos()[filial]}: {len(erros_troca)} troca(s) de frete falharam")
 
@@ -233,7 +263,7 @@ class Rotina:
     def _agendar_conferencia(
         self, reg: Dict[str, Any], de: Optional[str], para: Optional[str], origem: str, usuario: Optional[str]
     ) -> Dict[str, Any]:
-        verificar_em = datetime.now().astimezone() + timedelta(minutes=settings.FRETES_MINUTOS_CONFERENCIA)
+        verificar_em = datetime.now(FUSO_SP) + timedelta(minutes=settings.FRETES_MINUTOS_CONFERENCIA)
         with self.estado.alterar() as dados:
             return self.estado.registrar_troca(
                 dados,
@@ -282,8 +312,8 @@ class Rotina:
 
     def retentar(self, anuncios: List[Dict[str, str]], usuario: Optional[str] = None) -> Dict[str, Any]:
         """
-        Nova tentativa nos anúncios que o ML desfez (aba "ML desfez"), com as dimensões
-        padronizadas atuais: a combinar → embalagem + troca para o envio indicado; senão só a
+        Nova tentativa nos anúncios que o ML desfez (aba "ML desfez"), com as medidas atuais do
+        Tiny: a combinar ou tipo inconsistente → embalagem + troca para o envio indicado; senão só a
         embalagem. Cada um ganha nova conferência; se o ML desfizer de novo, volta à lista.
         """
         resultado: Dict[str, Any] = {"enviados": 0, "ignorados": [], "erros": []}
@@ -306,7 +336,7 @@ class Rotina:
                 continue
             try:
                 cliente = self.fabrica_cliente(filial)
-                if reg.get("modo_envio") == A_COMBINAR and reg.get("envio_indicado"):
+                if reg.get("envio_indicado") and (reg.get("modo_envio") == A_COMBINAR or precisa_corrigir(reg)):
                     self._trocar_envio(cliente, reg, reg["envio_indicado"], origem="manual", usuario=usuario)
                 else:
                     cliente.enviar_medidas(mlb, Dimensoes.de_dict(reg.get("embalagem")))
@@ -329,7 +359,7 @@ class Rotina:
 
     def conferir_vencidas(self) -> int:
         """Confere as alterações cujo prazo de espera já passou. Devolve quantas conferiu."""
-        agora_dt = datetime.now().astimezone()
+        agora_dt = datetime.now(FUSO_SP)
         dados = self.estado.ler()
         vencidas = [
             dict(t)
@@ -343,6 +373,14 @@ class Rotina:
                 item = self.fabrica_cliente(troca["filial"]).anuncio(troca["mlb"])
             except Exception as e:
                 logger.warning(f"[FRETES] Conferência de {troca['mlb']} adiada: {e}")
+                # Fica no histórico (a troca continua "aguardando" e será tentada de novo).
+                try:
+                    with self.estado.alterar() as dados_w:
+                        for t in dados_w["trocas"]:
+                            if t.get("id") == troca.get("id"):
+                                t["erro_conferencia"] = {"mensagem": str(e)[:300], "em": agora()}
+                except Exception:
+                    logger.error("[FRETES] Não consegui gravar o erro da conferência.", exc_info=True)
                 continue
             modo = (item.get("shipping") or {}).get("mode")
             tags = (item.get("shipping") or {}).get("tags") or []
@@ -380,24 +418,36 @@ class Rotina:
         return len(vencidas)
 
 
+def precisa_corrigir(reg: Dict[str, Any]) -> bool:
+    """Já em ME1/ME2 (fora do Full) com o tipo diferente do indicado pela embalagem (ex.: 2 m em ME1)."""
+    return (
+        reg.get("modo_envio") in ("me1", "me2")
+        and reg.get("logistic_type") != "fulfillment"
+        and bool(reg.get("envio_indicado"))
+        and reg.get("modo_envio") != reg.get("envio_indicado")
+    )
+
+
 def _aguardando(dados: Dict[str, Any]) -> set:
     return {chave_anuncio(t["filial"], t["mlb"]) for t in dados["trocas"] if t.get("status") == "aguardando"}
 
 
 def skus_do_anuncio(item: Dict[str, Any]) -> List[str]:
-    """SKUs do anúncio (atributo SELLER_SKU, seller_custom_field e os das variações)."""
-    skus: List[str] = []
-    for a in item.get("attributes") or []:
-        if a.get("id") == "SELLER_SKU" and a.get("value_name"):
-            skus.append(str(a["value_name"]).strip())
-    if item.get("seller_custom_field"):
-        skus.append(str(item["seller_custom_field"]).strip())
-    for v in item.get("variations") or []:
-        for a in v.get("attributes") or []:
-            if a.get("id") == "SELLER_SKU" and a.get("value_name"):
-                skus.append(str(a["value_name"]).strip())
-        if v.get("seller_custom_field"):
-            skus.append(str(v["seller_custom_field"]).strip())
+    """
+    SKUs do anúncio. O atributo SELLER_SKU (do item e das variações; as variações só vêm com
+    include_attributes=all) é o SKU de verdade. O seller_custom_field só entra quando nenhum nível
+    tem SELLER_SKU, porque em anúncios antigos ele guarda o código legado (ex.: "4203" num anúncio
+    cujo SKU é "LHD1111BD20").
+    """
+    niveis = [item, *(item.get("variations") or [])]
+    skus = [
+        str(a["value_name"]).strip()
+        for nivel in niveis
+        for a in nivel.get("attributes") or []
+        if a.get("id") == "SELLER_SKU" and a.get("value_name")
+    ]
+    if not any(skus):
+        skus = [str(n["seller_custom_field"]).strip() for n in niveis if n.get("seller_custom_field")]
     return [s for s in dict.fromkeys(skus) if s]
 
 

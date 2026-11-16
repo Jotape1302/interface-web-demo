@@ -21,6 +21,8 @@ export interface Config {
     tokenWorkflowId?: string;
   };
   internalApiKey?: string;
+  /** Token do repasse do coletor para a aba Agentes Qwen (o INCIDENTES_TOKEN do coletor). */
+  agentesQwenToken?: string;
   /** IPs/CIDRs cujos X-Forwarded-For/X-Real-IP são aceitos (GW-04). */
   trustedProxies: string[];
 }
@@ -63,6 +65,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("DATA_MODE obrigatório com NODE_ENV=production (use DATA_MODE=live no servidor).");
   const mode = env.DATA_MODE?.trim() || "demo";
   if (mode !== "demo" && mode !== "live") throw new Error("DATA_MODE deve ser demo ou live");
+  // SEC-10: produção só sobe em live (demo libera leitura das abas sem login e usa dados em memória).
+  if (env.NODE_ENV === "production" && mode !== "live")
+    throw new Error(`DATA_MODE=${mode} não é permitido com NODE_ENV=production: defina DATA_MODE=live no servidor.`);
   const origins = (env.CORS_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000")
     .split(",")
     .map((v) => v.trim())
@@ -100,11 +105,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
       tokenWorkflowId: normalizeTokenWorkflowId(env.N8N_TOKEN_WORKFLOW_ID),
     },
     internalApiKey: env.INTERNAL_API_KEY?.trim() || undefined,
+    agentesQwenToken: env.AGENTES_QWEN_TOKEN?.trim() || undefined,
     trustedProxies: parseTrustedProxies(env.TRUSTED_PROXIES),
   };
   const automationsKey = env.AUTOMATIONS_INTERNAL_KEY?.trim() ?? "";
   if (automationsKey && automationsKey.length < 32)
     throw new Error("AUTOMATIONS_INTERNAL_KEY deve ter no mínimo 32 caracteres");
+  const agentesKey = env.AGENTES_QWEN_TOKEN?.trim() ?? "";
+  if (agentesKey && agentesKey.length < 32) throw new Error("AGENTES_QWEN_TOKEN deve ter no mínimo 32 caracteres");
   if (mode === "live") {
     // ADMIN_BOOTSTRAP_PASSWORD não é mais obrigatória: só é usada no seed do admin inicial
     // (tabela usuarios vazia) e pode sair do .env depois do primeiro boot.

@@ -14,11 +14,14 @@ import { createAuthService, seedDemoProfiles } from "./auth.js";
 import { createNotificationService } from "./notifications.js";
 import { createChatService } from "./chat.js";
 import { createIncidentService } from "./incidents.js";
-import { checkCertificateAlerts } from "./cert-alerts.js";
-import { checkAutomationAlerts, checkMarketplaceAlerts, type MarketplaceAviso } from "./marketplace-alerts.js";
+import { checkCertificateAlerts, primeCertificateAlerts } from "./cert-alerts.js";
+import { checkAutomationAlerts, primeAlertCursor, checkMarketplaceAlerts, type MarketplaceAviso } from "./marketplace-alerts.js";
+import { createRoiService, createLiveRoiSources, demoRoiSources } from "./roi.js";
 import { marketplaceApiUrl } from "./routes/marketplace.js";
 import { createEventHub } from "./events.js";
 import { createAuditService } from "./audit.js";
+import { createAtividadesService } from "./atividades.js";
+import { createAgentesQwenService } from "./agentes-qwen.js";
 import { createReconciliationHistoryService } from "./reconciliation-history.js";
 import {
   backupCheck,
@@ -39,6 +42,7 @@ import {
 import { checkN8n } from "./routes/health.js";
 import { automationFetch, createAutomationUrlResolver, financeiroCandidateUrls } from "./automation-http.js";
 import { createStockSkuService } from "./stock-sku.js";
+import { createAreaOverviewService, createAutomationJsonFetcher, createContagemReader } from "./area-overview.js";
 
 const config = readConfig();
 const dbPool = config.mode === "live" ? createDbPool(config) : undefined;
@@ -71,13 +75,20 @@ const chatService = createChatService(config, dbPool, {
 void chatService.bootstrap();
 
 const incidentService = createIncidentService(config, dbPool, {
-  // Incidente reportado → quem vê Erros & Falhas (e os admins).
-  notifyAdmins: (data) => notificationService.notifyPermission("erros:ver", data),
+  // Erro reportado numa aba → quem vê Agentes Qwen (e os admins); quem resolve são os agentes.
+  notify: (data) => notificationService.notifyPermission("agentes_qwen:ver", data),
 });
 void incidentService.bootstrap();
 
 const auditService = createAuditService(config, dbPool);
 void auditService.bootstrap();
+const atividades = createAtividadesService(config, dbPool);
+void atividades.bootstrap();
+const agentesQwen = createAgentesQwenService(config, dbPool, {
+  notify: (key, data) => notificationService.notifyPermission(key, data),
+  reportes: incidentService,
+});
+void agentesQwen.bootstrap();
 const reconciliationHistory = createReconciliationHistoryService(config, dbPool);
 const stockSku = createStockSkuService(config, dbPool);
 void stockSku.bootstrap();
@@ -215,8 +226,19 @@ const overview = createOverviewService(
 // subir, para o motor fiscal já estar no ar) e notifica os admins por marco.
 if (config.mode === "live") {
   const sentCertAlerts = new Set<string>();
-  const runCertCheck = () =>
-    checkCertificateAlerts(
+  let certPrimed = false;
+  const runCertCheck = async () => {
+    // GW-08: a 1ª rodada só registra o estado atual (não reenvia avisos de antes do restart).
+    if (!certPrimed) {
+      try {
+        await primeCertificateAlerts(() => danfeService.readSefazStatus(), sentCertAlerts);
+        certPrimed = true;
+        return;
+      } catch {
+        // motor fiscal fora: segue com a checagem normal
+      }
+    }
+    return checkCertificateAlerts(
       () => danfeService.readSefazStatus(),
       // Certificados A1 da SEFAZ → quem vê a Revisão NF-e (varredura) e os admins.
       (data) => notificationService.notifyPermission("revisao_nfe:ver", data),
@@ -224,55 +246,104 @@ if (config.mode === "live") {
     ).catch((err) =>
       console.warn(JSON.stringify({ event: "cert_alert_check_failed", message: String(err), at: new Date().toISOString() })),
     );
+  };
   setTimeout(() => void runCertCheck(), 60_000).unref();
   setInterval(() => void runCertCheck(), 6 * 3600_000).unref();
 }
 
 // Avisos de Marketplace → quem vê Padronização de dimensões / Fretes a combinar + admins.
+// GW-08: a 1ª rodada só posiciona o cursor no último aviso existente (restart não reenvia o histórico).
 if (config.mode === "live") {
   const cursorMarketplace = { ultimoId: null as number | null };
-  const runMarketplaceCheck = () =>
-    checkMarketplaceAlerts({
-      readAvisos: async (depoisDe) => {
-        const res = await automationFetch(`${marketplaceApiUrl()}/api/v1/fretes/avisos?depois_de=${encodeURIComponent(String(depoisDe))}`, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return (await res.json()) as { itens: MarketplaceAviso[]; ultimo_id: number };
-      },
-      listUsers: () => authService.listUsers(),
-      notify: (id, data) => notificationService.notify(id, data),
-      cursor: cursorMarketplace,
-    }).catch((err) =>
-      console.warn(JSON.stringify({ event: "marketplace_alert_check_failed", message: String(err), at: new Date().toISOString() })),
-    );
+  const readAvisos = async (depoisDe: number) => {
+    const res = await automationFetch(`${marketplaceApiUrl()}/api/v1/fretes/avisos?depois_de=${encodeURIComponent(String(depoisDe))}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { itens: MarketplaceAviso[]; ultimo_id: number };
+  };
+  const runMarketplaceCheck = async () => {
+    try {
+      if (cursorMarketplace.ultimoId === null) {
+        await primeAlertCursor({ readAvisos, cursor: cursorMarketplace });
+        return;
+      }
+      await checkMarketplaceAlerts({
+        readAvisos,
+        listUsers: () => authService.listUsers(),
+        notify: (id, data) => notificationService.notify(id, data),
+        cursor: cursorMarketplace,
+      });
+    } catch (err) {
+      console.warn(JSON.stringify({ event: "marketplace_alert_check_failed", message: String(err), at: new Date().toISOString() }));
+    }
+  };
   setTimeout(() => void runMarketplaceCheck(), 90_000).unref();
   setInterval(() => void runMarketplaceCheck(), 5 * 60_000).unref();
 }
 
 // Avisos da conciliação Mercado Livre (execução diária pronta, falha) → quem vê Conciliação ML + admins.
-
 if (config.mode === "live") {
   const cursorConciliacaoMl = { ultimoId: null as number | null };
-  const runMlAlertCheck = () =>
-    checkAutomationAlerts({
-      permissionFor: () => "conciliacao_ml:ver",
-      linkFor: () => "/conciliacao-mercado-livre",
-      readAvisos: async (depoisDe) => {
-        const res = await automationFetch(`${await resolveFinanceiroUrl()}/api/v1/conciliacao-ml/avisos?depois_de=${encodeURIComponent(String(depoisDe))}`, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return (await res.json()) as { itens: MarketplaceAviso[]; ultimo_id: number };
-      },
-      listUsers: () => authService.listUsers(),
-      notify: (id, data) => notificationService.notify(id, data),
-      cursor: cursorConciliacaoMl,
-    }).catch((err) =>
-      console.warn(JSON.stringify({ event: "ml_reconciliation_alert_check_failed", message: String(err), at: new Date().toISOString() })),
-    );
+  const readAvisos = async (depoisDe: number) => {
+    const res = await automationFetch(`${await resolveFinanceiroUrl()}/api/v1/conciliacao-ml/avisos?depois_de=${encodeURIComponent(String(depoisDe))}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { itens: MarketplaceAviso[]; ultimo_id: number };
+  };
+  const runMlAlertCheck = async () => {
+    try {
+      if (cursorConciliacaoMl.ultimoId === null) {
+        await primeAlertCursor({ readAvisos, cursor: cursorConciliacaoMl });
+        return;
+      }
+      await checkAutomationAlerts({
+        permissionFor: () => "conciliacao_ml:ver",
+        linkFor: () => "/conciliacao-mercado-livre",
+        readAvisos,
+        listUsers: () => authService.listUsers(),
+        notify: (id, data) => notificationService.notify(id, data),
+        cursor: cursorConciliacaoMl,
+      });
+    } catch (err) {
+      console.warn(JSON.stringify({ event: "ml_reconciliation_alert_check_failed", message: String(err), at: new Date().toISOString() }));
+    }
+  };
   setTimeout(() => void runMlAlertCheck(), 100_000).unref();
   setInterval(() => void runMlAlertCheck(), 5 * 60_000).unref();
+}
+
+// Avisos dos boletos DDA (agendado no Inter, recusado, erro da rotina) → quem vê Contas a Pagar + admins.
+if (config.mode === "live") {
+  const cursorDda = { ultimoId: null as number | null };
+  const readAvisos = async (depoisDe: number) => {
+    const res = await automationFetch(`${await resolveFinanceiroUrl()}/api/v1/dda/avisos?depois_de=${encodeURIComponent(String(depoisDe))}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { itens: MarketplaceAviso[]; ultimo_id: number };
+  };
+  const runDdaAlertCheck = async () => {
+    try {
+      if (cursorDda.ultimoId === null) {
+        await primeAlertCursor({ readAvisos, cursor: cursorDda });
+        return;
+      }
+      await checkAutomationAlerts({
+        permissionFor: () => "contas_pagar:ver",
+        linkFor: () => "/contas-a-pagar?aba=dda",
+        readAvisos,
+        listUsers: () => authService.listUsers(),
+        notify: (id, data) => notificationService.notify(id, data),
+        cursor: cursorDda,
+      });
+    } catch (err) {
+      console.warn(JSON.stringify({ event: "dda_alert_check_failed", message: String(err), at: new Date().toISOString() }));
+    }
+  };
+  setTimeout(() => void runDdaAlertCheck(), 110_000).unref();
+  setInterval(() => void runDdaAlertCheck(), 5 * 60_000).unref();
 }
 
 // Página "Saúde do sistema" (admin): cada serviço da plataforma, amostrado a cada 5 min.
@@ -327,9 +398,55 @@ const systemHealth = createSystemHealthMonitor(
 );
 systemHealth.start();
 
+const roi = createRoiService(
+  config.mode,
+  config.mode === "demo"
+    ? demoRoiSources()
+    : createLiveRoiSources({
+        history: reconciliationHistory,
+        danfe: danfeService,
+        audit: auditService,
+        stockSku,
+        marketplaceUrl: marketplaceApiUrl,
+      }),
+);
+
+const areaOverview = createAreaOverviewService({
+  mode: config.mode,
+  fetchFinanceiro: createAutomationJsonFetcher({
+    breaker: "financeiro",
+    baseUrl: resolveFinanceiroUrl,
+    fetchImpl: automationFetch,
+    invalidate: resolveFinanceiroUrl.invalidate,
+  }),
+  fetchMarketplace: createAutomationJsonFetcher({
+    breaker: "marketplace",
+    baseUrl: marketplaceApiUrl,
+    fetchImpl: automationFetch,
+  }),
+  history: reconciliationHistory,
+  readContagens: createContagemReader({ dir: () => process.env.CONTAGEM_REGISTRO_DIR || "", skus: stockSku }),
+  checkTiny: healthCheckers.checkTiny,
+  checkDatabase: async () => {
+    if (!dbPool) return { connected: false, message: "Banco de dados não configurado." };
+    try {
+      const conn = await dbPool.getConnection();
+      try {
+        await conn.query({ sql: "SELECT 1", timeout: config.timeoutMs });
+      } finally {
+        conn.release();
+      }
+      return { connected: true, message: "Banco de dados respondendo." };
+    } catch {
+      return { connected: false, message: "Banco de dados não respondeu." };
+    }
+  },
+});
+
 const server = createApi(config, {
   dashboard: service,
   overview,
+  roi,
   danfe: danfeService,
   healthCheckers,
   auth: authService,
@@ -339,9 +456,12 @@ const server = createApi(config, {
   incidents: incidentService,
   events: eventHub,
   audit: auditService,
+  atividades,
+  agentesQwen,
   reconciliationHistory,
   stockSku,
   systemHealth,
+  areaOverview,
 });
 server.listen(config.port, config.host, () =>
   console.log(`Norvia integration: ${config.mode}, ${config.host}:${config.port}`),
@@ -353,6 +473,7 @@ const shutdown = () => {
   // Streams SSE nunca terminam sozinhos — sem isso, server.close() esperaria os 15s do
   // timeout de segurança e sairia com código 1.
   eventHub.closeAll();
+  systemHealth.stop();
   server.close(() => {
     void adapters.database.close?.().finally(() => process.exit(0));
     if (!adapters.database.close) process.exit(0);
@@ -361,8 +482,10 @@ const shutdown = () => {
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+// GW-02: estado do processo incerto após exceção não capturada → loga e sai (o orquestrador reinicia).
 process.on("uncaughtException", (err) => {
   console.error(JSON.stringify({ event: "uncaught_exception", message: err.message, stack: err.stack }));
+  process.exit(1);
 });
 process.on("unhandledRejection", (reason) => {
   console.error(JSON.stringify({ event: "unhandled_rejection", reason: String(reason) }));

@@ -36,6 +36,7 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<string, { label: string; group
   dashboard_financeiro_sincronizado: { label: 'Sincronizou o Dashboard Financeiro', group: 'Automações' },
   incidente_reportado: { label: 'Reportou incidente', group: 'Incidentes' },
   incidente_resolvido: { label: 'Resolveu incidente', group: 'Incidentes' },
+  agentes_qwen_resolvido: { label: 'Resolveu incidente dos agentes Qwen', group: 'Incidentes' },
   nfe_varredura_sefaz: { label: 'Disparou varredura na SEFAZ', group: 'NF-e' },
   nfe_lote_enviado: { label: 'Enviou lote de DANFEs', group: 'NF-e' },
   nfe_lancada: { label: 'Lançou NF-e no Tiny', group: 'NF-e' },
@@ -45,20 +46,38 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<string, { label: string; group
   nfe_importada_chave: { label: 'Importou NF-e por chave de acesso (SEFAZ)', group: 'NF-e' },
   baixa_conciliacao_executada: { label: 'Baixou contas a pagar conciliadas (Inter × Tiny)', group: 'Automações' },
   conciliacao_ml_executada: { label: 'Executou a conciliação Mercado Livre manualmente', group: 'Automações' },
+  conciliacao_ml_lancamentos_exportados: { label: 'Planilha de lançamentos ML exportada', group: 'Automações' },
+  conciliacao_ml_tarifas_lancadas: { label: 'Tarifas ML lançadas no caixa do Tiny', group: 'Automações' },
+  conciliacao_ml_tarifas_conferidas: { label: 'Tarifas ML do padrão antigo conferidas no Tiny', group: 'Automações' },
+  conciliacao_ml_tarifas_refeitas_manual: { label: 'Tarifas ML do padrão antigo marcadas como refeitas à mão', group: 'Automações' },
   baixa_conciliacao_ml_executada: { label: 'Baixou contas a receber conciliadas (Mercado Livre × Tiny)', group: 'Automações' },
+  dda_executado: { label: 'Executou a rotina dos boletos DDA', group: 'Automações' },
+  dda_conta_vinculada: { label: 'Ligou um boleto DDA a uma conta a pagar do Tiny', group: 'Automações' },
+  dda_conta_criada: { label: 'Criou no Tiny a conta a pagar de um boleto DDA', group: 'Automações' },
+  dda_boleto_descartado: { label: 'Descartou um boleto DDA', group: 'Automações' },
+  dda_boleto_reaberto: { label: 'Reabriu um boleto DDA', group: 'Automações' },
+  dda_boletos_validados: { label: 'Validou boletos DDA para agendamento no Inter', group: 'Automações' },
+  dda_contas_criadas_lote: { label: 'Criou em lote no Tiny as contas de boletos DDA', group: 'Automações' },
   sincronizacao_tokens_ml_solicitada: { label: 'Sincronizou tokens das contas do Mercado Livre', group: 'Automações' },
   fretes_medidas_enviadas: { label: 'Enviou medidas de anúncio ao Mercado Livre', group: 'Automações' },
   fretes_medidas_salvas: { label: 'Salvou medidas de anúncio (Fretes a combinar)', group: 'Automações' },
   fretes_verificacao_manual: { label: 'Rodou a verificação de fretes', group: 'Automações' },
   fretes_nova_tentativa: { label: 'Tentou de novo fretes que o Mercado Livre desfez', group: 'Automações' },
-  dimensoes_validadas: { label: 'Validou dimensões de produtos (padronização)', group: 'Automações' },
-  dimensoes_reenviadas: { label: 'Reenviou dimensões padronizadas às plataformas', group: 'Automações' },
+  fretes_tipo_corrigido: { label: 'Rodou a correção do tipo de frete (ME1/ME2)', group: 'Automações' },
+  dimensoes_validadas: { label: 'Confirmou o envio das medidas do Tiny ao Mercado Livre', group: 'Automações' },
+  dimensoes_reenviadas: { label: 'Reenviou medidas do Tiny ao Mercado Livre', group: 'Automações' },
   dimensoes_coleta_manual: { label: 'Rodou a coleta de dimensões', group: 'Automações' },
   etiquetas_geradas: { label: 'Gerou etiquetas de produto para a Zebra', group: 'Automações' },
   contagem_estoque_sku_informado: { label: 'Informou o SKU de uma contagem de estoque', group: 'Automações' },
   contagem_estoque_excluida: { label: 'Excluiu uma contagem de estoque da tela', group: 'Automações' },
   contagem_estoque_conferida: { label: 'Conferiu uma contagem de estoque', group: 'Automações' },
   contagem_estoque_tiny: { label: 'Enviou uma contagem de estoque ao Tiny', group: 'Automações' },
+  marketing_lote_gerado: { label: 'Gerou lote semanal de e-mail marketing (Seg e Qui)', group: 'Automações' },
+  marketing_rascunho_aprovado: { label: 'Aprovou rascunho de e-mail marketing (RD Station)', group: 'Automações' },
+  marketing_produto_alterado: { label: 'Alterou produto do rascunho de e-mail marketing', group: 'Automações' },
+  marketing_ambientes_gerar: { label: 'Disparou geração de imagens de ambiente por IA', group: 'Automações' },
+  marketing_ambiente_aprovado: { label: 'Aprovou imagem de ambiente para e-mail marketing', group: 'Automações' },
+  marketing_ambiente_recusado: { label: 'Recusou imagem de ambiente gerada por IA', group: 'Automações' },
 };
 
 export function auditActionLabel(acao: string): string {
@@ -105,7 +124,7 @@ export function formatAuditDetails(detalhes: Record<string, unknown> | undefined
   return Object.entries(detalhes)
     .map(([key, value]) => {
       const label = DETAIL_LABELS[key] ?? key;
-      // Listas de chaves de permissão (RBAC por usuário): "contas_pagar:ver, erros:ver".
+      // Listas de chaves de permissão (RBAC por usuário): "contas_pagar:ver, saude:ver".
       if (Array.isArray(value)) {
         const items = value.filter((v): v is string => typeof v === 'string');
         return `${label}: ${items.length > 0 ? items.join(', ') : 'nenhuma'}`;

@@ -1,33 +1,37 @@
-import type { Confiabilidade, StatusPadronizacao } from './dimensoes-contracts';
-import type { Medidas } from './fretes-contracts';
-
-// Mesma embalagem padrão do backend (dimensoes.embalagem_para): seção 5 x 7 cm e o menor
-// comprimento padrão que caiba o produto. Só para a tela mostrar a consequência ao digitar.
-export const EMBALAGEM_SECAO: [number, number] = [5, 7];
-export const EMBALAGEM_COMPRIMENTOS = [100, 200, 300];
-
-export function embalagemPara(m: Medidas): { comprimento: number } | null {
-  const lados = [m.altura, m.largura, m.comprimento];
-  if (lados.some((v) => v == null || v <= 0)) return null;
-  const [menor, meio, maior] = (lados as number[]).slice().sort((a, b) => a - b);
-  if (menor > EMBALAGEM_SECAO[0] || meio > EMBALAGEM_SECAO[1]) return null;
-  const comprimento = EMBALAGEM_COMPRIMENTOS.find((c) => maior <= c);
-  return comprimento ? { comprimento } : null;
-}
-
-/** Tamanho + peso preenchidos (o ML exige peso junto com as medidas). */
-export function medidasValidas(m: Medidas): boolean {
-  return [m.altura, m.largura, m.comprimento, m.peso].every((v) => v != null && v > 0);
-}
-
-export const CONFIABILIDADE_INFO: Record<Confiabilidade, { label: string; variant: 'success' | 'warning' | 'danger' }> = {
-  alta: { label: 'Alta confiabilidade', variant: 'success' },
-  media: { label: 'Média confiabilidade', variant: 'warning' },
-  baixa: { label: 'Baixa confiabilidade', variant: 'danger' },
-};
+import type { SituacaoAnuncioDimensoes, StatusPadronizacao } from './dimensoes-contracts';
 
 export const STATUS_PADRONIZACAO_INFO: Record<StatusPadronizacao, { label: string; variant: 'success' | 'warning' | 'danger' | 'info' }> = {
-  pendente: { label: 'A revisar', variant: 'warning' },
-  divergente: { label: 'Divergente do padrão', variant: 'danger' },
-  padronizado: { label: 'Padronizado', variant: 'success' },
+  pendente: { label: 'A enviar ao ML', variant: 'warning' },
+  bloqueado: { label: 'Bloqueado no ML', variant: 'warning' },
+  sem_medida: { label: 'Sem medida no Tiny', variant: 'danger' },
+  padronizado: { label: 'Igual ao Tiny', variant: 'success' },
 };
+
+export const SITUACAO_ANUNCIO_INFO: Record<SituacaoAnuncioDimensoes, { label: string; variant: 'success' | 'warning' | 'danger' }> = {
+  diferente: { label: 'Diferente do Tiny', variant: 'warning' },
+  igual: { label: 'Igual ao Tiny', variant: 'success' },
+  sem_tiny: { label: 'SKU fora do Tiny', variant: 'danger' },
+  sem_medida: { label: 'Tiny sem medida', variant: 'danger' },
+  bloqueado_ml: { label: 'Bloqueado no ML', variant: 'warning' },
+};
+
+/** Atributo da ficha do ML → nome na tela. */
+export const ATRIBUTO_ROTULO: Record<string, string> = {
+  HEIGHT: 'Altura',
+  THICKNESS: 'Espessura',
+  WIDTH: 'Largura',
+  LENGTH: 'Comprimento',
+  WEIGHT: 'Peso',
+  NET_WEIGHT: 'Peso líquido',
+};
+
+/** "300 cm", "850 g" (atributos de peso em g, o resto em cm). */
+export function valorAtributo(attrId: string, v: number | null | undefined): string {
+  if (v == null) return 'vazio';
+  return `${v.toLocaleString('pt-BR', { maximumFractionDigits: 2 })} ${attrId.includes('WEIGHT') ? 'g' : 'cm'}`;
+}
+
+/** Produto pode ir na confirmação em lote: tem anúncio diferente do Tiny e não está enviando. */
+export function podeConfirmar(p: { status: StatusPadronizacao; envio?: { status: string } }): boolean {
+  return p.status === 'pendente' && p.envio?.status !== 'enviando';
+}

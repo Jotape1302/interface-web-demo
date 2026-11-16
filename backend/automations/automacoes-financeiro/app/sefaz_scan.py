@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from app.fuso import agora_sp_naive
 from app.config import Settings, settings
 from app.json_store import erro_gravacao, save_json_state
 from app.nfe_client import (
@@ -47,6 +48,27 @@ MAX_PAGES_PER_RUN = 20
 # repetidamente em pouco tempo. Usamos 3660s (61 min) com 1 min de margem para garantir
 # que qualquer divergência de relógio entre o servidor e os clusters da SEFAZ não reinicie o bloqueio.
 SCAN_COOLDOWN_SECONDS = 3660
+
+# Nova rodada assim que o cooldown do CNPJ acaba (~63 min) enquanto houver CNPJ recusado pela SEFAZ
+# (cStat 656), com erro ou com NSUs/histórico a recuperar, a qualquer hora do dia (10/11: as 24h,
+# antes parava após 20 tentativas e esperava as 06h). A cada 20 tentativas seguidas com CNPJ ainda
+# recusado ou com erro, registra na auditoria.
+TENTATIVAS_ANTES_DO_ALERTA = 20
+MARGEM_RETENTATIVA_SECONDS = 120
+
+# NSUs pulados à força (cStat 656 "Deve ser utilizado o ultNSU": outro sistema consumiu a fila
+# do CNPJ) são recuperados um a um por consNSU. A SEFAZ aceita 20 consultas por hora por CNPJ.
+MAX_NSU_RECUPERADOS_POR_RODADA = 15
+
+# Avanço do histórico por distNSU com ultNSU antigo, 50 documentos por consulta. Regra da SEFAZ
+# vista em 11/11: ultNSU MAIOR que o último devolvido ao CNPJ é sempre recusado (656 "Deve ser
+# utilizado o ultNSU"); MENOR só é aceito se ninguém consultou o CNPJ na última hora; IGUAL
+# (continuação) é aceito. Então o lote, depois de começar, segue em sequência até o fim da fila
+# (maxNSU) na mesma rodada e o cursor da varredura vai para esse ponto; parar no meio deixaria o
+# "último devolvido" atrás do cursor e a varredura normal — e a do Tiny — tomariam 656.
+MAX_PAGINAS_HISTORICO_POR_RODADA = 400
+PAUSA_ENTRE_PAGINAS_HISTORICO_SECONDS = 1
+MAX_NSU_PENDENTES_POR_CNPJ = 2000
 
 # Pausa entre a consulta de um CNPJ e o próximo dentro da MESMA varredura.
 INTER_CNPJ_DELAY_SECONDS = 4
@@ -105,9 +127,15 @@ class CnpjScanResult:
     notas_saida_ignoradas: int = 0
     erro: Optional[str] = None
     ult_nsu_final: Optional[str] = None
+    nsu_recuperados: int = 0
+    nsu_pendentes: int = 0
     status: str = "ok"  # "ok" | "erro" | "cooldown"
     cooldown_until: Optional[str] = None
     cooldown_seconds_remaining: int = 0
+    # False quando o cooldown preventivo pulou o CNPJ sem consultar a SEFAZ.
+    consultado: bool = True
+    # True quando a distribuição por NSU levou cStat 656 nesta rodada.
+    recusado: bool = False
 
 
 @dataclass
@@ -170,6 +198,263 @@ def save_nsu_checkpoint(cnpj: str, ult_nsu: str, cfg: Settings) -> None:
     state = load_nsu_state(cfg)
     state[cnpj] = ult_nsu
     _save_json(_nsu_state_path(cfg), state, cfg)
+
+
+def _nsu_pendentes_path(cfg: Settings) -> Path:
+    return cfg.DATA_DIR / "sefaz_nsu_pendentes.json"
+
+
+def load_nsu_pendentes(cnpj: str, cfg: Settings) -> List[int]:
+    data = _load_json(_nsu_pendentes_path(cfg), {})
+    lista = data.get(cnpj, []) if isinstance(data, dict) else []
+    return sorted({int(n) for n in lista if str(n).isdigit()})
+
+
+def save_nsu_pendentes(cnpj: str, nsus: List[int], cfg: Settings) -> None:
+    data = _load_json(_nsu_pendentes_path(cfg), {})
+    if not isinstance(data, dict):
+        data = {}
+    data[cnpj] = sorted(set(nsus))[-MAX_NSU_PENDENTES_POR_CNPJ:]
+    _save_json(_nsu_pendentes_path(cfg), data, cfg)
+
+
+def enfileirar_nsu_pendentes(cnpj: str, inicio: int, fim: int, cfg: Settings) -> int:
+    """Põe os NSUs de `inicio` a `fim` (inclusive) na fila de recuperação por consNSU."""
+    if fim < inicio or inicio < 1:
+        return 0
+    atuais = load_nsu_pendentes(cnpj, cfg)
+    save_nsu_pendentes(cnpj, atuais + list(range(inicio, fim + 1)), cfg)
+    return len(load_nsu_pendentes(cnpj, cfg)) - len(atuais)
+
+
+def _historico_path(cfg: Settings) -> Path:
+    return cfg.DATA_DIR / "sefaz_historico.json"
+
+
+# Recuperação do histórico, do mais antigo para o mais recente (10/11): primeiro uma busca
+# binária por consNSU acha o primeiro NSU a partir da data de corte (fase "busca"); depois anda
+# para frente até alcançar o cursor da varredura (fase "avanco"), por distNSU desde 11/11. Começar pelo mais antigo salva
+# primeiro o que sai da SEFAZ primeiro (ela só distribui por 90 dias), e a cada dia a
+# recuperação chega mais perto do tempo real.
+HISTORICO_DIAS_PADRAO = 90
+
+
+def load_historico(cnpj: str, cfg: Settings) -> Optional[Dict[str, Any]]:
+    """Recuperação em andamento deste CNPJ; None se não há (ou se está no formato antigo, para trás)."""
+    data = _load_json(_historico_path(cfg), {})
+    h = data.get(cnpj) if isinstance(data, dict) else None
+    if not isinstance(h, dict) or h.get("concluido") or h.get("fase") not in ("busca", "avanco"):
+        return None
+    return h
+
+
+def _save_historico(cnpj: str, historico: Dict[str, Any], cfg: Settings) -> None:
+    data = _load_json(_historico_path(cfg), {})
+    if not isinstance(data, dict):
+        data = {}
+    data[cnpj] = historico
+    _save_json(_historico_path(cfg), data, cfg)
+
+
+def iniciar_historico(cnpj: str, corte: str, cfg: Settings) -> int:
+    """
+    Liga a recuperação a partir de `corte` (AAAA-MM-DD) até o cursor atual da varredura, que fica
+    fixo em "ate": o que vem depois a varredura normal já baixa (e os pulos do 656 vão para a fila).
+    Devolve esse fim. Substitui uma recuperação anterior do CNPJ.
+    """
+    datetime.strptime(corte, "%Y-%m-%d")
+    fim = _nsu_int(load_nsu_state(cfg).get(cnpj))
+    _save_historico(cnpj, {"fase": "busca", "corte": corte, "lo": 1, "hi": fim, "ate": fim, "proximo": None,
+                           "concluido": fim < 1, "iniciado_em": agora_sp_naive().isoformat(timespec="seconds")}, cfg)
+    return fim
+
+
+_DATA_DOC_RE = re.compile(r"<dh(?:Emi|Evento|RegEvento|Recbto)>(\d{4}-\d{2}-\d{2})")
+
+
+def _data_do_documento(xml: str) -> Optional[str]:
+    m = _DATA_DOC_RE.search(xml)
+    return m.group(1) if m else None
+
+
+# consNSU sem documento: 137 (nada nesse NSU) ou 632 (fora do prazo de 90 dias da SEFAZ).
+_SEM_DOCUMENTO = ("137", "632")
+
+
+def _consultar_um_nsu(provider: SefazA1Provider, nsu: int, seen_keys: Set[str], result: CnpjScanResult) -> Optional[List[SefazDocEntry]]:
+    """consNSU de um documento, já tratado como na varredura. None = SEFAZ recusou (cStat 656)."""
+    dist = provider.consultar_nsu(str(nsu))
+    if dist.c_stat == "656":
+        logger.warning(f"[SEFAZ_SCAN] consNSU {nsu} recusado (cStat 656) para CNPJ {provider.cnpj}. Fica para a próxima rodada.")
+        return None
+    if dist.c_stat not in ("138",) + _SEM_DOCUMENTO:
+        raise NFeProviderError(f"SEFAZ retornou rejeição no consNSU {nsu}: cStat {dist.c_stat} - {dist.x_motivo}")
+    logger.info(f"[SEFAZ_SCAN] consNSU {nsu} CNPJ {provider.cnpj}: cStat={dist.c_stat}, docs={len(dist.docs)}")
+    for doc in dist.docs:
+        _handle_doc(doc, provider, seen_keys, result)
+    result.nsu_recuperados += 1
+    return dist.docs
+
+
+def _passo_historico(historico: Dict[str, Any], nsu: int, docs: List[SefazDocEntry], cursor: int) -> None:
+    """Avança a recuperação depois de consultar `nsu` (busca binária ou avanço para frente)."""
+    if historico["fase"] == "busca":
+        datas = [d for d in (_data_do_documento(doc.xml_content) for doc in docs) if d]
+        # Sem documento (fora do prazo) ou só documentos antes do corte: o início está depois.
+        antigo = not docs or (bool(datas) and max(datas) < historico["corte"])
+        if antigo:
+            historico["lo"] = nsu + 1
+        else:
+            historico["hi"] = nsu
+        if historico["lo"] >= historico["hi"]:
+            historico["fase"] = "avanco"
+            historico["proximo"] = historico["lo"]
+            logger.info(f"[SEFAZ_SCAN] Histórico: corte {historico['corte']} começa no NSU {historico['lo']}.")
+    else:
+        historico["proximo"] = nsu + 1
+    if historico["fase"] == "avanco" and int(historico["proximo"]) > cursor:
+        historico["concluido"] = True
+        historico["concluido_em"] = agora_sp_naive().isoformat(timespec="seconds")
+
+
+def fim_historico(cnpj: str, historico: Dict[str, Any], cfg: Settings) -> int:
+    """
+    Último NSU da recuperação. Recuperação ligada antes de existir "ate" (10/11): o cursor atual,
+    descontada a faixa que já está na fila de pulados (a varredura avançou depois de ligar).
+    """
+    if historico.get("ate") is None:
+        cursor = _nsu_int(load_nsu_state(cfg).get(cnpj))
+        fila = load_nsu_pendentes(cnpj, cfg)
+        historico["ate"] = min(cursor, min(fila) - 1) if fila else cursor
+    return int(historico["ate"])
+
+
+def _proximo_nsu_historico(historico: Dict[str, Any]) -> int:
+    if historico["fase"] == "busca":
+        return (int(historico["lo"]) + int(historico["hi"])) // 2
+    return int(historico["proximo"])
+
+
+def _historico_em_lote(
+    provider: SefazA1Provider, historico: Dict[str, Any], seen_keys: Set[str], result: CnpjScanResult, cfg: Settings
+) -> Optional[bool]:
+    """
+    Avanço do histórico por distNSU a partir de `proximo`, em sequência até o fim da fila da SEFAZ
+    (maxNSU), tratando todos os documentos (os já vistos são ignorados). No fim, o cursor da
+    varredura vai para o último ultNSU devolvido e o histórico é concluído.
+
+    None: a primeira página foi recusada (alguém consultou o CNPJ na última hora) — nada mudou.
+    True: chegou ao fim. False: parou no meio (656, limite de páginas ou sem avanço); a próxima
+    rodada continua do mesmo ponto, que é a continuação aceita pela SEFAZ.
+    """
+    cnpj = provider.cnpj
+    for pagina in range(MAX_PAGINAS_HISTORICO_POR_RODADA):
+        if pagina > 0:
+            time.sleep(PAUSA_ENTRE_PAGINAS_HISTORICO_SECONDS)
+        inicio = int(historico["proximo"])
+        dist = provider.consultar_distribuicao_nsu(f"{inicio - 1:015d}")
+        logger.info(
+            f"[SEFAZ_SCAN] Histórico distNSU CNPJ {cnpj} a partir do NSU {inicio}: cStat={dist.c_stat}, "
+            f"ultNSU='{dist.ult_nsu}', maxNSU='{dist.max_nsu}', docs={len(dist.docs)}"
+        )
+        if dist.c_stat == "656":
+            logger.warning(f"[SEFAZ_SCAN] Histórico distNSU recusado (cStat 656) para CNPJ {cnpj} (ultNSU devolvido {dist.ult_nsu}): {dist.x_motivo}")
+            return None if pagina == 0 else False
+        fim = dist.c_stat == "137"
+        if not fim:
+            if dist.c_stat != "138":
+                raise NFeProviderError(f"SEFAZ retornou rejeição no histórico por distNSU: cStat {dist.c_stat} - {dist.x_motivo}")
+            for doc in dist.docs:
+                _handle_doc(doc, provider, seen_keys, result)
+            ult = _nsu_int(dist.ult_nsu)
+            if ult < inicio:
+                logger.warning(f"[SEFAZ_SCAN] Histórico distNSU do CNPJ {cnpj} não avançou (ultNSU {dist.ult_nsu}, início {inicio}).")
+                return False
+            result.nsu_recuperados += ult - inicio + 1
+            historico["proximo"] = ult + 1
+            fim = not dist.docs or ult >= _nsu_int(dist.max_nsu)
+        if fim:
+            final = int(historico["proximo"]) - 1
+            if final >= _nsu_int(load_nsu_state(cfg).get(cnpj)):
+                save_nsu_checkpoint(cnpj, f"{final:015d}", cfg)
+                result.ult_nsu_final = f"{final:015d}"
+            historico["concluido"] = True
+            historico["concluido_em"] = agora_sp_naive().isoformat(timespec="seconds")
+            _save_historico(cnpj, historico, cfg)
+            logger.info(f"[SEFAZ_SCAN] Recuperação do histórico do CNPJ {cnpj} chegou ao fim da fila (NSU {final}): concluída.")
+            return True
+        _save_historico(cnpj, historico, cfg)
+    logger.warning(f"[SEFAZ_SCAN] Histórico do CNPJ {cnpj}: limite de {MAX_PAGINAS_HISTORICO_POR_RODADA} páginas, continua na próxima rodada.")
+    return False
+
+
+# Resultado de _recuperar_nsu_pendentes.
+RECUPERACAO_SEGUIR = "seguir"        # pode fazer a varredura normal
+RECUPERACAO_BLOQUEADA = "bloqueada"  # SEFAZ recusou (cStat 656): resto na próxima rodada
+RECUPERACAO_LOTE = "lote"            # histórico por distNSU: já levou o cursor ao fim, ou continua na próxima rodada
+
+
+def _recuperar_nsu_pendentes(provider: SefazA1Provider, seen_keys: Set[str], result: CnpjScanResult, cfg: Settings) -> str:
+    """
+    Primeiro a fila de documentos pulados por consNSU (no máximo MAX_NSU_RECUPERADOS_POR_RODADA
+    por rodada); depois o histórico:
+    - fase de avanço: lote por distNSU até o fim da fila (_historico_em_lote), sem a varredura
+      normal nesta rodada (o lote já leva o cursor ao fim, ou continua na próxima);
+    - primeira página do lote recusada, ou fase de busca: consNSU dentro do mesmo limite da fila
+      e depois a varredura normal.
+    """
+    cnpj = provider.cnpj
+    liberado = True
+    consultas = 0
+
+    def pausa() -> None:
+        if consultas > 0:
+            time.sleep(INTER_PAGE_DELAY_SECONDS)
+
+    for nsu in load_nsu_pendentes(cnpj, cfg)[:MAX_NSU_RECUPERADOS_POR_RODADA]:
+        pausa()
+        consultas += 1
+        if _consultar_um_nsu(provider, nsu, seen_keys, result) is None:
+            liberado = False
+            break
+        save_nsu_pendentes(cnpj, [n for n in load_nsu_pendentes(cnpj, cfg) if n != nsu], cfg)
+
+    historico = load_historico(cnpj, cfg)
+    usar_lote = True
+    while liberado and historico:
+        cursor = fim_historico(cnpj, historico, cfg)
+        nsu = _proximo_nsu_historico(historico)
+        if historico["fase"] == "avanco" and usar_lote:
+            pausa()
+            consultas += 1
+            lote = _historico_em_lote(provider, historico, seen_keys, result, cfg)
+            if lote is not None:
+                result.nsu_pendentes = len(load_nsu_pendentes(cnpj, cfg)) + (1 if load_historico(cnpj, cfg) else 0)
+                return RECUPERACAO_LOTE
+            # Outro sistema (o Tiny) consultou dentro da hora: consNSU nesta rodada.
+            logger.info(f"[SEFAZ_SCAN] Histórico do CNPJ {cnpj}: página antiga recusada, segue por consNSU nesta rodada.")
+            usar_lote = False
+            continue
+        if historico["fase"] == "avanco" and nsu > cursor:
+            _passo_historico(historico, nsu - 1, [], cursor)
+        elif consultas >= MAX_NSU_RECUPERADOS_POR_RODADA:
+            break
+        else:
+            pausa()
+            consultas += 1
+            docs = _consultar_um_nsu(provider, nsu, seen_keys, result)
+            if docs is None:
+                liberado = False
+                break
+            _passo_historico(historico, nsu, docs, cursor)
+        if historico.get("concluido"):
+            logger.info(f"[SEFAZ_SCAN] Recuperação do histórico do CNPJ {cnpj} alcançou o NSU {cursor}: concluída.")
+        _save_historico(cnpj, historico, cfg)
+        historico = load_historico(cnpj, cfg)
+
+    # O histórico em andamento conta como pendência: mantém as novas tentativas do dia.
+    result.nsu_pendentes = len(load_nsu_pendentes(cnpj, cfg)) + (1 if load_historico(cnpj, cfg) else 0)
+    return RECUPERACAO_SEGUIR if liberado else RECUPERACAO_BLOQUEADA
 
 
 def load_cooldown_state(cfg: Settings) -> Dict[str, str]:
@@ -369,6 +654,7 @@ def _scan_one_cnpj(
     remaining_cd = get_cnpj_cooldown_remaining_seconds(provider.cnpj, cfg)
     if remaining_cd > 0 and not force:
         result.status = "cooldown"
+        result.consultado = False
         result.cooldown_seconds_remaining = remaining_cd
         result.cooldown_until = load_cooldown_state(cfg).get(provider.cnpj)
         mins = max(1, remaining_cd // 60)
@@ -379,6 +665,15 @@ def _scan_one_cnpj(
         return result
 
     try:
+        recuperacao = _recuperar_nsu_pendentes(provider, seen_keys, result, cfg)
+        if recuperacao != RECUPERACAO_SEGUIR:
+            # Lote do histórico: chegou ao fim da fila (a SEFAZ pede 1h) ou continua do mesmo ponto.
+            until = save_cnpj_cooldown(provider.cnpj, SCAN_COOLDOWN_SECONDS, cfg)
+            result.status = "ok" if recuperacao == RECUPERACAO_LOTE else "cooldown"
+            result.cooldown_until = until
+            result.cooldown_seconds_remaining = SCAN_COOLDOWN_SECONDS
+            return result
+
         for page_idx in range(MAX_PAGES_PER_RUN):
             if page_idx > 0:
                 # Pausa entre páginas do MESMO CNPJ (ver INTER_PAGE_DELAY_SECONDS)
@@ -416,11 +711,18 @@ def _scan_one_cnpj(
                 if adv_int > curr_int:
                     save_nsu_checkpoint(provider.cnpj, best_adv, cfg)
                     result.ult_nsu_final = best_adv
-                    logger.info(
-                        f"[SEFAZ_SCAN] Checkpoint NSU atualizado para {best_adv} após cStat 656 (CNPJ {provider.cnpj})."
+                    # O cursor pulou sem receber os documentos do intervalo: eles vão para a
+                    # fila de recuperação por consNSU (10/11: as notas de compra sumiam aqui).
+                    # Cursor zerado (primeira varredura): não há intervalo conhecido a recuperar.
+                    novos = enfileirar_nsu_pendentes(provider.cnpj, curr_int + 1, adv_int, cfg) if curr_int > 0 else 0
+                    result.nsu_pendentes = len(load_nsu_pendentes(provider.cnpj, cfg))
+                    logger.warning(
+                        f"[SEFAZ_SCAN] Checkpoint NSU pulou de {ult_nsu} para {best_adv} após cStat 656 "
+                        f"(CNPJ {provider.cnpj}): {novos} NSU(s) na fila de recuperação por consNSU."
                     )
                 until = save_cnpj_cooldown(provider.cnpj, SCAN_COOLDOWN_SECONDS, cfg)
                 result.status = "cooldown"
+                result.recusado = True
                 result.cooldown_until = until
                 result.cooldown_seconds_remaining = SCAN_COOLDOWN_SECONDS
                 result.erro = None
@@ -559,6 +861,89 @@ def run_daily_scan(cfg: Optional[Settings] = None, force: bool = False) -> Sefaz
         _scan_lock.release()
 
 
+def _sem_varredura(summary: SefazScanSummary) -> List[CnpjScanResult]:
+    return [r for r in summary.resultados if r.status in ("cooldown", "erro") or r.nsu_pendentes > 0]
+
+
+def segundos_ate_nova_tentativa(summary: SefazScanSummary, cfg: Optional[Settings] = None) -> Optional[int]:
+    """
+    Espera até tentar de novo os CNPJs que ficaram sem varredura (recusa cStat 656, cooldown
+    preventivo ou erro): o maior cooldown entre eles mais uma margem, para não renovar o
+    bloqueio de 1h da SEFAZ. None quando todos os CNPJs foram varridos.
+    """
+    cfg = cfg or settings
+    pendentes = _sem_varredura(summary)
+    if not pendentes:
+        return None
+    maior = max(get_cnpj_cooldown_remaining_seconds(r.cnpj, cfg) for r in pendentes)
+    return max(maior, 600) + MARGEM_RETENTATIVA_SECONDS
+
+
+def segundos_ate_retomar_pendencias(cfg: Optional[Settings] = None) -> Optional[int]:
+    """
+    Ao subir o serviço: a fila de pulados e o histórico ficam em disco, mas as novas tentativas só
+    existiam na memória do agendador (11/11: o rebuild fazia a recuperação parar até as 06h).
+    Espera até o maior cooldown dos CNPJs com pendência, mais a margem; None se não há pendência.
+    """
+    cfg = cfg or settings
+    pendentes = [p.cnpj for p in _resolve_providers(cfg)
+                 if load_nsu_pendentes(p.cnpj, cfg) or load_historico(p.cnpj, cfg)]
+    if not pendentes:
+        return None
+    return max(get_cnpj_cooldown_remaining_seconds(c, cfg) for c in pendentes) + MARGEM_RETENTATIVA_SECONDS
+
+
+# Rodadas seguidas sem varredura por CNPJ (memória do processo; o rebuild zera).
+_falhas_seguidas: Dict[str, int] = {}
+
+
+def _rodada_falhou(r: CnpjScanResult) -> Optional[bool]:
+    """True: erro ou 656 sem recuperar nenhum NSU; False: consultou e andou; None: pulado pelo cooldown preventivo."""
+    if not r.consultado:
+        return None
+    return r.status == "erro" or (r.recusado and r.nsu_recuperados == 0)
+
+
+def registrar_cnpjs_sem_varredura(summary: SefazScanSummary, cfg: Optional[Settings] = None) -> List[str]:
+    """
+    Chamada a cada rodada. Conta por CNPJ as rodadas seguidas sem varredura e, a cada
+    TENTATIVAS_ANTES_DO_ALERTA, a recusa deixa de ser silenciosa (auditoria). Devolve os CNPJs alertados.
+
+    16/11 (#44): o contador era global e só zerava com os 4 CNPJs limpos na mesma rodada; com o Tiny
+    consumindo a mesma fila, sempre algum levava 656 e o alerta saía para todos, embora cada um
+    conseguisse a varredura entre uma recusa e outra.
+    """
+    cfg = cfg or settings
+    alertados: List[str] = []
+    for r in summary.resultados:
+        falhou = _rodada_falhou(r)
+        if falhou is None:
+            continue
+        if not falhou:
+            _falhas_seguidas.pop(r.cnpj, None)
+            continue
+        n = _falhas_seguidas.get(r.cnpj, 0) + 1
+        _falhas_seguidas[r.cnpj] = n
+        if n % TENTATIVAS_ANTES_DO_ALERTA:
+            continue
+        alertados.append(r.cnpj)
+        logger.error(f"[SEFAZ_SCAN] CNPJ {r.cnpj} continua sem varredura após {n} tentativas seguidas.")
+        record_audit_error(
+            details=(
+                f"CNPJ {r.cnpj} sem varredura SEFAZ: recusado em {n} tentativas seguidas "
+                f"({r.erro or 'cStat 656 - consumo indevido'}). Outro sistema pode estar consultando "
+                "a distribuição de DF-e deste CNPJ."
+            ),
+            emitente_nome=f"SEFAZ DFe ({r.cnpj})",
+            emitente_cnpj=r.cnpj,
+            original_filename=f"SEFAZ-SCAN-{r.cnpj}",
+            metodo_leitura="sefaz_dist_dfe",
+            step="sefaz_scan",
+            cfg=cfg,
+        )
+    return alertados
+
+
 def _persist_status(summary: SefazScanSummary, cfg: Settings) -> None:
     payload = {
         "last_scan_started_at": summary.started_at,
@@ -576,6 +961,8 @@ def _persist_status(summary: SefazScanSummary, cfg: Settings) -> None:
                 "destinatario_divergente_ignorado": r.destinatario_divergente_ignorado,
                 "notas_saida_ignoradas": r.notas_saida_ignoradas,
                 "ult_nsu": r.ult_nsu_final,
+                "nsu_recuperados": r.nsu_recuperados,
+                "nsu_pendentes": r.nsu_pendentes,
                 "erro": r.erro,
                 "status": r.status,
                 "cooldown_until": r.cooldown_until or load_cooldown_state(cfg).get(r.cnpj),
@@ -649,7 +1036,7 @@ def scan_cooldown_remaining_seconds(cfg: Optional[Settings] = None) -> int:
 
 def next_scan_at(cfg: Optional[Settings] = None) -> str:
     cfg = cfg or settings
-    now = datetime.now()
+    now = agora_sp_naive()
     next_run = now.replace(hour=cfg.SEFAZ_SCAN_HOUR, minute=0, second=0, microsecond=0)
     if next_run <= now:
         next_run += timedelta(days=1)

@@ -1,6 +1,6 @@
 import { CheckCheck, CircleDollarSign, Clock3, Workflow } from "lucide-react";
 import type { Metrics } from "@/lib/contracts";
-import { count, formatTimeSaved, hours, money, percentage } from "@/lib/formatters";
+import { count, formatTimeSaved, money, percentage } from "@/lib/formatters";
 import { SourceError } from "./panel-state";
 
 export default function MetricCards({
@@ -20,23 +20,30 @@ export default function MetricCards({
         ))}
       </div>
     ) : (
-      <SourceError message={error} />
+      <SourceError message={error} reportar={{ automationId: "accounts-payable", executionId: "painel" }} />
     );
+  // Horas e R$ só chegam para quem tem `roi:ver` (o gateway corta as duas chaves).
+  const roiCards =
+    metrics.hoursSaved === undefined || metrics.estimatedSavings === undefined
+      ? []
+      : [
+          {
+            label: "Horas economizadas",
+            value: formatTimeSaved(metrics.hoursSaved),
+            detail: `${count(metrics.paidCount)} contas pagas · 4,5 min poupados por conta`,
+            icon: Clock3,
+            tone: "teal",
+          },
+          {
+            label: "Economia financeira",
+            value: money(metrics.estimatedSavings),
+            detail: "Capacidade estimada a R$ 11,00/h",
+            icon: CircleDollarSign,
+            tone: "blue",
+          },
+        ];
   const cards = [
-    {
-      label: "Horas economizadas",
-      value: formatTimeSaved(metrics.hoursSaved),
-      detail: `${count(metrics.paidCount)} contas pagas · 5 min por conta`,
-      icon: Clock3,
-      tone: "teal",
-    },
-    {
-      label: "Economia financeira",
-      value: money(metrics.estimatedSavings),
-      detail: "Capacidade estimada a R$ 11,00/h",
-      icon: CircleDollarSign,
-      tone: "blue",
-    },
+    ...roiCards,
     {
       label: "Boletos conciliados",
       value: count(metrics.reconciledCount),
@@ -54,7 +61,7 @@ export default function MetricCards({
   ];
   return (
     <div className="metric-grid">
-      {cards.map(({ label, value, detail, icon: Icon, tone }, i) => (
+      {cards.map(({ label, value, detail, icon: Icon, tone }) => (
         <article className="metric-card" key={label}>
           <div className="metric-top">
             <span>{label}</span>
@@ -64,12 +71,12 @@ export default function MetricCards({
           </div>
           <div className="metric-value">{value}</div>
           <div className="metric-detail">{detail}</div>
-          {i === 3 && (
+          {label === "Taxa de automação" && (
             <div className="rate-track" aria-hidden="true">
               <span style={{ width: `${metrics.automationRate ?? 0}%` }} />
             </div>
           )}
-          {i < 2 && <span className="estimate-label">Ganho estimado</span>}
+          {roiCards.length > 0 && label !== "Boletos conciliados" && label !== "Taxa de automação" && <span className="estimate-label">Ganho estimado</span>}
         </article>
       ))}
     </div>

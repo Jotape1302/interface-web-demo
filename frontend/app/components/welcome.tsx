@@ -36,7 +36,7 @@ export default function Welcome() {
             <Link
               key={area.id}
               href={areaEntryHref(session, area.id) ?? area.href}
-              className="group flex items-start justify-between gap-3 rounded-lg border border-border bg-card p-4 transition hover:border-[var(--marca-ambar)]/60 hover:shadow-[var(--shadow-hover)] hover:bg-muted/40"
+              className="group flex items-start justify-between gap-3 rounded-none border border-border bg-card p-4 transition hover:border-[var(--marca-ambar)]/60 hover:shadow-[var(--shadow-hover)] hover:bg-muted/40"
             >
               <span>
                 <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -50,7 +50,7 @@ export default function Welcome() {
           ))}
         </div>
       ) : (
-        <div className="flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
+        <div className="flex items-start gap-3 rounded-none border border-border bg-card p-4 text-sm text-muted-foreground">
           <Lock size={16} className="mt-0.5 shrink-0" />
           <span>
             Nenhuma aba foi liberada para você ainda: por enquanto você vê só o Início e o Chat. Peça ao administrador

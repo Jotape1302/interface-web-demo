@@ -1,7 +1,7 @@
 'use client';
 
-import AreaOverviewMarketplace from "../../components/area-overview-marketplace";
+import AreaOverview from "../../components/area-overview";
 
 export default function MarketplaceOverviewPage() {
-  return <AreaOverviewMarketplace />;
+  return <AreaOverview area="marketplace" />;
 }

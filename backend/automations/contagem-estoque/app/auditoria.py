@@ -18,5 +18,7 @@ def formatar_numero(numero: int) -> str:
 
 
 def cabecalho(numero: int, criado_em: str) -> str:
-    data = datetime.fromisoformat(criado_em).astimezone(FUSO_SP).strftime("%d/%m/%Y")
+    dt = datetime.fromisoformat(criado_em)
+    dt = dt.replace(tzinfo=FUSO_SP) if dt.tzinfo is None else dt.astimezone(FUSO_SP)  # sem fuso = horário de SP
+    data = dt.strftime("%d/%m/%Y")
     return f"Auditoria {data} lançamento {formatar_numero(numero)}"

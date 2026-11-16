@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Config } from "./config.js";
-import type { Dashboard, OverviewResponse } from "./contracts.js";
+import type { Dashboard, OverviewResponse, RoiPeriodo, RoiResponse } from "./contracts.js";
 import type { DanfeService } from "./danfe.js";
 import type { FinancialDashboardService } from "./financial-dashboard.js";
 import type { ServiceHealthCheckers } from "./overview.js";
@@ -16,14 +16,18 @@ import type { SystemHealthMonitor } from "./system-health.js";
 import { areaOfKey, hasPermission, routeAccess } from "./permissions.js";
 import { buildTrustedProxyList, clientIpFrom } from "./client-ip.js";
 import {
+  corpoPreLido,
   extractToken,
   isAllowedOrigin,
+  logRequestError,
   preparseJsonBody,
   sendError,
   type RequestContext,
   type RouteHandler,
 } from "./http.js";
 import { createHealthRoutes, isPublicHealthPath } from "./routes/health.js";
+import { createExecucoesCounter } from "./execucoes.js";
+import { deveRegistrar, extraDaAtividade, separarTreino, type AtividadesService } from "./atividades.js";
 import { createAuthRoutes } from "./routes/auth.js";
 import { createAdminRoutes } from "./routes/admin.js";
 import { createNotificationRoutes } from "./routes/notifications.js";
@@ -35,13 +39,20 @@ import { createFinancialDashboardRoutes } from "./routes/financial-dashboard.js"
 import { createDashboardRoutes } from "./routes/dashboard.js";
 import { createReconciliationRoutes } from "./routes/reconciliation.js";
 import { createMarketplaceRoutes } from "./routes/marketplace.js";
+import { createMarketingRoutes } from "./routes/marketing.js";
 import { createMlReconciliationRoutes } from "./routes/ml-reconciliation.js";
+import { createDdaRoutes } from "./routes/dda.js";
 import { createStockCountRoutes } from "./routes/stock-count.js";
 import type { StockSkuService } from "./stock-sku.js";
+import type { AreaOverviewService } from "./area-overview.js";
+import { createAreaOverviewRoutes } from "./routes/area-overview.js";
+import type { AgentesQwenService } from "./agentes-qwen.js";
+import { createAgentesQwenRoutes } from "./routes/agentes-qwen.js";
 
 export interface ApiDeps {
   dashboard: { read(): Promise<Dashboard> };
   overview?: { read(): Promise<OverviewResponse> };
+  roi?: { read(periodo?: RoiPeriodo): Promise<RoiResponse> };
   danfe?: DanfeService;
   healthCheckers?: ServiceHealthCheckers;
   auth?: AuthService;
@@ -54,7 +65,22 @@ export interface ApiDeps {
   reconciliationHistory?: ReconciliationHistoryService;
   stockSku?: StockSkuService;
   systemHealth?: SystemHealthMonitor;
+  areaOverview?: AreaOverviewService;
+  /** Ações dos usuários para treino de modelos (atividades.ts). */
+  atividades?: AtividadesService;
+  /** Estado dos agentes Qwen repassado pelo coletor (aba Agentes Qwen). */
+  agentesQwen?: AgentesQwenService;
+  /** Tempo a partir do qual o NGINX já desistiu da requisição (padrão LIMITE_PROXY_MS; testes usam menos). */
+  limiteProxyMs?: number;
 }
+
+/**
+ * O NGINX da VPS corta em 60 s (proxy_read_timeout) e devolve 504 ao navegador, mas o gateway
+ * continua esperando a automação e não loga nada: o erro só existia na tela do usuário e nunca
+ * chegava aos agentes Qwen (lote manual de 7 NFC-e, 12/11). Conexão fechada sem resposta depois
+ * deste tempo = o proxy desistiu (o navegador que troca de página fecha antes).
+ */
+export const LIMITE_PROXY_MS = 58_000;
 
 // Servidor HTTP do gateway: CORS, chave interna, limite de consultas e controle de
 // acesso por área ficam aqui; cada grupo de rotas mora no seu módulo em routes/.
@@ -62,6 +88,11 @@ export function createApi(config: Config, deps: ApiDeps) {
   const auth = deps.auth ?? createAuthService(config);
   void auth.bootstrap();
   const clients = new Map<string, { since: number; count: number }>();
+  // GW-10: limpeza das janelas vencidas em intervalo fixo (não varre o Map a cada requisição).
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, value] of clients) if (now - value.since > 60_000) clients.delete(key);
+  }, 60_000).unref();
 
   const handleHealth = createHealthRoutes(config, deps.healthCheckers, auth);
   const trustedProxies = buildTrustedProxyList(config.trustedProxies);
@@ -76,6 +107,7 @@ export function createApi(config: Config, deps: ApiDeps) {
     createEventRoutes({ auth, events: deps.events }),
     createIncidentRoutes({ auth, incidents: deps.incidents, events: deps.events, audit }),
     createChatRoutes({ auth, chat: deps.chat, events: deps.events }),
+    createAgentesQwenRoutes({ agentesQwen: deps.agentesQwen, audit, danfe: deps.danfe }),
   ];
 
   // Rotas de negócio (automações).
@@ -84,9 +116,12 @@ export function createApi(config: Config, deps: ApiDeps) {
     createFinancialDashboardRoutes({ financialDashboard: deps.financialDashboard, audit }),
     createReconciliationRoutes({ config, audit, history: deps.reconciliationHistory }),
     createMlReconciliationRoutes({ audit }),
+    createDdaRoutes({ audit }),
     createMarketplaceRoutes({ audit }),
+    createMarketingRoutes({ audit }),
     createStockCountRoutes({ skus: deps.stockSku, audit }),
-    createDashboardRoutes({ dashboard: deps.dashboard, overview: deps.overview }),
+    createAreaOverviewRoutes({ areaOverview: deps.areaOverview, mode: config.mode }),
+    createDashboardRoutes({ dashboard: deps.dashboard, overview: deps.overview, roi: deps.roi }),
   ];
 
   /**
@@ -158,7 +193,8 @@ export function createApi(config: Config, deps: ApiDeps) {
   // Limite elevado para acomodar SPA com navegação rápida entre abas.
   function rateLimited(ctx: RequestContext): boolean {
     const now = Date.now();
-    for (const [key, value] of clients) if (now - value.since > 60_000) clients.delete(key);
+    const atual = clients.get(ctx.ip);
+    if (atual && now - atual.since > 60_000) clients.delete(ctx.ip);
     if (!clients.has(ctx.ip) && clients.size >= 10000) {
       ctx.send(503, { error: "Capacidade temporariamente esgotada" });
       return true;
@@ -174,12 +210,65 @@ export function createApi(config: Config, deps: ApiDeps) {
     return false;
   }
 
+  // Execuções por rota, uma linha por minuto (monitor dos agentes Qwen, ver execucoes.ts).
+  const execucoes = createExecucoesCounter();
+  const JANELA_EXECUCOES_S = 60;
+  const flushExecucoes = setInterval(() => {
+    const linha = execucoes.fechar(JANELA_EXECUCOES_S);
+    if (linha) console.log(linha);
+  }, JANELA_EXECUCOES_S * 1000);
+  flushExecucoes.unref();
+
   const server = createServer(async (request, response) => {
+    const inicio = Date.now();
+    let ctxAtual: RequestContext | undefined;
+    let corpoResposta: unknown;
+    response.on("finish", () => {
+      const method = request.method ?? "GET";
+      const rota = (request.url ?? "/").split("?")[0]!.replace(/^\/automacoes(?=\/|$)/, "") || "/";
+      if (method !== "OPTIONS" && !isPublicHealthPath(rota)) execucoes.registrar(method, rota, response.statusCode);
+      const session = ctxAtual?.session;
+      if (deps.atividades && ctxAtual && session && deveRegistrar(ctxAtual.method, ctxAtual.path)) {
+        const access = routeAccess(ctxAtual.method, ctxAtual.path);
+        deps.atividades.registrar({
+          usuarioId: session.user.id,
+          perfil: session.user.role,
+          setor: session.user.setor ?? "",
+          metodo: ctxAtual.method,
+          path: ctxAtual.path,
+          permissao: access.kind === "perm" ? access.key : access.kind,
+          query: Object.fromEntries(ctxAtual.url.searchParams),
+          entrada: corpoPreLido(request),
+          resposta: corpoResposta,
+          status: response.statusCode,
+          duracaoMs: Date.now() - inicio,
+          requestId: ctxAtual.requestId,
+          extra: extraDaAtividade(request),
+        });
+      }
+    });
     // Cliente desconectou antes da resposta. Não usar `request.on("close")`: no Node ≥16 ele
     // dispara assim que o corpo é lido, e abortaria toda requisição com body (POST/PUT).
     const clientAbortController = new AbortController();
     response.on("close", () => {
-      if (!response.writableFinished) clientAbortController.abort();
+      if (response.writableFinished) return;
+      clientAbortController.abort();
+      const duracaoMs = Date.now() - inicio;
+      const sse = String(response.getHeader("Content-Type") ?? "").includes("text/event-stream");
+      if (sse || duracaoMs < (deps.limiteProxyMs ?? LIMITE_PROXY_MS)) return;
+      const method = request.method ?? "GET";
+      const rota = (request.url ?? "/").split("?")[0]!.replace(/^\/automacoes(?=\/|$)/, "") || "/";
+      execucoes.registrar(method, rota, 504);
+      logRequestError(
+        { requestId: ctxAtual?.requestId ?? "-", method, path: rota },
+        Object.assign(
+          new Error(
+            `${method} ${rota} passou do limite do NGINX (${Math.round(duracaoMs / 1000)} s): o navegador recebeu HTTP 504 e a resposta se perdeu`,
+          ),
+          { name: "TempoEsgotadoNoProxy" },
+        ),
+        "proxy_timeout_error",
+      );
     });
 
     // Aceita o X-Request-Id do cliente só se for um identificador simples (vai para logs e automações).
@@ -192,8 +281,9 @@ export function createApi(config: Config, deps: ApiDeps) {
     response.setHeader("X-Request-Id", requestId);
     const send = (status: number, body: unknown): true => {
       if (!response.writableEnded) {
+        corpoResposta = separarTreino(request, body);
         response.statusCode = status;
-        response.end(JSON.stringify(body));
+        response.end(JSON.stringify(corpoResposta));
       }
       return true;
     };
@@ -233,6 +323,7 @@ export function createApi(config: Config, deps: ApiDeps) {
         signal: clientAbortController.signal,
         send,
       };
+      ctxAtual = ctx;
 
       const isPublicPath = isPublicHealthPath(path);
 
@@ -274,7 +365,7 @@ export function createApi(config: Config, deps: ApiDeps) {
       return sendError({ ...fakeCtx, send } as unknown as RequestContext, globalErr, "Erro interno no servidor gateway.");
     }
   });
-  server.on("clientError", (err: any, socket) => {
+  server.on("clientError", (err: NodeJS.ErrnoException, socket) => {
     if (err.code === "ECONNRESET" || !socket.writable) return;
     socket.end(
       "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n" +
@@ -285,6 +376,7 @@ export function createApi(config: Config, deps: ApiDeps) {
         "\n",
     );
   });
+  server.on("close", () => clearInterval(flushExecucoes));
   server.requestTimeout = 120_000;
   server.headersTimeout = 15_000;
   server.keepAliveTimeout = 5000;

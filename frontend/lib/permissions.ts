@@ -8,7 +8,7 @@ export const ROLES: readonly Role[] = ['user', 'gestor', 'admin'];
 
 export const ROLE_LABEL: Record<Role, string> = { admin: 'Admin', gestor: 'Gestor', user: 'User' };
 
-export type PermissionArea = 'financeiro' | 'logistica' | 'marketplace' | 'producao' | 'sistema' | 'usuarios';
+export type PermissionArea = 'financeiro' | 'logistica' | 'marketplace' | 'marketing' | 'producao' | 'sistema' | 'usuarios';
 
 export interface PermissionAction {
   /** Id da ação dentro da aba ("ver", "baixar"...). */

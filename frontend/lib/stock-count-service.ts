@@ -242,7 +242,7 @@ export class StockCountService {
     return (await res.json()) as StockCountListResponse;
   }
 
-  private async enviar(path: string, method: 'POST' | 'DELETE', body: unknown, fallback: string, timeoutMs = 10000): Promise<any> {
+  private async enviar(path: string, method: 'POST' | 'DELETE', body: unknown, fallback: string, timeoutMs = 10000): Promise<Record<string, unknown>> {
     const res = await fetch(this.getUrl(path), {
       method,
       headers: {

@@ -377,11 +377,12 @@ def sincronizar_tokens(
     for filial, info in tokens.items():
         acc = info.get("access_token")
         ref = info.get("refresh_token")
+        # Só presença e tamanho: nem prefixo de token vai para o log.
         detalhes = []
         if acc:
-            detalhes.append(f"access_token={acc[:12]}...")
+            detalhes.append(f"access_token presente ({len(acc)} caracteres)")
         if ref:
-            detalhes.append(f"refresh_token={ref[:12]}...")
+            detalhes.append(f"refresh_token presente ({len(ref)} caracteres)")
         desc = ", ".join(detalhes) if detalhes else "sem tokens reconhecidos"
         logger.info(f"Tokens obtidos para {filial}: {desc} (renovado em {info.get('renovado_em')})")
 

@@ -11,7 +11,10 @@ import pytest
 import requests
 from fastapi.testclient import TestClient
 
-from app import api as api_module
+from app.routers import conciliacao_ml as ml_module
+from app.routers import danfe as danfe_module
+from app.routers import jobs as jobs_module
+from app.routers import reconciliacao as reconciliacao_module
 from app.api import app
 from app.config import settings
 from app.tiny_client import TinyClient
@@ -41,13 +44,13 @@ def test_rota_protegida_sem_chave_401(client, com_chave):
 
 
 def test_rota_protegida_com_chave_passa(client, com_chave):
-    with patch.object(api_module, "_build_sefaz_status_response", return_value={"ok": True}):
+    with patch.object(danfe_module, "_build_sefaz_status_response", return_value={"ok": True}):
         res = client.get("/api/v1/conciliacao-ml/status", headers={"X-Internal-Key": CHAVE})
     assert res.status_code != 401 and res.status_code != 503
 
 
 def test_post_de_baixa_sem_chave_nao_executa(client, com_chave):
-    with patch.object(api_module, "_run_baixa") as run:
+    with patch.object(reconciliacao_module, "_run_baixa") as run:
         res = client.post("/api/v1/reconciliacao/jobs/baixar", json={"itens": [{"empresa": "fabrilux", "conta_pagar_id": 1}]})
     assert res.status_code == 401
     run.assert_not_called()
@@ -92,23 +95,23 @@ def test_cors_sem_origens_padrao_nao_libera_ip_nem_ddns(client):
 # ---------------------------------------------------------------------------
 
 def test_ml_baixa_usa_x_usuario_e_ignora_corpo(client):
-    analise = SimpleNamespace(empresa_id="revesta", empresa_nome="Revesta")
+    analise = SimpleNamespace(empresa_id="revesta", empresa_nome="Revesta", grupos=[])
     capturado = {}
 
     def baixar(analise_id, grupos, usuario="", progresso=None):
         capturado["usuario"] = usuario
         return {"status": "ok"}
 
-    with patch.object(api_module, "_ml_analise_ou_404", return_value=analise), \
-            patch.object(api_module, "ml_token_tiny", return_value="tok"), \
-            patch.object(api_module.ml_rotina, "baixar", side_effect=baixar):
+    with patch.object(ml_module, "_ml_analise_ou_404", return_value=analise), \
+            patch.object(ml_module, "ml_token_tiny", return_value="tok"), \
+            patch.object(ml_module.ml_rotina, "baixar", side_effect=baixar):
         job = client.post(
             "/api/v1/conciliacao-ml/jobs/baixar",
             json={"analise_id": "a1", "grupos": ["g1"], "usuario": "forjado"},
             headers={"X-Usuario": "Jo%C3%A3o"},
         ).json()
         for _ in range(100):
-            if api_module._reconciliacao_jobs[job["job_id"]]["status"] != "executando":
+            if jobs_module._reconciliacao_jobs[job["job_id"]]["status"] != "executando":
                 break
             threading.Event().wait(0.02)
     assert capturado["usuario"] == "João"
@@ -127,7 +130,7 @@ def test_usuario_do_corpo_vale_sem_header():
 # ---------------------------------------------------------------------------
 
 def _apto(conta_id=12345, inter_id="TX-1", valor="150.50", juros="0", desconto="0", valor_tiny=None, empresa="fabrilux"):
-    api_module._registrar_aptos([SimpleNamespace(
+    reconciliacao_module._registrar_aptos([SimpleNamespace(
         empresa=empresa, conta_pagar_id=conta_id, inter_transacao_id=inter_id,
         valor_pago=Decimal(valor), data_pagamento=date(2026, 9, 25),
         juros=Decimal(juros), multa=Decimal("0"), desconto=Decimal(desconto),
@@ -149,7 +152,7 @@ class _Tiny:
             patch.object(TinyClient, "obter_conta_pagar_v3", self.obter),
             patch.object(TinyClient, "resolve_conta_origem_inter", return_value=42),
             patch.object(settings, "TINY_API_TOKEN", "token-teste"),
-            patch("app.api.TokenRepository"),
+            patch("app.routers.reconciliacao.TokenRepository"),
         ]
 
     def __enter__(self):
@@ -240,12 +243,12 @@ def test_previa_registra_aptos_para_a_baixa(client):
     with patch.object(InterClient, "check_credentials_status", return_value={"status": "conectado", "mensagem": "ok"}), \
             patch.object(InterClient, "get_extrato", return_value=extrato), \
             patch.object(TinyClient, "list_contas_pagar_v3", side_effect=listar), \
-            patch("app.api.TokenRepository") as repo, \
+            patch("app.routers.reconciliacao.TokenRepository") as repo, \
             patch.object(settings, "TINY_API_TOKEN", "token-teste"):
         repo.return_value.is_configured.return_value = False
         client.post("/api/v1/reconciliacao/preview", json={"empresa": "fabrilux", "data_inicio": "2026-09-01", "data_fim": "2026-09-28"})
 
-    apto = api_module._apto_para("fabrilux", 1, "TX-9")
+    apto = reconciliacao_module._apto_para("fabrilux", 1, "TX-9")
     assert apto is not None and apto.valor_pago == Decimal("500.00")
 
 
@@ -286,12 +289,12 @@ def test_job_de_baixa_simultaneo_da_mesma_conta_409(client):
         segundo = client.post("/api/v1/reconciliacao/jobs/baixar", json={"itens": [_item()]})
         liberar.set()
         for _ in range(200):
-            if api_module._reconciliacao_jobs[primeiro.json()["job_id"]]["status"] != "executando":
+            if jobs_module._reconciliacao_jobs[primeiro.json()["job_id"]]["status"] != "executando":
                 break
             threading.Event().wait(0.02)
     assert primeiro.status_code == 200
     assert segundo.status_code == 409
-    assert api_module._baixas_em_andamento == set()
+    assert reconciliacao_module._baixas_em_andamento == set()
 
 
 def _post_ok():
@@ -366,16 +369,16 @@ def test_baixa_entrou_sem_foto_anterior():
 
 @pytest.mark.parametrize("nsu", ["abc", "1</ultNSU><x>", "1234567890123456", "", " 12 3"])
 def test_reset_nsu_invalido_422(client, nsu):
-    with patch.object(api_module, "save_nsu_checkpoint") as salvar:
+    with patch.object(danfe_module, "save_nsu_checkpoint") as salvar:
         res = client.post("/api/v1/danfe/sefaz-nsu/reset", json={"cnpj": "27184930000107", "set_nsu": nsu, "clear_cooldown": False})
     assert res.status_code == 422
     salvar.assert_not_called()
 
 
 def test_reset_nsu_valido(client):
-    with patch.object(api_module, "save_nsu_checkpoint") as salvar, \
-            patch.object(api_module, "load_nsu_state", return_value={}), \
-            patch.object(api_module, "load_cooldown_state", return_value={}):
+    with patch.object(danfe_module, "save_nsu_checkpoint") as salvar, \
+            patch.object(danfe_module, "load_nsu_state", return_value={}), \
+            patch.object(danfe_module, "load_cooldown_state", return_value={}):
         res = client.post("/api/v1/danfe/sefaz-nsu/reset", json={"cnpj": "27.184.930/0001-07", "set_nsu": "000000000012345", "clear_cooldown": False})
     assert res.status_code == 200
     salvar.assert_called_once_with("27184930000107", "000000000012345", settings)
@@ -436,7 +439,7 @@ def test_sem_token_e_sem_mock_mode_nao_simula_lancamento(monkeypatch):
 def test_upload_maior_que_o_limite_e_recusado(client, monkeypatch):
     monkeypatch.setattr(settings, "UPLOAD_MAX_FILE_MB", 1)
     grande = b"x" * (1024 * 1024 + 10)
-    with patch.object(api_module, "DANFEScanner") as scanner, patch.object(api_module, "get_nfe_provider"):
+    with patch.object(danfe_module, "DANFEScanner") as scanner, patch.object(danfe_module, "get_nfe_provider"):
         res = client.post("/api/v1/danfe/process-batch", files=[("files", ("grande.pdf", grande, "application/pdf"))])
     data = res.json()
     assert data["failed_count"] == 1
@@ -446,8 +449,8 @@ def test_upload_maior_que_o_limite_e_recusado(client, monkeypatch):
 
 def test_pdf_com_paginas_demais_e_recusado(client, monkeypatch):
     monkeypatch.setattr(settings, "UPLOAD_MAX_PDF_PAGES", 50)
-    with patch.object(api_module, "DANFEScanner") as scanner, patch.object(api_module, "get_nfe_provider"), \
-            patch.object(api_module, "_paginas_pdf", return_value=51):
+    with patch.object(danfe_module, "DANFEScanner") as scanner, patch.object(danfe_module, "get_nfe_provider"), \
+            patch.object(danfe_module, "_paginas_pdf", return_value=51):
         res = client.post("/api/v1/danfe/process-batch", files=[("files", ("n.pdf", b"%PDF-1.4", "application/pdf"))])
     assert "51 páginas" in res.json()["items"][0]["error_message"]
     scanner.return_value.scan_file.assert_not_called()
@@ -494,7 +497,7 @@ def test_pem_e_apagado_mesmo_quando_a_consulta_falha(tmp_path):
     pastas = []
 
     def preparar():
-        pastas.append(api_module.tempfile.mkdtemp())
+        pastas.append(danfe_module.tempfile.mkdtemp())
         provider._temp_dir = pastas[-1]
         return ("c", "k")
 
@@ -528,8 +531,8 @@ def test_sec03_planilha_ml_nao_grava_texto_como_formula():
 
 def test_sec04_fila_de_tarefas_separada_entre_inter_e_ml(client, monkeypatch):
     monkeypatch.setattr(settings, "INTERNAL_AUTH_DISABLED", True)
-    inter = api_module._iniciar_job("baixar", lambda progresso: {"ok": True}, sincrono=True)["job_id"]
-    ml = api_module._iniciar_job("ml_baixar", lambda progresso: {"ok": True}, sincrono=True)["job_id"]
+    inter = jobs_module._iniciar_job("baixar", lambda progresso: {"ok": True}, sincrono=True)["job_id"]
+    ml = jobs_module._iniciar_job("ml_baixar", lambda progresso: {"ok": True}, sincrono=True)["job_id"]
     assert client.get(f"/api/v1/reconciliacao/jobs/{inter}").status_code == 200
     assert client.get(f"/api/v1/conciliacao-ml/jobs/{ml}").status_code == 200
     assert client.get(f"/api/v1/reconciliacao/jobs/{ml}").status_code == 404

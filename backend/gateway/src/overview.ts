@@ -6,6 +6,34 @@ export interface AutomationProvider {
   dashboard: { read(): Promise<Dashboard> };
   history: HistoryAdapter;
 }
+const SP_FORMAT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Sao_Paulo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+
+/** Ano, mês (1-12), dia (AAAA-MM-DD) e hora de `now` no fuso America/Sao_Paulo (GW-11). */
+export function saoPauloParts(now: Date = new Date()): { year: number; month: number; day: string; hour: number } {
+  const parts = Object.fromEntries(SP_FORMAT.formatToParts(now).map((p) => [p.type, p.value]));
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour),
+  };
+}
+
+/** Próximo `hour`:00 (horário de São Paulo, UTC-03 fixo): hoje se ainda não passou, senão amanhã. */
+export function nextDailyRunSaoPaulo(now: Date, hour: number): Date {
+  const { day, hour: atual } = saoPauloParts(now);
+  const next = new Date(`${day}T${String(hour).padStart(2, "0")}:00:00-03:00`);
+  if (atual >= hour) next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
 export function historyWindow(now: Date = new Date()): HistoryWindow {
   const day = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",

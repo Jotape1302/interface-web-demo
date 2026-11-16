@@ -62,7 +62,7 @@ Não consulta o Tiny nem o servidor da Norvia: tudo que vai na etiqueta vem no J
 
 ```json
 {
-  "sku": "HNYRPI11-3M-01",
+  "sku": "NRVRPI11-3M-01",
   "descricao": "Rodapé Orion Autocolante com Friso para Difusor LED em Aluminio 70mm x 17mm - Norvia - Branco - 3m",
   "gtin": "7908737101294",
   "localizacao": "A1-RA-P2-N1-AP1 / CASA06",

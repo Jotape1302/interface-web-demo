@@ -11,17 +11,18 @@ Guarda em DATA_DIR/contas_pagar/estado.json:
 """
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import threading
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.dinheiro import dinheiro_json
+from app.fuso import agora_sp
 from app.config import Settings, settings
-from app.json_store import save_json_state, write_json_atomic
+from app.json_store import save_json_state
 from app.tiny_client import SITUACOES_CONTA_PAGAR_BAIXAVEIS, TinyClient
 from app.token_repository import TokenRepository
 
@@ -33,13 +34,13 @@ MAX_EXECUCOES_HISTORICO = 60
 
 def agora_iso() -> str:
     """Horário atual com fuso horário de Brasília."""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return agora_sp().isoformat(timespec="seconds")
 
 
 def proxima_execucao_contas_pagar(cfg: Optional[Settings] = None, agora_dt: Optional[datetime] = None) -> datetime:
     """Calcula a próxima execução diária baseada em CONTAS_PAGAR_ROTINA_HOUR."""
     cfg = cfg or settings
-    agora_dt = agora_dt or datetime.now()
+    agora_dt = agora_dt or agora_sp()
     alvo = agora_dt.replace(hour=cfg.CONTAS_PAGAR_ROTINA_HOUR, minute=0, second=0, microsecond=0)
     return alvo if alvo > agora_dt else alvo + timedelta(days=1)
 
@@ -139,17 +140,17 @@ class EstadoContasPagar:
 
         estado["summary"] = {
             "total_casados": len(matches),
-            "valor_total_casados": float(sum((_to_decimal(m.get("valor_pago")) for m in matches), Decimal("0.00"))),
+            "valor_total_casados": dinheiro_json(sum((_to_decimal(m.get("valor_pago")) for m in matches), Decimal("0.00"))),
             "total_inter_sem_par": len(unmatched_inter),
-            "valor_inter_sem_par": float(sum((_to_decimal(i.get("valor_pago")) for i in unmatched_inter), Decimal("0.00"))),
+            "valor_inter_sem_par": dinheiro_json(sum((_to_decimal(i.get("valor_pago")) for i in unmatched_inter), Decimal("0.00"))),
             "total_tiny_sem_par": len(unmatched_tiny),
-            "valor_tiny_sem_par": float(sum((_to_decimal(c.get("valor")) for c in unmatched_tiny), Decimal("0.00"))),
+            "valor_tiny_sem_par": dinheiro_json(sum((_to_decimal(c.get("valor")) for c in unmatched_tiny), Decimal("0.00"))),
             "total_ja_baixadas": len(ja_baixadas),
-            "valor_ja_baixadas": float(sum((_to_decimal(j.get("valor_pago") or j.get("valor_tiny")) for j in ja_baixadas), Decimal("0.00"))),
+            "valor_ja_baixadas": dinheiro_json(sum((_to_decimal(j.get("valor_pago") or j.get("valor_tiny")) for j in ja_baixadas), Decimal("0.00"))),
             "total_transferencias_internas": len(transferencias),
-            "valor_transferencias_internas": float(sum((_to_decimal(t.get("valor_pago")) for t in transferencias), Decimal("0.00"))),
+            "valor_transferencias_internas": dinheiro_json(sum((_to_decimal(t.get("valor_pago")) for t in transferencias), Decimal("0.00"))),
             "total_transferencias_aptas": len(transf_aptas),
-            "valor_transferencias_aptas": float(sum((_to_decimal(t.get("valor_pago")) for t in transf_aptas), Decimal("0.00"))),
+            "valor_transferencias_aptas": dinheiro_json(sum((_to_decimal(t.get("valor_pago")) for t in transf_aptas), Decimal("0.00"))),
         }
 
     def mesclar_preview(
@@ -323,7 +324,7 @@ class EstadoContasPagar:
                     "empresa": emp,
                     "conta_pagar_id": cid,
                     "numero_documento": str(item.get("numero_documento") or "-"),
-                    "valor": float(_to_decimal(item.get("valor_pago") or item.get("valor") or 0)),
+                    "valor": dinheiro_json(item.get("valor_pago") or item.get("valor") or 0),
                     "motivo": motivo,
                     "detalhes": detalhes or {},
                 })

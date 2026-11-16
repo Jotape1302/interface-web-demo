@@ -1,0 +1,181 @@
+# ==============================================================================
+# CI de qualidade: testes, typecheck e lint de cada parte do monorepo a cada push na main.
+# Os commits vão direto na main (sem PR), então isto é a rede que pega regressão antes do
+# deploy. Só lê o repositório: não publica nada nem precisa de segredo. A segurança
+# (gitleaks, npm audit, pip-audit) fica em security.yml.
+# ==============================================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: ${{ matrix.dir }} (typecheck + testes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [backend/gateway, frontend]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            ${{ matrix.dir }}/package-lock.json
+            backend/gateway/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Dependências do gateway (testes do frontend importam backend/gateway/src)
+        if: matrix.dir == 'frontend'
+        run: npm ci --no-audit --no-fund --prefix ../backend/gateway
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: testes
+        run: npm test
+
+  frontend-lint:
+    # Bloqueante desde 2026-10-27, quando os achados antigos do oxlint foram zerados.
+    name: frontend (oxlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+
+  python:
+    name: pytest (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - automacoes-financeiro
+          - automacoes-marketplace
+          - automacoes-marketing
+          - automacoes-producao
+          - contagem-estoque
+    defaults:
+      run:
+        working-directory: backend/automations/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Mesma versão das imagens Docker (python:3.11.17-slim-bookworm).
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/automations/${{ matrix.module }}/requirements.lock
+      - name: Bibliotecas de sistema (pyzbar, OCR, PDF)
+        if: matrix.module == 'automacoes-financeiro' || matrix.module == 'contagem-estoque'
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libzbar0 tesseract-ocr tesseract-ocr-por poppler-utils
+      - name: Dependências (requirements.lock, o mesmo das imagens)
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock && python -m pip install --disable-pip-version-check pytest httpx
+      - name: testes
+        run: python -m pytest tests/ -q
+
+  ruff:
+    name: ruff (automações)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/automations/*/requirements.lock
+      - run: python -m pip install --disable-pip-version-check "ruff==0.14.0"
+      - run: ruff check backend/automations
+
+  shellcheck:
+    name: shellcheck (scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck em scripts/**/*.sh
+        run: find scripts -name '*.sh' -print0 | xargs -0 shellcheck --severity=warning
+
+  migracoes:
+    # Banco novo: aplica database/init em ordem e roda o migrate.sh duas vezes. A 2ª execução
+    # prova que nada fica pendente nem é reaplicado; depois cada migração é aplicada à mão
+    # duas vezes sobre o schema final para provar que o SQL é idempotente.
+    name: mariadb (init + migrações)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MYSQL_PWD: ci-root
+      MIGRATE_DB_CMD: mariadb --batch --skip-column-names -h127.0.0.1 -uroot financeiro
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cliente MariaDB
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends mariadb-client
+      - name: database/init em ordem
+        run: |
+          set -euo pipefail
+          for f in $(ls database/init/*.sql | sort); do
+            echo "== $f"
+            mariadb -h127.0.0.1 -uroot < "$f"
+          done
+      - name: migrate.sh (1ª execução)
+        run: scripts/migrate.sh | tee /tmp/migrate1.txt && grep -q '^0 pendente' /tmp/migrate1.txt
+      - name: migrate.sh (2ª execução, idempotência)
+        run: scripts/migrate.sh | tee /tmp/migrate2.txt && grep -q '^0 pendente' /tmp/migrate2.txt
+      - name: Cada migração duas vezes sobre o schema final
+        run: |
+          set -euo pipefail
+          for f in $(ls database/migrations/*.sql | sort); do
+            for i in 1 2; do
+              echo "== $f (aplicação $i)"
+              mariadb -h127.0.0.1 -uroot financeiro < "$f"
+            done
+          done

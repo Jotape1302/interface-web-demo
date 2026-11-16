@@ -42,6 +42,7 @@ const AREA_LABELS: Record<PermissionArea, string> = {
   financeiro: 'Financeiro',
   logistica: 'Logística',
   marketplace: 'Marketplace',
+  marketing: 'Marketing',
   producao: 'Produção',
   sistema: 'Sistema',
   usuarios: 'Gestão de Usuários',
@@ -98,17 +99,23 @@ export const DEMO_PERMISSION_CATALOG: PermissionCatalog = {
     ]),
     tab('mkt_visao_geral', 'Visão geral', 'marketplace'),
     tab('dimensoes', 'Padronização de dimensões', 'marketplace', [
-      { id: 'validar', label: 'Validar' },
+      { id: 'validar', label: 'Confirmar envio das medidas do Tiny ao ML' },
       { id: 'reenviar', label: 'Reenviar' },
       { id: 'executar', label: 'Executar coleta' },
     ]),
     tab('fretes', 'Fretes a combinar', 'marketplace', [
       { id: 'retentar', label: 'Retentar' },
       { id: 'executar', label: 'Executar verificação' },
+      { id: 'corrigir_tipo', label: 'Corrigir tipo de frete (ME1/ME2 pela embalagem)' },
+    ]),
+    tab('email_marketing', 'E-mail Marketing', 'marketing', [
+      { id: 'gerar', label: 'Gerar rascunhos da semana' },
+      { id: 'aprovar', label: 'Aprovar e editar rascunho' },
     ]),
     tab('prod_visao_geral', 'Visão geral', 'producao'),
-    tab('erros', 'Erros & Falhas', 'sistema', [{ id: 'resolver', label: 'Marcar como resolvido' }]),
     tab('saude', 'Saúde do Sistema', 'sistema'),
+    tab('roi', 'ROI das automações', 'sistema'),
+    tab('agentes_qwen', 'Agentes Qwen', 'sistema', [{ id: 'resolver', label: 'Marcar como resolvido' }]),
     tab('auditoria', 'Log de Auditoria', 'sistema'),
     tab('tokens_n8n', 'Tokens n8n', 'sistema', [{ id: 'executar', label: 'Executar renovação' }]),
     tab('usuarios', 'Gestão de Usuários', 'usuarios', [
@@ -138,7 +145,8 @@ export function demoEffectivePermissions(role: Role, grants: readonly string[]):
 // Perfis demo (espelho de DEMO_PROFILES do gateway + cadastros pendentes para a tela)
 // ---------------------------------------------------------------------------------------------
 
-export const DEMO_ROOT_USERNAME = 'admin_jp';
+import { DEMO_ROOT_USERNAME } from './demo-permissions-loader';
+export { DEMO_ROOT_USERNAME };
 
 export interface DemoProfile {
   id: number;
@@ -178,7 +186,6 @@ const DEMO_PROFILES_BASE: DemoProfile[] = [
     grants: [
       'fin_visao_geral:ver',
       'contas_pagar:ver',
-      'erros:ver',
       'usuarios:ver',
       'usuarios:aprovar_cadastro',
       'usuarios:rejeitar_cadastro',
@@ -220,7 +227,16 @@ const DEMO_PROFILES_BASE: DemoProfile[] = [
     role: 'user',
     status: 'approved',
     is_root: false,
-    grants: ['mkt_visao_geral:ver', 'dimensoes:ver', 'dimensoes:validar', 'fretes:ver', 'fretes:retentar'],
+    grants: [
+      'mkt_visao_geral:ver',
+      'dimensoes:ver',
+      'dimensoes:validar',
+      'fretes:ver',
+      'fretes:retentar',
+      'email_marketing:ver',
+      'email_marketing:gerar',
+      'email_marketing:aprovar',
+    ],
     criado_em: '2026-08-12T09:00:00Z',
   },
   {

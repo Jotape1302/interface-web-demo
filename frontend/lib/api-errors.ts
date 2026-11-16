@@ -11,6 +11,7 @@ export interface ApiErrorBody {
   message?: unknown;
   erro_id?: unknown;
   requestId?: unknown;
+  code?: unknown;
 }
 
 function texto(value: unknown): string | null {
@@ -46,6 +47,8 @@ function padraoPorStatus(status: number, fallback: string): string {
 /** Monta a mensagem a partir de um corpo já lido (ou null quando não era JSON). */
 export function apiErrorMessage(body: unknown, status: number, fallback: string): string {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? (body as ApiErrorBody) : null;
+  // Automação fora do ar (circuit breaker do gateway): mensagem amigável, sem detalhe técnico.
+  if (b && b.code === 'circuit_open') return 'Serviço temporariamente indisponível, tente em instantes.';
   const principal = (b && (texto(b.detail) ?? texto(b.error) ?? texto(b.message))) || padraoPorStatus(status, fallback);
   const ref = referencia(b, status);
   return ref && !principal.includes(ref) ? `${principal} (ref.: ${ref})` : principal;

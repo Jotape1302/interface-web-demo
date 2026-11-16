@@ -6,7 +6,10 @@
 
 import { hasPermission, type PermissionSession } from './permissions';
 
-export type AreaId = 'financeiro' | 'logistica' | 'marketplace' | 'producao';
+export type AreaId = 'financeiro' | 'logistica' | 'marketplace' | 'marketing' | 'producao';
+
+/** Áreas com Visão geral (/api/visao-geral/<area> no gateway). Marketing ainda não tem. */
+export type AreaComVisaoGeral = Exclude<AreaId, 'marketing'>;
 
 export type PageId =
   | 'home'
@@ -21,9 +24,11 @@ export type PageId =
   | 'marketplace-overview'
   | 'dimension-standardization'
   | 'shipping-review'
+  | 'email-marketing'
   | 'producao-overview'
-  | 'admin-errors'
   | 'admin-health'
+  | 'admin-roi'
+  | 'admin-agentes-qwen'
   | 'admin-audit'
   | 'admin-tokens'
   | 'admin-users';
@@ -51,11 +56,13 @@ export const AREAS: readonly AreaDefinition[] = [
     href: '/marketplace',
     pages: ['marketplace-overview', 'dimension-standardization', 'shipping-review'],
   },
+  // Sem Visão geral própria por ora: o atalho da pasta leva direto ao E-mail Marketing.
+  { id: 'marketing', title: 'Marketing', href: '/email-marketing', pages: ['email-marketing'] },
   { id: 'producao', title: 'Produção', href: '/producao', pages: ['producao-overview'] },
 ];
 
 /** Bloco SISTEMA do menu, na ordem de exibição. */
-export const SYSTEM_PAGES: readonly PageId[] = ['admin-errors', 'admin-health', 'admin-audit', 'admin-tokens'];
+export const SYSTEM_PAGES: readonly PageId[] = ['admin-health', 'admin-roi', 'admin-agentes-qwen', 'admin-audit', 'admin-tokens'];
 
 /** Página → chave "ver" da aba. Páginas fora do mapa (Início, Chat) são de todos os logados. */
 export const PAGE_VIEW_KEY: Readonly<Partial<Record<PageId, string>>> = {
@@ -69,9 +76,11 @@ export const PAGE_VIEW_KEY: Readonly<Partial<Record<PageId, string>>> = {
   'marketplace-overview': 'mkt_visao_geral:ver',
   'dimension-standardization': 'dimensoes:ver',
   'shipping-review': 'fretes:ver',
+  'email-marketing': 'email_marketing:ver',
   'producao-overview': 'prod_visao_geral:ver',
-  'admin-errors': 'erros:ver',
   'admin-health': 'saude:ver',
+  'admin-roi': 'roi:ver',
+  'admin-agentes-qwen': 'agentes_qwen:ver',
   'admin-audit': 'auditoria:ver',
   'admin-tokens': 'tokens_n8n:ver',
   'admin-users': 'usuarios:ver',
@@ -89,9 +98,11 @@ export const PAGE_TAB_LABEL: Readonly<Partial<Record<PageId, string>>> = {
   'marketplace-overview': 'Marketplace › Visão geral',
   'dimension-standardization': 'Padronização de dimensões',
   'shipping-review': 'Fretes a combinar',
+  'email-marketing': 'E-mail Marketing',
   'producao-overview': 'Produção › Visão geral',
-  'admin-errors': 'Erros & Falhas',
   'admin-health': 'Saúde do Sistema',
+  'admin-roi': 'ROI das automações',
+  'admin-agentes-qwen': 'Agentes Qwen',
   'admin-audit': 'Log de Auditoria',
   'admin-tokens': 'Tokens n8n',
   'admin-users': 'Gestão de Usuários',
@@ -109,9 +120,11 @@ export const PAGE_HREF: Readonly<Record<Exclude<PageId, 'home' | 'chat'>, string
   'marketplace-overview': '/marketplace',
   'dimension-standardization': '/padronizacao-dimensoes',
   'shipping-review': '/fretes-a-combinar',
+  'email-marketing': '/email-marketing',
   'producao-overview': '/producao',
-  'admin-errors': '/admin/erros',
   'admin-health': '/admin/saude',
+  'admin-roi': '/admin/roi',
+  'admin-agentes-qwen': '/admin/agentes-qwen',
   'admin-audit': '/admin/auditoria',
   'admin-tokens': '/admin/tokens',
   'admin-users': '/admin/usuarios',
@@ -164,5 +177,6 @@ export const AREA_SUMMARY: Readonly<Record<AreaId, string>> = {
   financeiro: 'Contas a pagar, conciliação do Mercado Livre, lançamento de NF-e no Tiny e dashboards financeiros.',
   logistica: 'Contagem de estoque por foto da prateleira, pelo bot do Telegram.',
   marketplace: 'Medidas e frete dos anúncios do Mercado Livre.',
+  marketing: 'E-mail marketing semanal (RD Station) e kits Instagram dos produtos Norvia.',
   producao: 'Impressão de etiquetas de produto direto do tablet da Produção.',
 };

@@ -75,7 +75,7 @@ export function createStockCountRoutes(
   deps: { registroDir?: string; skus?: StockSkuService; audit?: AuditService; tiny?: StockTinyClient } = {},
 ) {
   const getDir = () => (deps.registroDir || process.env.CONTAGEM_REGISTRO_DIR || "").trim();
-  const skus = deps.skus ?? createStockSkuService({ timeoutMs: 10000 } as any, undefined);
+  const skus = deps.skus ?? createStockSkuService({ timeoutMs: 10000 }, undefined);
   const tiny = deps.tiny ?? createStockTinyClient();
   // Um envio por contagem de cada vez (cliques repetidos não viram duas entradas no Tiny).
   const enviando = new Set<string>();

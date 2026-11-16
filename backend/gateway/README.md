@@ -48,7 +48,7 @@ O acesso vem das **permissões de cada usuário** (abas × ações), não do set
   na rota quando há `?force=true`.
 - **Setor** é só rótulo de equipe (cadastro, exibição, envio manual por setor); não dá acesso.
 - **Notificações** seguem a permissão: avisos de Marketplace → `dimensoes:ver`/`fretes:ver`; conciliação ML →
-  `conciliacao_ml:ver`; certificados A1 → `revisao_nfe:ver`; incidentes → `erros:ver`; cadastro pendente →
+  `conciliacao_ml:ver`; certificados A1 → `revisao_nfe:ver`; erros reportados e avisos dos agentes Qwen → `agentes_qwen:ver`; cadastro pendente →
   `usuarios:aprovar_cadastro`; alteração de cadastro de User → `usuarios:revisar_alteracao` (admins sempre recebem).
 - **Mudança de perfil/permissões** vale na próxima requisição (`findSession` relê tudo) e dispara o evento SSE
   `session` para o alvo.
@@ -78,6 +78,38 @@ O acesso vem das **permissões de cada usuário** (abas × ações), não do set
   token só lê — ações exigem sessão, porque as rotas de proxy falam com as automações reais.
 - **SEC-04:** conciliação ML e dashboard financeiro com abas próprias no catálogo (acima); a tarefa da conciliação ML é
   consultada em `/api/v1/conciliacao-ml/jobs/:id`, que não enxerga tarefas da conciliação Inter (e vice-versa).
+
+### Revisão de 2026-10-27 (commits 2e8f721..f90a6e3)
+
+- **SEC-06:** a planilha de lançamentos ML marca os itens como exportados, então sai só por
+  `POST /api/ml-reconciliation/analises/{id}/arquivos/lancamentos/exportar` (permissão `conciliacao_ml:baixar`;
+  corpo opcional `{ "incluir_exportados": bool }`; auditoria `conciliacao_ml_lancamentos_exportados`).
+  `GET .../arquivos/lancamentos` responde `405` com `Allow: POST`. Gateway, financeiro e frontend mudam juntos.
+- **SEC-08:** `skus`, `produtos` e `anuncios` das rotas do Marketplace aceitam no máximo 200 itens
+  (`LIMITE_ITENS_LOTE` em `src/routes/marketplace.ts`); acima disso, `400`.
+- **SEC-09:** quem não é Admin/ROOT não vê dados de contas Admin/ROOT (`src/routes/admin.ts`); Gestor não vê as
+  sessões de Admins e Gestores, só as de Users e as próprias.
+- **SEC-10:** com `NODE_ENV=production` (a imagem), `DATA_MODE` precisa ser `live`; `demo` ou ausente não sobe
+  (`src/config.ts`).
+
+---
+
+### Mapa dos arquivos de autenticação (GW-07)
+
+`src/auth.ts` virou só fachada que reexporta a API pública; os imports externos continuam apontando para `./auth.js`.
+
+| Arquivo | Conteúdo |
+|---|---|
+| `src/auth.ts` | Fachada (reexporta a API pública) |
+| `src/auth-types.ts` | Tipos (`User`, `Role`, `SessionInfo`...), contrato `AuthService` e interface `Store` |
+| `src/auth-validators.ts` | Hash `scrypt` (N=2^17, com leitura dos hashes legados), tokens (`sha256`), validação de entrada e grants |
+| `src/auth-store-memory.ts` | Store em memória (demo e testes) |
+| `src/auth-store-sql.ts` | Store MariaDB (live) |
+| `src/auth-service.ts` | Serviço: login, sessões, RBAC, cadastro, perfis de demo e caches |
+| `src/routes/auth.ts` | Rotas `/api/auth/*` |
+
+Caches: permissões efetivas por 5 s (`PERMISSIONS_CACHE_MS`), invalidadas em qualquer escrita de permissão;
+`touchSession` grava no máximo 1 vez por minuto (`TOUCH_SESSION_MIN_MS`), então a requisição comum não faz `UPDATE`.
 
 ---
 
@@ -111,9 +143,10 @@ O acesso vem das **permissões de cada usuário** (abas × ações), não do set
 - `/api/danfe/*` $\rightarrow$ Repassado para `automacao-nfe:8000` (varredura SEFAZ, upload de DANFEs, revisão humana).
 - `/api/financial-dashboard/*` $\rightarrow$ Repassado para `automacao-nfe:8000` (fluxo de caixa, DRE, inadimplência e insights).
 - `/api/reconciliation/*` $\rightarrow$ Repassado para `automacao-nfe:8000` (extratos Inter e conciliação Tiny).
-- `/api/ml-reconciliation/*` $\rightarrow$ Repassado para `automacao-nfe:8000` em `/api/v1/conciliacao-ml/*` (status, `executar`, `execucoes`, `analises` e arquivos, `jobs/baixar`). Os avisos da rotina diária viram notificação para quem vê a Conciliação ML.
+- `/api/ml-reconciliation/*` $\rightarrow$ Repassado para `automacao-nfe:8000` em `/api/v1/conciliacao-ml/*` (status, `executar`, `execucoes`, `analises` e arquivos, `jobs/baixar`). A planilha de lançamentos sai só por `POST .../arquivos/lancamentos/exportar` (SEC-06, ver revisão de 2026-10-27). Os avisos da rotina diária viram notificação para quem vê a Conciliação ML.
 - `/api/marketplace/*` $\rightarrow$ Repassado para `automacoes-marketplace:8001` (coleta e validação de dimensões e fretes Mercado Livre).
 - `/api/overview` $\rightarrow$ Agregação dos dados consolidados das automações ativas com janela móvel de 14 dias em São Paulo (UTC−03).
+- `/api/roi` $\rightarrow$ ROI das automações (permissão `roi:ver`): itens, horas e R$ economizados por automação, com `(manual − atual) × itens` a R$ 11,00/h; constantes em `src/roi.ts`. Quem não tem `roi:ver` não recebe `hoursSaved`/`estimatedSavings` em `/api/overview` nem em `/api/accounts-payable/dashboard`.
 - `/api/reconciliation/estado` $\rightarrow$ Repassado para `automacao-nfe:8000` em `/api/v1/reconciliacao/estado`: pendências persistidas de Contas a Pagar (Inter × Tiny), gravadas em `DATA_DIR/contas_pagar/estado.json` pela rotina diária.
 
 ### 5. Contagem de Estoque (lida pelo gateway, não proxy)
@@ -133,6 +166,10 @@ O diretório é **somente leitura** para o gateway (ele nunca grava nele). No co
 ## 🛡️ Resiliência, Circuit Breaker e Rastreabilidade
 
 - **Padrão Circuit Breaker (`src/circuit-breaker.ts`)**:
+  - Há um breaker por upstream (financeiro, contagem-estoque, marketplace). Com o circuito aberto, a resposta é
+    `503` com `code: "circuit_open"` (`src/http.ts`), sem chamar a automação. Em `HALF_OPEN` passa só 1 probe.
+  - A URL ativa de cada automação fica memorizada por 60 s; o timeout padrão das chamadas é 30 s
+    (`src/automation-http.ts`).
   - Protege o gateway contra degradação em cascata decorrente de falhas ou lentidão em provedores externos (SEFAZ, Tiny ERP v3, Banco Inter e microsserviços Python).
   - Três estados: `CLOSED` (operação normal), `OPEN` (bloqueio fail-fast imediato sem prender conexões), e `HALF_OPEN` (testes controlados de recuperação).
   - Preserva requisições canceladas pelo cliente (`clientSignal`): abort voluntário do usuário não é contabilizado como falha de infraestrutura.
@@ -186,4 +223,4 @@ npm run test:gateway
 # Ou diretamente dentro de backend/gateway:
 npm test
 ```
-*(137 testes automatizados cobrindo rotas, autenticação, circuit breakers, auditoria, RBAC, histórico, contagem de estoque e observabilidade: 136 pass, 1 skip).*
+*(176 testes automatizados cobrindo rotas, autenticação, circuit breakers, resiliência dos conectores, ROI, chat, cache de auth, auditoria, RBAC, histórico, contagem de estoque e observabilidade: 175 pass, 1 skip; conferido com `npm test` em 2026-10-27).*

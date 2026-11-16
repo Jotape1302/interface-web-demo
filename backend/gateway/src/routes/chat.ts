@@ -1,7 +1,7 @@
 import type { AuthService } from "../auth.js";
 import type { ChatService } from "../chat.js";
 import type { EventHub } from "../events.js";
-import { parseJsonBody, requireSession, sendError, type RequestContext } from "../http.js";
+import { requireSession, sendError, type RequestContext, parseJsonObject } from "../http.js";
 import { clampLimit } from "./notifications.js";
 
 // Chat direto (/api/chat/*) — qualquer sessão válida.
@@ -29,7 +29,7 @@ export function createChatRoutes(deps: { auth: AuthService; chat?: ChatService; 
 
     if (path === "/api/chat/messages" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         const message = await chat.sendMessage(session.user.id, Number(body.destinatarioId), String(body.conteudo));
         events?.publish([session.user.id, Number(body.destinatarioId)], "chat");
         return send(201, message);

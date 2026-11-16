@@ -1,5 +1,6 @@
 'use client';
 
+import { ModalShell } from './modal-shell';
 import React, { useState, useEffect, useRef } from 'react';
 import { ROLE_LABEL } from '@/lib/permissions';
 import { useAuth, StatusPreset } from '@/lib/auth-context';
@@ -128,6 +129,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
   // Sincroniza estado com dados atuais do usuário ao abrir
   useEffect(() => {
     if (user && isOpen) {
+      // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
       setNome(user.nome || '');
       setFotoPerfil(user.foto_perfil || null);
       setStatusPresenca(user.status_presenca || 'Disponível');
@@ -138,16 +140,6 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
     }
   }, [user, isOpen]);
 
-  // Fecha modal com Escape
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
 
   if (!isOpen || !user) return null;
 
@@ -178,7 +170,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
     setStatusPresenca(preset.label);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleSave = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     setIsSaving(true);
     try {
@@ -201,17 +193,11 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-in fade-in duration-150">
-      <div
-        className="relative w-full max-w-lg rounded-xl border border-border bg-card text-card-foreground shadow-lg overflow-hidden animate-in zoom-in-95 duration-200"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-profile-title"
-      >
+    <ModalShell onClose={onClose} labelledBy="modal-profile-title" className="relative w-full max-w-lg rounded-none border border-border bg-card text-card-foreground shadow-lg overflow-hidden animate-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-6 py-4 bg-muted/40">
           <div className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
+            <span className="flex h-8 w-8 items-center justify-center rounded-none bg-[var(--marca-ambar-suave)] text-[var(--accent-text)] border border-[var(--marca-ambar)]/30">
               <UserIcon size={16} />
             </span>
             <div>
@@ -226,7 +212,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition cursor-pointer"
+            className="rounded-none p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition cursor-pointer"
             title="Fechar"
           >
             <X size={18} />
@@ -235,7 +221,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
 
         <form onSubmit={handleSave} className="p-6 space-y-6">
           {/* Seção 1: Avatar & Foto */}
-          <div className="flex flex-col sm:flex-row items-center gap-5 p-4 rounded-xl border border-border bg-muted/20">
+          <div className="flex flex-col sm:flex-row items-center gap-5 p-4 rounded-none border border-border bg-muted/20">
             {/* Avatar Preview */}
             <div className="relative shrink-0">
               <div className="relative h-20 w-20 rounded-full overflow-hidden border border-border bg-muted flex items-center justify-center">
@@ -272,7 +258,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-background hover:bg-muted text-xs font-semibold text-foreground transition shadow-sm cursor-pointer"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-none border border-border bg-background hover:bg-muted text-xs font-semibold text-foreground transition shadow-sm cursor-pointer"
                 >
                   <Camera size={13} className="text-primary" />
                   <span>Alterar foto</span>
@@ -281,7 +267,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                 <button
                   type="button"
                   onClick={() => setIsUrlInputOpen((prev) => !prev)}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-background hover:bg-muted text-xs font-medium text-muted-foreground hover:text-foreground transition cursor-pointer"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-none border border-border bg-background hover:bg-muted text-xs font-medium text-muted-foreground hover:text-foreground transition cursor-pointer"
                   title="Definir por URL externa"
                 >
                   <LinkIcon size={12} />
@@ -292,7 +278,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                   <button
                     type="button"
                     onClick={() => setFotoPerfil(null)}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition cursor-pointer"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-none border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition cursor-pointer"
                     title="Remover foto e restaurar iniciais"
                   >
                     <Trash2 size={12} />
@@ -308,12 +294,12 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                     placeholder="https://exemplo.com/minha-foto.jpg"
                     value={urlInput}
                     onChange={(e) => setUrlInput(e.target.value)}
-                    className="flex-1 px-2.5 py-1 text-xs rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring/60"
+                    className="flex-1 px-2.5 py-1 text-xs rounded-none border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring/60"
                   />
                   <button
                     type="button"
                     onClick={handleApplyUrl}
-                    className="px-2.5 py-1 text-xs font-semibold rounded-md bg-primary text-primary-foreground hover:bg-[var(--brand-primary-hover)] transition cursor-pointer"
+                    className="px-2.5 py-1 text-xs font-semibold rounded-none bg-primary text-primary-foreground hover:bg-[var(--brand-primary-hover)] transition cursor-pointer"
                   >
                     OK
                   </button>
@@ -329,7 +315,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
           {/* Seção 2: Status de Atividade (Manual + Sugestões Rápidas) */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-foreground uppercase tracking-wider">
+              <label htmlFor="user-profile-modal-campo-317" className="text-xs font-bold text-foreground uppercase tracking-wider">
                 Status de Atividade
               </label>
               <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border ${currentPreset.badgeClass}`}>
@@ -340,13 +326,13 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
 
             {/* Campo Livre para Escrita Manual */}
             <div className="relative">
-              <input
+              <input id="user-profile-modal-campo-317"
                 type="text"
                 value={statusPresenca}
                 onChange={(e) => setStatusPresenca(e.target.value)}
                 placeholder="Escreva seu status atual (ex: Focado no fechamento de pagamentos...)"
                 maxLength={60}
-                className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-xs text-foreground placeholder:text-muted-foreground/60 shadow-inner focus:outline-none focus:ring-2 focus:ring-ring/60 transition"
+                className="w-full rounded-none border border-border bg-background px-3.5 py-2.5 text-xs text-foreground placeholder:text-muted-foreground/60 shadow-inner focus:outline-none focus:ring-2 focus:ring-ring/60 transition"
               />
               <span className="absolute right-3 top-2.5 text-[10px] font-mono text-muted-foreground">
                 {statusPresenca.length}/60
@@ -366,7 +352,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                       key={preset.key}
                       type="button"
                       onClick={() => handleSelectPreset(preset)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition cursor-pointer ${
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-none text-xs font-medium border transition cursor-pointer ${
                         isSelected
                           ? `${preset.badgeClass} ring-2 ring-ring/50 font-semibold shadow-sm`
                           : 'border-border/60 bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground'
@@ -384,18 +370,18 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
           {/* Seção 3: Dados Cadastrais Básicos */}
           <div className="space-y-3 pt-2 border-t border-border/50">
             <div>
-              <label className="block text-xs font-bold text-foreground mb-1">Nome Completo</label>
-              <input
+              <label htmlFor="user-profile-modal-campo-372" className="block text-xs font-bold text-foreground mb-1">Nome Completo</label>
+              <input id="user-profile-modal-campo-372"
                 type="text"
                 value={nome}
                 onChange={(e) => setNome(e.target.value)}
                 required
-                className="w-full rounded-xl border border-border bg-background px-3.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
+                className="w-full rounded-none border border-border bg-background px-3.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
               />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-2.5 rounded-lg border border-border bg-muted/30">
+              <div className="p-2.5 rounded-none border border-border bg-muted/30">
                 <span className="text-muted-foreground text-[11px] flex items-center gap-1">
                   <Mail size={12} />
                   E-mail institucional
@@ -403,7 +389,7 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
                 <strong className="block truncate text-foreground text-xs mt-0.5">{user.email}</strong>
               </div>
 
-              <div className="p-2.5 rounded-lg border border-border bg-muted/30">
+              <div className="p-2.5 rounded-none border border-border bg-muted/30">
                 <span className="text-muted-foreground text-[11px] flex items-center gap-1">
                   <Briefcase size={12} />
                   Setor & Perfil
@@ -420,14 +406,14 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold rounded-lg border border-border bg-background hover:bg-muted text-foreground transition cursor-pointer"
+              className="px-4 py-2 text-xs font-semibold rounded-none border border-border bg-background hover:bg-muted text-foreground transition cursor-pointer"
             >
               Cancelar
             </button>
             <button
               type="submit"
               disabled={isSaving}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-primary hover:bg-[var(--brand-primary-hover)] text-primary-foreground transition shadow-sm cursor-pointer disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-none bg-primary hover:bg-[var(--brand-primary-hover)] text-primary-foreground transition shadow-sm cursor-pointer disabled:opacity-50"
             >
               {saveFeedback ? (
                 <>
@@ -440,7 +426,6 @@ export default function UserProfileModal({ isOpen, onClose }: UserProfileModalPr
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </ModalShell>
   );
 }

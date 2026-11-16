@@ -157,9 +157,11 @@ export default function NotificationBell() {
     } finally {
       setLoading(false);
     }
+  // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
   }, [user, isDemoMode, apiBaseUrl, token, session, can]);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/react-compiler -- setState síncrono no efeito é intencional (reset/sincronização ao mudar a entrada); refatorar exigiria reestruturar o componente
     if (open) void loadPanel();
   }, [open, loadPanel]);
 

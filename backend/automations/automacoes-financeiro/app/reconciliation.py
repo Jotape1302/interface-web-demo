@@ -9,8 +9,8 @@ Compara pagamentos efetuados no extrato do Banco Inter com as contas em aberto n
 
 Gera previsões estruturadas para revisão humana e orquestra a baixa assistida no Tiny.
 """
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import Enum
 import logging
@@ -18,9 +18,9 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.fuso import hoje_sp
 from app.boleto import parse_boleto
-from app.inter_client import INTER_EMPRESAS, InterClient, InterTransacao, _clean_digits, _parse_date, _to_decimal
-from app.tiny_client import TinyClient
+from app.inter_client import INTER_EMPRESAS, InterTransacao, _clean_digits, _parse_date, _to_decimal
 
 logger = logging.getLogger("automacao_nfe.reconciliation")
 
@@ -252,7 +252,6 @@ def match_transactions(
     5. Nome do Fornecedor + Valor Exato (80% confiança)
     6. Valor Único no Período (70% confiança)
     """
-    empresa_label = EMPRESA_LABELS.get(empresa, empresa.title())
     used_tiny_ids: Set[int] = set()
     used_inter_ids: Set[str] = set()
     matches: List[ReconciliationMatch] = []
@@ -526,8 +525,8 @@ def match_transactions(
 
     return ReconciliationResult(
         empresa=empresa,
-        data_inicio=inter_transacoes[0].data_pagamento if inter_transacoes else date.today(),
-        data_fim=inter_transacoes[-1].data_pagamento if inter_transacoes else date.today(),
+        data_inicio=inter_transacoes[0].data_pagamento if inter_transacoes else hoje_sp(),
+        data_fim=inter_transacoes[-1].data_pagamento if inter_transacoes else hoje_sp(),
         matches=matches,
         unmatched_inter=unmatched_inter,
         unmatched_tiny=unmatched_tiny,

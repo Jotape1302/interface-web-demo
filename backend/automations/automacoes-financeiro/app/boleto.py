@@ -10,6 +10,7 @@ Formatos aceitos (só dígitos, pontuação é ignorada):
   Convênio não tem vencimento no código; o valor só existe quando o identificador de
   valor (3º dígito) é 6 ou 8 (valor em reais).
 """
+from app.fuso import hoje_sp
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -52,7 +53,7 @@ def vencimento_do_fator(fator: int, referencia: Optional[date] = None) -> Option
     if fator < 1000:
         return antiga
     nova = _FATOR_BASE_NOVA + timedelta(days=fator - 1000)
-    ref = referencia or date.today()
+    ref = referencia or hoje_sp()
     return min((antiga, nova), key=lambda d: abs((d - ref).days))
 
 

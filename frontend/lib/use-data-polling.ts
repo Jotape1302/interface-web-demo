@@ -20,8 +20,8 @@ export interface DataPollerConfig<T> {
   addVisibilityListener?: (listener: () => void) => () => void;
   subscribeRealtimeFn?: typeof subscribeRealtime;
   isRealtimeConnectedFn?: typeof isRealtimeConnected;
-  setIntervalFn?: (cb: () => void, ms: number) => any;
-  clearIntervalFn?: (id: any) => void;
+  setIntervalFn?: (cb: () => void, ms: number) => unknown;
+  clearIntervalFn?: (id: unknown) => void;
 }
 
 /**
@@ -32,7 +32,7 @@ export interface DataPollerConfig<T> {
 export class DataPoller<T> {
   private config: DataPollerConfig<T>;
   private controller: AbortController | null = null;
-  private intervalTimerId: any = null;
+  private intervalTimerId: unknown = null;
   private unsubscribeVisibility: (() => void) | null = null;
   private unsubscribeRealtime: (() => void) | null = null;
   private isExecuting = false;
@@ -148,7 +148,8 @@ export class DataPoller<T> {
 
   private disarmInterval(): void {
     if (this.intervalTimerId !== null) {
-      (this.config.clearIntervalFn ?? clearInterval)(this.intervalTimerId);
+      if (this.config.clearIntervalFn) this.config.clearIntervalFn(this.intervalTimerId);
+      else clearInterval(this.intervalTimerId as ReturnType<typeof setInterval>);
       this.intervalTimerId = null;
     }
   }
@@ -265,7 +266,9 @@ export function useDataPolling(
   options: UseDataPollingOptions = {},
 ): { refresh: () => Promise<void> } {
   const fetcherRef = useRef(fetcher);
-  fetcherRef.current = fetcher;
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
 
   const pollerRef = useRef<DataPoller<void> | null>(null);
 

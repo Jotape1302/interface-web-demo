@@ -1,7 +1,9 @@
 import type { Pool } from "mariadb";
+import { logWarn } from "./errors.js";
 import type { Config } from "./config.js";
 import type { User } from "./auth.js";
 import { canSeeArea, isCatalogKey, userHasPermission, type PermissionArea } from "./permissions.js";
+import type { DbRow } from "./database.js";
 
 export interface Notification {
   id: number;
@@ -21,7 +23,7 @@ export interface NotificationService {
   notifyRole(role: "admin" | "gestor" | "user", data: { tipo: string; titulo: string; mensagem?: string; link?: string }): Promise<void>;
   /** Quem vê alguma aba da área (permissões, não setor) + admins. */
   notifyArea(area: PermissionArea, data: { tipo: string; titulo: string; mensagem?: string; link?: string }): Promise<void>;
-  /** Quem tem a chave "<aba>:<acao>" (ex.: "erros:ver") + admins. Chave fora do catálogo: só admins. */
+  /** Quem tem a chave "<aba>:<acao>" (ex.: "agentes_qwen:ver") + admins. Chave fora do catálogo: só admins. */
   notifyPermission(key: string, data: { tipo: string; titulo: string; mensagem?: string; link?: string }): Promise<void>;
   notifySetor(setor: string, data: { tipo: string; titulo: string; mensagem?: string; link?: string }): Promise<void>;
   listForUser(userId: number, opts?: { unreadOnly?: boolean; limit?: number }): Promise<Notification[]>;
@@ -42,7 +44,7 @@ export function createNotificationService(config: Config, pool: Pool | undefined
   const memoryNotifications = new Map<number, Notification>();
   let nextId = 1;
 
-  async function query<T = any>(sql: string, values: any[] = []): Promise<T[]> {
+  async function query<T = DbRow>(sql: string, values: unknown[] = []): Promise<T[]> {
     if (!pool) throw new Error("Pool de banco não configurado");
     const conn = await pool.getConnection();
     try {
@@ -67,7 +69,9 @@ export function createNotificationService(config: Config, pool: Pool | undefined
         ]);
         deps.onNotify?.(destinatarioId);
         return;
-      } catch {}
+      } catch (err) {
+          logWarn("notifications_db_query_failed", err);
+        }
     }
     const n: Notification = {
       id: nextId++,
@@ -83,14 +87,14 @@ export function createNotificationService(config: Config, pool: Pool | undefined
     deps.onNotify?.(destinatarioId);
   }
 
-  function mapRow(r: any): Notification {
+  function mapRow(r: DbRow): Notification {
     return {
       id: Number(r.id),
       destinatario_id: Number(r.destinatario_id),
-      tipo: r.tipo,
-      titulo: r.titulo,
-      mensagem: r.mensagem ?? null,
-      link: r.link ?? null,
+      tipo: r.tipo as string,
+      titulo: r.titulo as string,
+      mensagem: (r.mensagem as string | null | undefined) ?? null,
+      link: (r.link as string | null | undefined) ?? null,
       lida: Boolean(r.lida),
       criado_em: String(r.criado_em),
       lida_em: r.lida_em ? String(r.lida_em) : null,
@@ -171,7 +175,7 @@ export function createNotificationService(config: Config, pool: Pool | undefined
       const limit = opts?.limit ?? 30;
       if (pool) {
         try {
-          const rows = await query<any>(
+          const rows = await query(
             `SELECT id, destinatario_id, tipo, titulo, mensagem, link, lida,
                     DATE_FORMAT(criado_em, '%Y-%m-%dT%H:%i:%sZ') AS criado_em,
                     DATE_FORMAT(lida_em, '%Y-%m-%dT%H:%i:%sZ') AS lida_em
@@ -181,7 +185,9 @@ export function createNotificationService(config: Config, pool: Pool | undefined
             [userId, limit],
           );
           return rows.map(mapRow);
-        } catch {}
+        } catch (err) {
+          logWarn("notifications_db_query_failed", err);
+        }
       }
       return Array.from(memoryNotifications.values())
         .filter((n) => n.destinatario_id === userId && (!opts?.unreadOnly || !n.lida))
@@ -192,12 +198,14 @@ export function createNotificationService(config: Config, pool: Pool | undefined
     async getUnreadCount(userId) {
       if (pool) {
         try {
-          const rows = await query<any>(
+          const rows = await query(
             "SELECT COUNT(*) as count FROM notificacoes WHERE destinatario_id = ? AND lida = FALSE",
             [userId],
           );
           return Number(rows[0]?.count || 0);
-        } catch {}
+        } catch (err) {
+          logWarn("notifications_db_query_failed", err);
+        }
       }
       let count = 0;
       for (const n of memoryNotifications.values()) {
@@ -214,7 +222,9 @@ export function createNotificationService(config: Config, pool: Pool | undefined
             userId,
           ]);
           return true;
-        } catch {}
+        } catch (err) {
+          logWarn("notifications_db_query_failed", err);
+        }
       }
       const n = memoryNotifications.get(id);
       if (n && n.destinatario_id === userId) {
@@ -232,7 +242,9 @@ export function createNotificationService(config: Config, pool: Pool | undefined
             userId,
           ]);
           return true;
-        } catch {}
+        } catch (err) {
+          logWarn("notifications_db_query_failed", err);
+        }
       }
       for (const n of memoryNotifications.values()) {
         if (n.destinatario_id === userId && !n.lida) {

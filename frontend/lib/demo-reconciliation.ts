@@ -41,13 +41,13 @@ interface SeedConta {
 
 const FORNECEDORES: SeedConta[] = [
   { fornecedor: 'Alumiconte Perfis Ltda', cnpj: '12345678000190', doc: 'NF 18.442', valor: 4_860.0, diasAntesDoFim: 2, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO' },
-  { fornecedor: 'Duratex Distribuição S.A.', cnpj: '97837181000147', doc: 'NF 95.113', valor: 12_430.5, diasAntesDoFim: 4, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO' },
+  { fornecedor: 'Duratex Distribuição S.A.', cnpj: '60408845000142', doc: 'NF 95.113', valor: 12_430.5, diasAntesDoFim: 4, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO' },
   { fornecedor: 'LedBrasil Iluminação', cnpj: '23456789000155', doc: 'NF 7.021', valor: 2_318.9, diasAntesDoFim: 5, metodo: 'CNPJ_VALOR_DATA', tipo: 'PIX' },
   { fornecedor: 'Transportadora Rota Sul', cnpj: '34567890000122', doc: 'CT-e 55.870', valor: 1_145.0, diasAntesDoFim: 6, metodo: 'CNPJ_VALOR', tipo: 'PIX' },
   { fornecedor: 'Granitos Andorinha ME', cnpj: '45678901000133', doc: 'NF 3.318', valor: 6_780.0, diasAntesDoFim: 8, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO', juros: 13.56 },
   { fornecedor: 'Embalagens Paraná Ltda', cnpj: '56789012000144', doc: 'NF 21.906', valor: 894.3, diasAntesDoFim: 9, metodo: 'NOME_VALOR', tipo: 'TED' },
-  { fornecedor: 'Copel Distribuição', cnpj: '04368898000106', doc: 'Fatura 09/2026', valor: 1_732.44, diasAntesDoFim: 11, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO' },
-  { fornecedor: 'Vivo Empresas', cnpj: '02558157000162', doc: 'Fatura 0926', valor: 389.9, diasAntesDoFim: 12, metodo: 'DOCUMENTO_VALOR', tipo: 'BOLETO' },
+  { fornecedor: 'Copel Distribuição', cnpj: '21427378000146', doc: 'Fatura 09/2026', valor: 1_732.44, diasAntesDoFim: 11, metodo: 'CODIGO_BARRAS', tipo: 'BOLETO' },
+  { fornecedor: 'Vivo Empresas', cnpj: '98920419000166', doc: 'Fatura 0926', valor: 389.9, diasAntesDoFim: 12, metodo: 'DOCUMENTO_VALOR', tipo: 'BOLETO' },
   { fornecedor: 'Rodaplast Indústria', cnpj: '67890123000155', doc: 'NF 44.120', valor: 9_215.0, diasAntesDoFim: 14, metodo: 'VALOR_DATA_UNICO', tipo: 'PIX' },
 ];
 

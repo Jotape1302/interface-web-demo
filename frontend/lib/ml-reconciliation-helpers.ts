@@ -16,18 +16,21 @@ import { JobLostError, abortableSleep } from './reconciliation-helpers';
 export type MlTone = 'success' | 'warning' | 'danger' | 'secondary' | 'info';
 
 /** Filtros da aba de recebimentos. */
-export type MlFiltroGrupo = 'aptos' | 'conciliados' | 'pendentes' | 'ja_baixados' | 'todos';
+export type MlFiltroGrupo = 'aptos' | 'canceladas' | 'conciliados' | 'pendentes' | 'ja_baixados' | 'todos';
 
 const SITUACOES: Record<string, { label: string; tone: MlTone }> = {
   'APTO PARA BAIXA': { label: 'Apto para baixa', tone: 'info' },
   CONCILIADO: { label: 'Baixado no Tiny', tone: 'success' },
   'Não conciliado': { label: 'Sem cliente', tone: 'warning' },
   'NÃO LOCALIZADO': { label: 'Conta não localizada', tone: 'warning' },
+  'VENDA CANCELADA': { label: 'Venda cancelada/devolvida', tone: 'secondary' },
+  'SEM CONTA A RECEBER': { label: 'Sem conta a receber (a baixa cria)', tone: 'warning' },
   'VALOR DIVERGENTE': { label: 'Valor acima do saldo', tone: 'danger' },
   'TINY NÃO CONSULTADO': { label: 'Tiny não consultado', tone: 'secondary' },
   'ERRO API': { label: 'Erro na baixa', tone: 'danger' },
   'ERRO AO PROCESSAR': { label: 'Erro na consulta', tone: 'danger' },
   'DESCONTADO NA BAIXA': { label: 'Descontado na baixa', tone: 'secondary' },
+  'SEM DATA DA VENDA': { label: 'Sem data da venda', tone: 'warning' },
 };
 
 /** Rótulo e cor da situação de um recebimento ("STATUS: PAGO" -> "Já pago no Tiny"). */
@@ -42,16 +45,39 @@ export function situacaoMeta(situacao: string): { label: string; tone: MlTone } 
   return { label: situacao || '—', tone: 'secondary' };
 }
 
+/** Venda cancelada no Tiny: a baixa cria a conta do pedido, baixa e lança estorno + tarifas. */
+export function vendaCancelada(grupo: MlGrupo): boolean {
+  return grupo.situacao === 'VENDA CANCELADA';
+}
+
+/** Pedido com nota fiscal e sem conta a receber no Tiny: a baixa cria a conta do pedido e baixa. */
+export function semContaReceber(grupo: MlGrupo): boolean {
+  return grupo.situacao === 'SEM CONTA A RECEBER';
+}
+
+/**
+ * Pode ser marcado para baixa: apto, com erro de API numa baixa anterior (o backend relê a
+ * conta e confere a tentativa antes de repetir) ou venda cancelada / sem conta a receber pronta
+ * (o backend diz em `pode_baixar`: pedido do Tiny com cliente e valor).
+ */
+export function podeBaixar(grupo: MlGrupo): boolean {
+  if (vendaCancelada(grupo) || semContaReceber(grupo)) return grupo.pode_baixar === true;
+  return grupo.apto_baixa || (grupo.situacao === 'ERRO API' && grupo.conta_id != null);
+}
+
 export function grupoNoFiltro(grupo: MlGrupo, filtro: MlFiltroGrupo): boolean {
   switch (filtro) {
     case 'aptos':
-      return grupo.apto_baixa;
+      // Inclui o "Erro na baixa" que pode ser marcado de novo: não some dos aptos depois de um erro.
+      return podeBaixar(grupo) && !vendaCancelada(grupo);
+    case 'canceladas':
+      return vendaCancelada(grupo);
     case 'conciliados':
       return grupo.situacao === 'CONCILIADO';
     case 'ja_baixados':
       return /^STATUS:/i.test(grupo.situacao);
     case 'pendentes':
-      return !grupo.apto_baixa && grupo.situacao !== 'CONCILIADO' && !/^STATUS:/i.test(grupo.situacao);
+      return !podeBaixar(grupo) && !vendaCancelada(grupo) && grupo.situacao !== 'CONCILIADO' && !/^STATUS:/i.test(grupo.situacao);
     default:
       return true;
   }

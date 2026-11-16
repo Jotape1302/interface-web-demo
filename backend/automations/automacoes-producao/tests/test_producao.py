@@ -9,7 +9,7 @@ from app.config import Settings, settings
 from app.etiquetas_zpl import avisos_etiqueta, gerar_zpl, gtin_valido
 
 ORION = {
-    "sku": "HNYRPI11-3M-01",
+    "sku": "NRVRPI11-3M-01",
     "descricao": "Rodapé Orion Autocolante com Friso para Difusor LED em Aluminio 70mm x 17mm - Norvia - Branco - 3m",
     "gtin": "7908737101294",
     "localizacao": "A1-RA-P2-N1-AP1 / CASA06",
@@ -60,7 +60,7 @@ def test_gerar_zpl_completo():
     assert "^PW480" in zpl and "^LL320" in zpl
     assert "^CI28" in zpl and "Rodapé Orion" in zpl
     assert "^BEN" in zpl and "^FD790873710129^FS" in zpl
-    assert "^BCN" in zpl and "^FDHNYRPI11-3M-01^FS" in zpl
+    assert "^BCN" in zpl and "^FDNRVRPI11-3M-01^FS" in zpl
     assert "^PQ5,0,1,N" in zpl
 
 
@@ -85,7 +85,7 @@ def test_imprimir_monta_zpl_e_manda_para_impressora(client, impressora_fake):
     assert corpo["copias"] == 10 and corpo["op"] == "1234"
     assert corpo["avisos"] == []
     zpl = impressora_fake.call_args.args[0]
-    assert "^PQ10,0,1,N" in zpl and "^FDHNYRPI11-3M-01^FS" in zpl
+    assert "^PQ10,0,1,N" in zpl and "^FDNRVRPI11-3M-01^FS" in zpl
     assert impressora_fake.call_args.kwargs["codificacao"] == "utf-8"
 
 
@@ -351,7 +351,7 @@ def test_epl_quebra_em_4_linhas_com_reticencias():
 
 def test_epl_produto_longo_nao_corta_microtexturizado():
     prod = {
-        "sku": "HNYRPI06-2M-26",
+        "sku": "NRVRPI06-2M-26",
         "descricao": "Rodapé Invertido Curvo Lete em Aluminio com Aba para LED 60mm x 20mm - Norvia - Off-White Microtexturizado - 2m",
         "gtin": "7908737102215",
         "localizacao": "A1-RC-P1-N1-AP2",

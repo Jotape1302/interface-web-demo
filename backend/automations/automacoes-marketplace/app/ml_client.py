@@ -6,20 +6,23 @@ precisa a mais: listagem de todos os anúncios da conta. A renovação do token 
 um fluxo externo (a definir) renova e grava o access token (ver ClienteML._token).
 """
 import logging
-import time
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 
+from app import retry
 from app.config import settings
+from app.retry import TENTATIVAS, deve_repetir, espera
 from app.dimensoes import Dimensoes
 from app.estado import Estado
 
 logger = logging.getLogger("marketplace.ml")
 
 CAMPO_BLOQUEADO = "field_not_updatable"
-LOTE_MULTIGET = 20  # máximo de ids por GET /items?ids=
+LOTE_MULTIGET = 20  # máximo de ids por GET /items/bulk?ids=
 ATRIBUTOS_DO_ITEM = "id,title,status,permalink,thumbnail,shipping,attributes,seller_custom_field,variations,last_updated"
+# /items/bulk filtra os campos com o prefixo "body." (o /items?ids= antigo usava o nome puro).
+ATRIBUTOS_DO_BULK = ",".join(f"body.{a}" for a in ATRIBUTOS_DO_ITEM.split(","))
 
 
 class MLAPIError(RuntimeError):
@@ -40,6 +43,8 @@ class ClienteML:
         self.http = http or requests.Session()
         self.base_url = (base_url or settings.ML_API_URL).rstrip("/")
         self._user_id: Optional[int] = None
+        self._relidos = [0, 0]
+        self._um_a_um = False
 
     # --- autenticação -----------------------------------------------------------------------
 
@@ -65,14 +70,14 @@ class ClienteML:
     # --- HTTP -------------------------------------------------------------------------------
 
     def _chamar(self, metodo: str, caminho: str, descricao: str, **kwargs: Any) -> Any:
-        for tentativa in (1, 2, 3):
+        for tentativa in range(1, TENTATIVAS + 1):
             headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json"}
             try:
                 resp = self.http.request(metodo, f"{self.base_url}{caminho}", headers=headers, timeout=30, **kwargs)
             except requests.RequestException as e:
-                if tentativa == 3:
+                if tentativa == TENTATIVAS or not deve_repetir(metodo, None):
                     raise MLAPIError(f"Falha de rede ao {descricao}: {e}") from e
-                time.sleep(2 * tentativa)
+                retry.dormir(espera(tentativa))
                 continue
             if resp.status_code == 401:
                 raise ContaNaoConectada(
@@ -81,9 +86,9 @@ class ClienteML:
                     resp.status_code,
                     resp.text,
                 )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if tentativa < 3:
-                    time.sleep(5 * tentativa)
+            if (resp.status_code == 429 or resp.status_code >= 500) and deve_repetir(metodo, resp.status_code):
+                if tentativa < TENTATIVAS:
+                    retry.dormir(espera(tentativa, resp))
                     continue
             if not 200 <= resp.status_code < 300:
                 raise MLAPIError(
@@ -110,16 +115,88 @@ class ClienteML:
         return list(dict.fromkeys(ids))
 
     def anuncios(self, ids: List[str]) -> Iterator[Dict[str, Any]]:
+        """
+        Lê os anúncios em lotes de 20 por GET /items/bulk?ids=. O /items?ids= antigo foi
+        desativado pelo ML (prazo de migração 25/10/2026): em 06/11 a Campinas recebeu 403
+        "ResourceDeprecated". Se o bulk também for recusado, lê um a um por GET /items/{id}.
+        """
+        self._relidos = [0, 0]  # [relidos sozinhos, com a embalagem na releitura]
+        self._um_a_um = False
         for i in range(0, len(ids), LOTE_MULTIGET):
             lote = ids[i : i + LOTE_MULTIGET]
-            respostas = self._chamar(
-                "GET", "/items", "buscar os anúncios", params={"ids": ",".join(lote), "attributes": ATRIBUTOS_DO_ITEM}
-            )
+            for item, sozinho in self._lote(lote):
+                yield item if sozinho else self._com_embalagem(item)
+        if self._relidos[0]:
+            logger.info(f"[ML] {self.filial}: {self._relidos[0]} anúncio(s) sem embalagem no lote relidos; "
+                        f"{self._relidos[1]} tinham a embalagem na releitura")
+
+    def _lote(self, lote: List[str]) -> List[Tuple[Dict[str, Any], bool]]:
+        """(anúncio, lido sozinho): o lido por GET /items/{id} já vem completo, sem releitura."""
+        lidos: Dict[str, Dict[str, Any]] = {}
+        if not self._um_a_um:
+            try:
+                respostas = self._chamar(
+                    "GET", "/items/bulk", "buscar os anúncios",
+                    params={"ids": ",".join(lote), "attributes": ATRIBUTOS_DO_BULK, "include_attributes": "all"},
+                )
+            except ContaNaoConectada:
+                raise
+            except MLAPIError as e:
+                if e.status is None or e.status >= 500 or e.status == 429:
+                    raise
+                logger.warning(f"[ML] {self.filial}: leitura em lote recusada ({e}); lendo os anúncios um a um")
+                self._um_a_um = True
+                respostas = []
             for r in respostas or []:
-                if isinstance(r, dict) and r.get("code") == 200 and isinstance(r.get("body"), dict):
-                    yield r["body"]
+                # Aceita {code, body} (formato do multiget) e o item direto.
+                corpo = r.get("body") if isinstance(r, dict) and "body" in r else r
+                codigo = r.get("code", 200) if isinstance(r, dict) else None
+                if codigo == 200 and isinstance(corpo, dict) and corpo.get("id"):
+                    lidos[str(corpo["id"])] = corpo
                 else:
                     logger.warning(f"[ML] {self.filial}: anúncio não lido no lote: {str(r)[:200]}")
+        itens: List[Tuple[Dict[str, Any], bool]] = []
+        for mlb in lote:
+            if mlb in lidos:
+                itens.append((lidos[mlb], False))
+                continue
+            # Fora da resposta do lote (ou lote recusado): lê sozinho.
+            try:
+                item = self.anuncio(mlb)
+            except ContaNaoConectada:
+                raise
+            except MLAPIError as e:
+                # Só o anúncio que não existe mais é pulado. Outra recusa (403...) derruba a
+                # verificação: pular todos daria "ok" com zero anúncios.
+                if e.status == 404:
+                    logger.warning(f"[ML] {self.filial}: anúncio {mlb} não encontrado: {e}")
+                    continue
+                raise
+            if isinstance(item, dict) and item.get("id"):
+                itens.append((item, True))
+        return itens
+
+    def _com_embalagem(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Anúncio sem SELLER_PACKAGE_* no GET em lote é relido sozinho (com include_attributes=all):
+        em 28/10 1.230 embalagens enviadas e conferidas às 09h "voltaram" na coleta das 13h para o
+        shipping.dimensions antigo, a leitura de reserva. Se a releitura falhar, fica o do lote.
+        """
+        if any(str(a.get("id", "")).startswith("SELLER_PACKAGE_") for a in item.get("attributes") or []):
+            return item
+        self._relidos[0] += 1
+        try:
+            completo = self.anuncio(item["id"])
+        except ContaNaoConectada:
+            raise
+        except MLAPIError as e:
+            logger.warning(f"[ML] {self.filial}: {item.get('id')} sem a embalagem no lote e sem releitura: {e}")
+            return item
+        if not (isinstance(completo, dict) and completo.get("id")):
+            return item
+        if any(str(a.get("id", "")).startswith("SELLER_PACKAGE_") for a in completo.get("attributes") or []):
+            self._relidos[1] += 1
+        return completo
 
     def descricao(self, mlb: str) -> str:
         """Descrição do anúncio (texto puro). Anúncio sem descrição: vazio."""
@@ -135,7 +212,7 @@ class ClienteML:
         self._chamar("PUT", f"/items/{mlb}", descricao, json={"attributes": atributos})
 
     def anuncio(self, mlb: str) -> Dict[str, Any]:
-        return self._chamar("GET", f"/items/{mlb}", f"buscar o anúncio {mlb}")
+        return self._chamar("GET", f"/items/{mlb}", f"buscar o anúncio {mlb}", params={"include_attributes": "all"})
 
     # --- escrita ----------------------------------------------------------------------------
 
@@ -158,6 +235,29 @@ class ClienteML:
             {"id": "SELLER_PACKAGE_WEIGHT", "value_name": f"{ml.peso} g"},
         ]
         self._chamar("PUT", f"/items/{mlb}", f"atualizar as medidas de {mlb}", json={"attributes": atributos})
+
+    def enviar_dimensoes_envio(self, mlb: str, dims: Dimensoes, envio_atual: Dict[str, Any]) -> bool:
+        """
+        shipping.dimensions de anúncio ME1: é por ele que o ML calcula o frete, e em 28/10 ~980
+        anúncios ME1 voltaram ao valor antigo horas depois de receber só os SELLER_PACKAGE_*.
+        Vai com o modo, frete grátis e retirada que o anúncio já tem. False se o ML trava o campo.
+        """
+        texto = dims.texto_ml()
+        if not texto:
+            return False
+        envio = {
+            "mode": envio_atual.get("mode"),
+            "dimensions": texto,
+            "local_pick_up": bool(envio_atual.get("local_pick_up", False)),
+            "free_shipping": bool(envio_atual.get("free_shipping", False)),
+        }
+        try:
+            self._chamar("PUT", f"/items/{mlb}", f"atualizar as medidas de envio de {mlb}", json={"shipping": envio})
+        except MLAPIError as e:
+            if CAMPO_BLOQUEADO not in (e.corpo or str(e)):
+                raise
+            return False
+        return True
 
     def trocar_envio(self, mlb: str, dims: Dimensoes, modo: str, envio_atual: Dict[str, Any]) -> None:
         """

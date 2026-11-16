@@ -1,9 +1,7 @@
 from datetime import date, timedelta
-from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
-import pytest
 
 from app import ml_reconciliation as ml
 from app import ml_reconciliation_rotina as rot
@@ -22,6 +20,8 @@ def _lib(**campos):
         "PACK_ID": "",
     }
     base.update({k: str(v) for k, v in campos.items()})
+    # O relatório traz a data da venda; sem dizer outra, a venda é do dia da liberação.
+    base.setdefault("TRANSACTION_APPROVAL_DATE", base["DATE"])
     return base
 
 
@@ -246,3 +246,56 @@ def test_visao_consolidada_ids_unicos_entre_analises(tmp_path):
     assert len(cons.grupos) == 2
     assert len(set(ids)) == 2
     assert all(i.startswith("C-") for i in ids)
+
+
+def test_consolidada_so_reconfere_no_tiny_as_contas_herdadas(tmp_path):
+    """A análise recente acabou de ler a conta (situação e saldo): reler uma a uma era ~1.700
+    chamadas ao Tiny por empresa (06/11/2026). Só a venda que saiu da janela é conferida."""
+    tiny = MockTiny()
+    for conta_id, venda, cliente in ((901, "PED-7001", "Cliente A"), (902, "PED-7002", "Cliente B")):
+        tiny.contas[conta_id] = {
+            "id": conta_id, "historico": f"OC {venda} parcela 1/1", "situacao": "aberto",
+            "valor": 100.0, "saldo": 100.0, "valorPago": 0.0, "cliente": {"nome": cliente},
+        }
+    lidas: List[int] = []
+    original = tiny.obter_conta_receber_v3
+
+    def obter(token, conta_id):
+        lidas.append(conta_id)
+        return original(token, conta_id)
+
+    tiny.obter_conta_receber_v3 = obter
+    cfg = Settings(DATA_DIR=str(tmp_path))
+    estado = rot.EstadoML(pasta=tmp_path, cfg=cfg)
+    mp, ml_client = MagicMock(), MagicMock()
+    mp.pedir_liberacoes = None
+    rotina = rot.RotinaConciliacaoML(
+        estado=estado, cfg=cfg, tiny=tiny, fabrica_mp=lambda e: mp, fabrica_ml=lambda e: ml_client,
+        obter_token_tiny=lambda emp_id: "token-teste",
+    )
+    rotina.cfg.ML_LANCAR_CAIXA_NA_BAIXA = False
+
+    def rodar(dias, liberacoes, pedidos_ml, pedidos_tiny):
+        mp.liberacoes.return_value = liberacoes
+        ml_client.pedidos.return_value = pedidos_ml
+        tiny.pedidos_por_data.clear()
+        tiny.pedidos_por_data[f"{dias[0].isoformat()}_{dias[1].isoformat()}"] = pedidos_tiny
+        lidas.clear()
+        rotina.executar("manual", ["norvia_campinas"], de=dias[0], ate=dias[1])
+
+    lib_a = _lib(SOURCE_ID="7001", ORDER_ID="PED-7001", NET_CREDIT_AMOUNT="100.00", GROSS_AMOUNT="100.00")
+    lib_b = _lib(SOURCE_ID="7002", ORDER_ID="PED-7002", NET_CREDIT_AMOUNT="100.00", GROSS_AMOUNT="100.00")
+    ped_a = {"id": "PED-7001", "payments": [{"id": 7001}], "pack_id": None}
+    ped_b = {"id": "PED-7002", "payments": [{"id": 7002}], "pack_id": None}
+    tiny_a = {"id": 3001, "numeroPedidoEcommerce": "PED-7001", "cliente": {"nome": "Cliente A"}}
+    tiny_b = {"id": 3002, "numeroPedidoEcommerce": "PED-7002", "cliente": {"nome": "Cliente B"}}
+    dia = (date(2026, 9, 1), date(2026, 9, 1))
+
+    rodar(dia, [lib_a, lib_b], [ped_a, ped_b], [tiny_a, tiny_b])
+    assert len(estado.analise("consolidado_norvia_campinas").grupos) == 2
+    # De novo com as duas na janela: nenhuma conta relida uma a uma.
+    rodar(dia, [lib_a, lib_b], [ped_a, ped_b], [tiny_a, tiny_b])
+    assert lidas == []
+    # A venda B saiu da janela: só a conta dela é conferida.
+    rodar(dia, [lib_a], [ped_a], [tiny_a])
+    assert lidas == [902]

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Activity, CheckCircle, CircleCheck, Clock3, Download, Flag, Workflow } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Activity, CircleCheck, Clock3, Download, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { N8nLogo } from "@/components/ui/brand-logos";
 import { Button } from "@/components/ui/button";
@@ -13,8 +13,7 @@ import { HistoryFilter } from "@/components/history-filter";
 import { BatchExecutionView } from "@/components/batch-execution-view";
 import { isDateWithinFilter } from "@/lib/date-range-utils";
 import { groupExecutions } from "@/lib/batch-grouping";
-import { ReportIncidentModal } from "@/components/report-incident-modal";
-import { isExecutionReported, subscribeToIncidents } from "@/lib/incidents-store";
+import { ReportarErro } from "@/components/reportar-erro";
 import { downloadCsv } from "@/lib/csv-export";
 
 const STATUS_CSV_LABEL: Record<string, string> = {
@@ -54,14 +53,6 @@ export default function Executions({
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateRangeFilter>({ key: "all" });
   const [viewMode, setViewMode] = useState<"batch" | "flat">("batch");
-  const [reportingExecution, setReportingExecution] = useState<Execution | null>(null);
-  const [, setIncidentsVersion] = useState(0);
-
-  useEffect(() => {
-    return subscribeToIncidents(() => {
-      setIncidentsVersion((v) => v + 1);
-    });
-  }, []);
 
   // Filtra por status e intervalo de data simultaneamente
   const filtered = useMemo(() => {
@@ -110,6 +101,7 @@ export default function Executions({
           <div className="flex flex-wrap items-center gap-2">
             {/* Filtros de Status */}
             <div
+              // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- role explícito é intencional neste componente (a tag semântica alteraria estilo/comportamento do primitivo)
               role="group"
               aria-label="Filtrar execuções por status"
               className="status-filters"
@@ -169,7 +161,7 @@ export default function Executions({
           loading ? (
             <div className="table-loading">Consultando execuções…</div>
           ) : (
-            <SourceError message={error} />
+            <SourceError message={error} reportar={{ automationId: "accounts-payable", executionId: "painel" }} />
           )
         ) : filtered.length === 0 ? (
           <Empty>
@@ -196,7 +188,6 @@ export default function Executions({
             renderItemRow={(execution) => {
               const status = statusLabels[execution.status];
               const isError = execution.status === "error";
-              const reported = isExecutionReported(execution.id);
 
               return (
                 <TableRow key={execution.id} className="hover:bg-muted/40 text-sm transition-colors">
@@ -236,25 +227,12 @@ export default function Executions({
                   </TableCell>
                   <TableCell className="text-right">
                     {isError ? (
-                      reported ? (
-                        <span
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
-                          title="Incidente já encaminhado para a fila de resolução do administrador"
-                        >
-                          <CheckCircle size={12} />
-                          Reportado
-                        </span>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setReportingExecution(execution)}
-                          className="h-7 px-2.5 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:text-rose-700 hover:bg-rose-500/10 border-rose-500/30 gap-1.5 cursor-pointer shadow-2xs"
-                        >
-                          <Flag size={12} />
-                          Reportar
-                        </Button>
-                      )
+                      <ReportarErro
+                        automationId="accounts-payable"
+                        executionId={execution.id}
+                        stoppedNode={execution.stoppedNode ?? undefined}
+                        errorMessage={`Execução n8n #${execution.id} terminou com erro${execution.stoppedNode ? ` no nó "${execution.stoppedNode}"` : ""}`}
+                      />
                     ) : (
                       <span className="text-muted-foreground text-xs">—</span>
                     )}
@@ -262,17 +240,6 @@ export default function Executions({
                 </TableRow>
               );
             }}
-          />
-        )}
-
-        {reportingExecution && (
-          <ReportIncidentModal
-            isOpen={!!reportingExecution}
-            onClose={() => setReportingExecution(null)}
-            executionId={reportingExecution.id}
-            automationId="accounts-payable"
-            automationTitle="Contas a Pagar"
-            stoppedNode={reportingExecution.stoppedNode ?? undefined}
           />
         )}
 

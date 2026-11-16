@@ -1,6 +1,6 @@
 import io
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +35,8 @@ def _lib(**campos):
         "PACK_ID": "",
     }
     base.update({k: str(v) for k, v in campos.items()})
+    # O relatório traz a data da venda; sem dizer outra, a venda é do dia da liberação.
+    base.setdefault("TRANSACTION_APPROVAL_DATE", base["DATE"])
     return base
 
 
@@ -42,13 +44,16 @@ def _lib(**campos):
 LIBERACOES = [
     _lib(RECORD_TYPE="initial_available_balance", NET_CREDIT_AMOUNT="1000"),
     # Venda da Ana (pacote 3000...1, pedido 2000...1): bruto 110, tarifa 12,50, frete 7,50 -> líquido 90
+    # (venda aprovada em 30/08, dinheiro liberado em 01/09)
     _lib(SOURCE_ID="5001", NET_CREDIT_AMOUNT="90.00", GROSS_AMOUNT="110.00", MP_FEE_AMOUNT="-12.50",
-         SHIPPING_FEE_AMOUNT="-7.50", ORDER_ID="2000000000000001"),
+         SHIPPING_FEE_AMOUNT="-7.50", ORDER_ID="2000000000000001",
+         TRANSACTION_APPROVAL_DATE="2025-08-30T19:15:00.000-03:00"),
     # Venda do Bruno, localizada só pelo pedido do relatório (pagamento não consta no pedido do ML)
-    _lib(SOURCE_ID="5003", NET_CREDIT_AMOUNT="80.00", GROSS_AMOUNT="80.00", ORDER_ID="2000000000000002"),
+    _lib(SOURCE_ID="5003", NET_CREDIT_AMOUNT="80.00", GROSS_AMOUNT="80.00", ORDER_ID="2000000000000002",
+         TRANSACTION_APPROVAL_DATE=""),
     # Liberação que não fecha: bruto 50, tarifa 5, líquido 44 -> diferença de -1
     _lib(SOURCE_ID="5004", NET_CREDIT_AMOUNT="44.00", GROSS_AMOUNT="50.00", MP_FEE_AMOUNT="-5.00",
-         ORDER_ID="2000000000000003"),
+         ORDER_ID="2000000000000003", TRANSACTION_APPROVAL_DATE=""),
     # Dinheiro retido e liberado no mesmo pagamento: anula
     _lib(SOURCE_ID="5005", DESCRIPTION="reserve_for_dispute", NET_DEBIT_AMOUNT="30.00"),
     _lib(SOURCE_ID="5005", DESCRIPTION="reserve_for_dispute", NET_CREDIT_AMOUNT="30.00"),
@@ -59,15 +64,18 @@ LIBERACOES = [
     # Tipo desconhecido
     _lib(SOURCE_ID="5008", DESCRIPTION="novidade_mp", NET_CREDIT_AMOUNT="3.00"),
     # Liberação sem venda no ML nem pedido no relatório
-    _lib(SOURCE_ID="5999", NET_CREDIT_AMOUNT="30.00", GROSS_AMOUNT="30.00", DATE="2025-09-02T01:30:00Z"),
+    _lib(SOURCE_ID="5999", NET_CREDIT_AMOUNT="30.00", GROSS_AMOUNT="30.00", DATE="2025-09-02T01:30:00Z",
+         TRANSACTION_APPROVAL_DATE=""),
 ]
 # Linha repetida no relatório: vira pendência de conferência (não some, não baixa de novo)
 LIBERACOES.append(dict(LIBERACOES[-1]))
 
 PEDIDOS_ML = [
     {"id": 2000000000000001, "pack_id": 3000000000000001, "status": "paid", "payments": [{"id": 5001}]},
-    {"id": 2000000000000002, "pack_id": None, "status": "paid", "payments": [{"id": 9999}]},
-    {"id": 2000000000000003, "pack_id": None, "status": "paid", "payments": [{"id": 5004}]},
+    {"id": 2000000000000002, "pack_id": None, "status": "paid", "payments": [{"id": 9999}],
+     "date_closed": "2025-08-28T10:00:00.000-04:00"},
+    {"id": 2000000000000003, "pack_id": None, "status": "paid",
+     "payments": [{"id": 5004, "date_approved": "2025-08-29T02:00:00Z"}]},
 ]
 
 PEDIDOS_TINY = [
@@ -89,7 +97,7 @@ def test_data_sp_converte_utc_para_sao_paulo():
     assert ml.data_sp("2025-09-01T01:50:29Z") == date(2025, 8, 31)
     assert ml.data_sp("2025-09-01T10:00:00.000-03:00") == date(2025, 9, 1)
     assert ml.data_sp("15/09/2025") == date(2025, 9, 15)
-    assert ml.limpar_id(2000013231387746.0) == "2000013231387746"
+    assert ml.limpar_id(2000016459282530.0) == "2000016459282530"
     assert ml.limpar_id("1.23868190197E+11") == "123868190197"
 
 
@@ -116,6 +124,17 @@ def test_cruzar_vendas_pelo_pagamento_pelo_pedido_e_sem_venda():
     assert (ana.id_venda, ana.cpf_cnpj) == ("3000000000000001", "111.111.111-11")
 
 
+def test_data_da_venda_pelo_relatorio_senao_pelo_pedido():
+    movs = ml.expandir_liberacoes(LIBERACOES)
+    ml.cruzar_vendas(movs, PEDIDOS_ML, PEDIDOS_TINY)
+    grupos = {g.id_venda: g for g in ml.obter_grupos(movs)}
+    assert grupos["3000000000000001"].data_venda == "30/08/2025"  # TRANSACTION_APPROVAL_DATE
+    assert grupos["3000000000000001"].data == "01/09/2025"  # liberação
+    assert grupos["2000000000000003"].data_venda == "28/08/2025"  # aprovação do pagamento (UTC -> SP)
+    assert grupos["2000000000000002"].data_venda == "28/08/2025"  # pagamento não consta: fechamento do pedido
+    assert next(g for g in grupos.values() if not g.id_venda).data_venda == ""  # sem venda: baixa cai na liberação
+
+
 def test_divergencia_entre_pedido_do_relatorio_e_do_pagamento():
     libs = [_lib(SOURCE_ID="5001", NET_CREDIT_AMOUNT="10", GROSS_AMOUNT="10", ORDER_ID="2000000000000777")]
     movs = ml.expandir_liberacoes(libs)
@@ -135,13 +154,24 @@ def test_selecionar_conta_prefere_parcela_aberta_mais_baixa():
 
 
 def test_avaliar_conta_valor_acima_do_saldo_nao_e_apto():
-    g = ml.GrupoRecebimento(id="G", id_venda="1", indices=[0], chaves=["k"], valor_total=Decimal("110"), data="", nome_cliente="x")
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", id="G", id_venda="1", indices=[0], chaves=["k"], valor_total=Decimal("110"), data="", nome_cliente="x")
     ml.aplicar_conta_ao_grupo(g, {"id": 9, "situacao": "aberto", "valor": 100, "saldo": 100})
     ml.avaliar_conta(g)
     assert g.situacao == ml.SIT_VALOR_DIVERGENTE and not g.apto_baixa
     ml.aplicar_conta_ao_grupo(g, {"id": 9, "situacao": "parcial", "valor": 200, "saldo": 150})
     ml.avaliar_conta(g)
     assert g.apto_baixa and "Baixa parcial" in g.mensagem
+
+
+def test_resumo_conta_erro_na_baixa_que_pode_ser_marcado_de_novo():
+    a = _analisar()
+    a.grupos[0].situacao, a.grupos[0].conta_id = ml.SIT_ERRO_API, 9
+    a.grupos[1].situacao, a.grupos[1].conta_id = ml.SIT_ERRO_API, None
+    assert a.grupos[0].pode_baixar and not a.grupos[0].apto_baixa
+    assert not a.grupos[1].pode_baixar
+    res = ml.resumo(a)
+    assert res["aptos_baixa"] == 1
+    assert res["valor_aptos_baixa"] == float(a.grupos[0].valor_total)
 
 
 def test_analise_completa_sem_tiny():
@@ -245,7 +275,7 @@ def test_limites_periodo_em_utc():
 
 
 def test_cliente_mp_configura_pede_espera_e_baixa_relatorio():
-    listagens = [[], [{"id": 77, "file_name": "rel.csv", "status": "processed"}]]
+    listagens = [[], [], [{"id": 77, "file_name": "rel.csv", "status": "processed"}]]
     http = _HTTP({
         ("GET", "/release_report/config"): _Resp(404, {"message": "not found"}),
         ("POST", "/release_report/config"): _Resp(201, {}),
@@ -262,6 +292,63 @@ def test_cliente_mp_configura_pede_espera_e_baixa_relatorio():
     config = next(c for c in http.chamadas if c[0] == "POST" and c[1].endswith("/config"))
     assert {"key": "SOURCE_ID"} in config[3]["columns"] and config[3]["display_timezone"] == "GMT-03"
 
+
+def test_cliente_mp_reaproveita_relatorio_pronto_do_mesmo_periodo():
+    # A listagem devolve os prontos como "enabled"; gerado depois do fim do período, serve sem pedir outro.
+    agora_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pronto = {"id": 9, "file_name": "pronto.csv", "status": "enabled", "begin_date": "2025-09-01T03:00:00Z",
+              "end_date": "2025-09-02T02:59:59Z", "date_created": agora_utc}
+    antes_do_fim = {**pronto, "file_name": "incompleto.csv", "date_created": "2025-09-01T15:00:00Z"}
+    http = _HTTP({
+        ("GET", "/release_report/config"): _Resp(404, {"message": "not found"}),
+        ("POST", "/release_report/config"): _Resp(201, {}),
+        ("GET", "/release_report/list"): _Resp(200, [antes_do_fim, pronto]),
+        ("GET", "/release_report/pronto.csv"): _Resp(200, content=CSV),
+    })
+    cli = ClienteMercadoPago("norvia_campinas", lambda: "tok", http=http, cfg=Settings(), dormir=lambda s: None)
+    linhas = cli.liberacoes(date(2025, 9, 1), date(2025, 9, 1))
+    assert linhas[0]["NET_CREDIT_AMOUNT"] == "90.00"
+    assert not any(c[0] == "POST" and c[1].endswith("/v1/account/release_report") for c in http.chamadas)
+
+
+def test_cliente_mp_relatorio_enabled_na_listagem_conta_como_pronto():
+    listagens = [[], [{"id": 77, "file_name": "rel.csv", "status": "enabled"}]]
+    http = _HTTP({
+        ("GET", "/release_report/config"): _Resp(404, {"message": "not found"}),
+        ("POST", "/release_report/config"): _Resp(201, {}),
+        ("POST", "/v1/account/release_report"): _Resp(202, {"id": 77}),
+        ("GET", "/release_report/list"): lambda kw: _Resp(200, listagens.pop(0)),
+        ("GET", "/release_report/rel.csv"): _Resp(200, content=CSV),
+    })
+    cli = ClienteMercadoPago("norvia_campinas", lambda: "tok", http=http, cfg=Settings(), dormir=lambda s: None)
+    assert cli.liberacoes(date(2025, 9, 1), date(2025, 9, 1))[0]["NET_CREDIT_AMOUNT"] == "90.00"
+
+
+def test_cliente_mp_pedido_antecipado_nao_pede_de_novo_e_espera_depois():
+    # A rotina pede no início; liberacoes() só espera e baixa, sem um segundo POST.
+    listagens = [[], [], [{"id": 77, "file_name": "rel.csv", "status": "enabled"}]]
+    http = _HTTP({
+        ("GET", "/release_report/config"): _Resp(404, {"message": "not found"}),
+        ("POST", "/release_report/config"): _Resp(201, {}),
+        ("POST", "/v1/account/release_report"): _Resp(202, {"id": 77}),
+        ("GET", "/release_report/list"): lambda kw: _Resp(200, listagens.pop(0)),
+        ("GET", "/release_report/rel.csv"): _Resp(200, content=CSV),
+    })
+    cli = ClienteMercadoPago("revesta", lambda: "tok", http=http, cfg=Settings(), dormir=lambda s: None)
+    cli.pedir_liberacoes(date(2025, 9, 1), date(2025, 9, 1))
+    cli.pedir_liberacoes(date(2025, 9, 1), date(2025, 9, 1))
+    assert cli.liberacoes(date(2025, 9, 1), date(2025, 9, 1))[0]["NET_CREDIT_AMOUNT"] == "90.00"
+    posts = [c for c in http.chamadas if c[0] == "POST" and c[1].endswith("/v1/account/release_report")]
+    assert len(posts) == 1
+
+
+def test_cliente_ml_pedido_de_outro_vendedor_nao_e_token_recusado():
+    corpo = {"message": "The user has not access to the order.", "error": "not_owned_order", "status": 403}
+    http = _HTTP({("GET", "/orders/1711674360"): _Resp(403, corpo)})
+    assert ClienteMercadoLivre("norvia", lambda: "tok", http=http, cfg=Settings()).pedido("1711674360") is None
+    http = _HTTP({("GET", "/orders/5"): _Resp(403, {"error": "forbidden"})})
+    with pytest.raises(SemCredencial, match="403"):
+        ClienteMercadoLivre("norvia", lambda: "tok", http=http, cfg=Settings()).pedido("5")
 
 def test_cliente_mp_sem_token_e_401():
     with pytest.raises(SemCredencial):
@@ -398,6 +485,26 @@ def test_rotina_falha_numa_empresa_nao_para_a_outra(tmp_path):
     assert r.estado.ler()["avisos"][0]["tipo"] == "conciliacao_ml_erro"
 
 
+def test_rotina_pede_relatorio_de_todas_as_empresas_antes_de_conciliar(tmp_path):
+    eventos = []
+
+    class _MPAntecipado(_MP):
+        def __init__(self, emp_id):
+            self.emp_id = emp_id
+
+        def pedir_liberacoes(self, de, ate):
+            eventos.append(("pedir", self.emp_id))
+
+        def liberacoes(self, de, ate, progresso=None):
+            eventos.append(("baixar", self.emp_id))
+            return LIBERACOES
+
+    r = _rotina(tmp_path)
+    r.fabrica_mp = lambda e: _MPAntecipado(e.id)
+    r.executar("agendada", None, date(2025, 9, 1), date(2025, 9, 1))
+    assert eventos[:2] == [("pedir", "norvia_campinas"), ("pedir", "revesta")]
+    assert eventos[2:] == [("baixar", "norvia_campinas"), ("baixar", "revesta")]
+
 def test_rotina_nao_roda_duas_vezes_ao_mesmo_tempo(tmp_path):
     r = _rotina(tmp_path)
     r._executando.acquire()
@@ -424,7 +531,8 @@ def test_baixa_reconfere_registra_e_nao_repete(tmp_path):
     res = r.baixar(analise_id, aptos, usuario="Fulano")
     # Bruno foi pago por outra pessoa entre a análise e a baixa: pulado.
     assert (res["total_sucessos"], res["total_ignorados"], res["total_falhas"]) == (1, 1, 0)
-    assert tiny.baixas == [(10, {"valor_pago": 110.0, "data_pagamento": "01/09/2025",
+    # Baixa na data da venda (30/08), não na da liberação (01/09).
+    assert tiny.baixas == [(10, {"valor_pago": 110.0, "data_pagamento": "30/08/2025",
                                  "conta_destino_id": 702641458, "categoria_id": 882461346})]
     salva = r.estado.analise(analise_id)
     assert next(g for g in salva.grupos if g.conta_id == 10).situacao == ml.SIT_CONCILIADO
@@ -466,7 +574,7 @@ def client_rotina(tmp_path):
     from app.api import app
 
     r = _rotina(tmp_path)
-    with patch("app.api.ml_rotina", r), patch("app.api.ml_token_tiny", return_value="tok"):
+    with patch("app.routers.conciliacao_ml.ml_rotina", r), patch("app.routers.conciliacao_ml.ml_token_tiny", return_value="tok"):
         yield TestClient(app), r
 
 
@@ -511,14 +619,18 @@ def test_api_executar_listar_e_baixar(client_rotina):
     assert arq.status_code == 200 and "VENDAS%20X%20RECEBIMENTOS" in arq.headers["content-disposition"]
 
     aptos = [g["id"] for g in analise["grupos"] if g["apto_baixa"]]
-    baixa = _esperar(client, client.post(
+    inicio = client.post(
         "/api/v1/conciliacao-ml/jobs/baixar", json={"analise_id": analise_id, "grupos": aptos, "usuario": "Fulano"}
-    ).json())
+    ).json()
+    # Registro de treino: os aptos sugeridos e os grupos como a tela mostrou, antes da baixa.
+    assert inicio["treino"]["sugestao"]["baixar"] == aptos
+    assert {g["id"] for g in inicio["treino"]["contexto"]["grupos"]} == set(aptos)
+    baixa = _esperar(client, inicio)
     assert baixa["status"] == "concluido" and baixa["resultado"]["total_sucessos"] == 1
 
     st = client.get("/api/v1/conciliacao-ml/status").json()
     assert [e["id"] for e in st["empresas"]] == ["norvia_campinas", "revesta"]
-    assert st["ultima_execucao"]["tipo"] == "analise" and st["hora_diaria"] == 8
+    assert st["ultima_execucao"]["tipo"] == "analise" and st["hora_diaria"] == 5
 
     avisos = client.get("/api/v1/conciliacao-ml/avisos?depois_de=0").json()
     assert avisos["ultimo_id"] >= 1 and avisos["itens"][0]["tipo"] == "conciliacao_ml_pronta"
@@ -534,7 +646,7 @@ def test_api_executar_em_andamento_409(client_rotina):
 def test_api_baixa_sem_token_tiny_409(client_rotina):
     client, r = client_rotina
     ex = r.executar("manual", ["norvia_campinas"], date(2025, 9, 1), date(2025, 9, 1))
-    with patch("app.api.ml_token_tiny", return_value=None):
+    with patch("app.routers.conciliacao_ml.ml_token_tiny", return_value=None):
         res = client.post("/api/v1/conciliacao-ml/jobs/baixar",
                           json={"analise_id": ex["empresas"]["norvia_campinas"]["analise_id"], "grupos": ["G-0"]})
     assert res.status_code == 409
@@ -604,7 +716,7 @@ def test_token_mp_prioridade_oauth_e_fallback():
 def test_normalizar_id_final_e_cashback_regex():
     assert ml.normalizar_id_final("cashback_1431390928") == ("cashback_1431390928", "1431390928")
     assert ml.normalizar_id_final("CASHBACK_987654321") == ("cashback_987654321", "987654321")
-    assert ml.normalizar_id_final("2000008695371397") == ("2000008695371397", None)
+    assert ml.normalizar_id_final("2000017903324316") == ("2000017903324316", None)
     assert ml.normalizar_id_final("") == ("", None)
     assert ml.normalizar_id_final(None) == ("", None)
 
@@ -676,7 +788,7 @@ def test_multiplas_baixas_parciais_e_idempotencia():
         "valorPago": "40.00",
     }
     # 1ª Baixa parcial: R$ 35,00
-    grupo1 = ml.GrupoRecebimento(
+    grupo1 = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-1",
         id_venda="9001",
         indices=[0],
@@ -693,7 +805,7 @@ def test_multiplas_baixas_parciais_e_idempotencia():
     assert "Baixa parcial" in grupo1.mensagem
 
     # Se o valor passar do saldo restante (ex: R$ 70,00 quando o saldo é R$ 60,00) -> divergente
-    grupo_excesso = ml.GrupoRecebimento(
+    grupo_excesso = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-2",
         id_venda="9001",
         indices=[1],
@@ -741,9 +853,10 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
             "RECORD_TYPE": "release",
             "DESCRIPTION": "shipping",
             "DATE": "10/08/2026",
+            "TRANSACTION_APPROVAL_DATE": "05/08/2026",
             "SOURCE_ID": "168827487964",
-            "ORDER_ID": "2000017418947554",
-            "PACK_ID": "2000014021072793",
+            "ORDER_ID": "2000026528798233",
+            "PACK_ID": "2000090005358847",
             "NET_CREDIT_AMOUNT": "44.05",
             "NET_DEBIT_AMOUNT": "0.00",
             "GROSS_AMOUNT": "44.05",
@@ -752,9 +865,10 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
             "RECORD_TYPE": "release",
             "DESCRIPTION": "payment",
             "DATE": "10/08/2026",
+            "TRANSACTION_APPROVAL_DATE": "05/08/2026",
             "SOURCE_ID": "168827773708",
-            "ORDER_ID": "2000017418947554",
-            "PACK_ID": "2000014021072793",
+            "ORDER_ID": "2000026528798233",
+            "PACK_ID": "2000090005358847",
             "NET_CREDIT_AMOUNT": "133.78",
             "NET_DEBIT_AMOUNT": "0.00",
             "GROSS_AMOUNT": "133.78",
@@ -770,8 +884,8 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
     # Pedido no ML com o pack_id
     pedidos_ml = [
         {
-            "id": 2000017418947554,
-            "pack_id": 2000014021072793,
+            "id": 2000026528798233,
+            "pack_id": 2000090005358847,
             "status": "paid",
             "payments": [{"id": 168827773708}],
             "order_items": [{"item": {"id": "MLB5211415434"}}],
@@ -779,7 +893,7 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
     ]
     pedidos_tiny = [
         {
-            "ecommerce": {"numeroPedidoEcommerce": "2000014021072793"},
+            "ecommerce": {"numeroPedidoEcommerce": "2000090005358847"},
             "cliente": {"nome": "Alfredo Exemplo", "cpfCnpj": "123.456.789-00"},
         }
     ]
@@ -789,7 +903,7 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
     assert len(comp) == 1
     assert comp[0].valor_liberado == Decimal("177.83")
     assert comp[0].nome_cliente == "Alfredo Exemplo"
-    assert comp[0].id_pacote == "2000014021072793"
+    assert comp[0].id_pacote == "2000090005358847"
 
     # Lançamentos de caixa: nenhum lançamento de caixa avulso deve ser gerado para o frete!
     resultado_lanc = ml.gerar_lancamentos(movs, "Mercado Livre - NORVIA")
@@ -810,7 +924,7 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
         "saldo": 177.83,
         "valorPago": 0.0,
         "situacao": "aberto",
-        "historico": "Ref. ao pedido de venda nº 32171, Alfredo Exemplo - OC nº 2000014021072793",
+        "historico": "Ref. ao pedido de venda nº 32171, Alfredo Exemplo - OC nº 2000090005358847",
     }
     ml.aplicar_conta_ao_grupo(g, conta_tiny)
     ml.avaliar_conta(g)
@@ -820,9 +934,8 @@ def test_venda_com_frete_unificada_e_baixa_categorias_distintas():
 
 
 def test_rotina_baixar_com_frete_chama_categorias_distintas():
-    from app.ml_reconciliation_rotina import RotinaConciliacaoML, ResolvedorTiny
+    from app.ml_reconciliation_rotina import RotinaConciliacaoML
 
-    empresa = ml.EMPRESAS_ML["norvia_campinas"]
     tiny_mock = MagicMock()
     tiny_mock.obter_conta_receber_v3.return_value = {
         "id": 895293685,
@@ -837,9 +950,9 @@ def test_rotina_baixar_com_frete_chama_categorias_distintas():
     rotina = RotinaConciliacaoML(estado=estado_mock, tiny=tiny_mock, cfg=Settings())
 
     # Mock da análise
-    grupo = ml.GrupoRecebimento(
+    grupo = ml.GrupoRecebimento(data_venda="01/09/2025", 
         id="G-1",
-        id_venda="2000014021072793",
+        id_venda="2000090005358847",
         indices=[0, 1],
         chaves=["k1", "k2"],
         valor_total=Decimal("177.83"),
@@ -878,21 +991,69 @@ def test_rotina_baixar_com_frete_chama_categorias_distintas():
 
     # Verifica as duas chamadas a baixar_conta_receber_v3:
     # 1. Parcela de produtos com categoria de vendas (882461346)
-    # 2. Parcela de frete com categoria de frete (489820971)
+    # 2. Parcela de frete com categoria de frete (900000001)
     chamadas = tiny_mock.baixar_conta_receber_v3.call_args_list
     assert len(chamadas) == 2
 
     # Primeira chamada: produtos
     args1, kwargs1 = chamadas[0]
     assert args1[1] == 895293685
-    assert kwargs1["valor_pago"] == 133.78
+    assert kwargs1["valor_pago"] == Decimal("133.78")
     assert kwargs1["categoria_id"] == 882461346
 
     # Segunda chamada: frete
     args2, kwargs2 = chamadas[1]
     assert args2[1] == 895293685
-    assert kwargs2["valor_pago"] == 44.05
-    assert kwargs2["categoria_id"] == 489820971
+    assert kwargs2["valor_pago"] == Decimal("44.05")
+    assert kwargs2["categoria_id"] == 900000001
+
+
+
+def test_avaliar_conta_sem_parte_ja_baixada():
+    # Produto já baixado numa tentativa anterior: no Tiny sobra só o frete em aberto.
+    g = ml.GrupoRecebimento(data_venda="01/09/2025", id="G", id_venda="1", indices=[0], chaves=["k"],
+                            valor_total=Decimal("177.83"), valor_produtos=Decimal("133.78"),
+                            valor_frete=Decimal("44.05"), data="", nome_cliente="x")
+    ml.aplicar_conta_ao_grupo(g, {"id": 9, "situacao": "parcial", "valor": 177.83, "saldo": 44.05, "valorPago": 133.78})
+    ml.avaliar_conta(g)
+    assert g.situacao == ml.SIT_VALOR_DIVERGENTE
+    ml.avaliar_conta_sem_parte(g, "prod")
+    assert g.apto_baixa
+    # A análise continua com o valor cheio.
+    assert (g.valor_total, g.valor_produtos, g.valor_frete) == (Decimal("177.83"), Decimal("133.78"), Decimal("44.05"))
+
+
+def test_rotina_repete_erro_na_baixa_so_com_o_frete_quando_o_produto_ja_entrou():
+    from app.ml_reconciliation_rotina import RotinaConciliacaoML
+
+    tiny_mock = MagicMock()
+    tiny_mock.obter_conta_receber_v3.return_value = {
+        "id": 895327187, "valor": 177.83, "saldo": 44.05, "valorPago": 133.78, "situacao": "parcial",
+    }
+    estado_mock = MagicMock()
+    estado_mock.ler.return_value = {
+        "baixas_partes": {"norvia_campinas|895327187|2000097277384891|prod": "2026-10-29T11:03:13-03:00"},
+    }
+    rotina = RotinaConciliacaoML(estado=estado_mock, tiny=tiny_mock, cfg=Settings())
+    grupo = ml.GrupoRecebimento(data_venda="01/09/2025", id="G-1", id_venda="2000097277384891", indices=[0, 1],
+                                chaves=["k1", "k2"], valor_total=Decimal("177.83"), valor_produtos=Decimal("133.78"),
+                                valor_frete=Decimal("44.05"), data="10/08/2026", nome_cliente="Leticia",
+                                conta_id=895327187, conta_situacao="aberto", conta_saldo=Decimal("177.83"),
+                                situacao=ml.SIT_ERRO_API)
+    estado_mock.analise.return_value = ml.Analise(
+        id="a", empresa_id="norvia_campinas", empresa_nome="Norvia Campinas",
+        conta_lancamento="Mercado Livre - NORVIA", criada_em="2026-10-29T00:00:00", periodo_de="2026-08-10",
+        periodo_ate="2026-08-10", origem="manual", execucao_id="ex1", movimentos=[], grupos=[grupo],
+        lancamentos=ml.ResultadoLancamentos(), comparativo=[], fontes={}, tiny_consultado=True,
+    )
+    rotina.obter_token_tiny = MagicMock(return_value="fake_token")
+
+    res = rotina.baixar("a", ["G-1"])
+    assert res["total_sucessos"] == 1
+    chamadas = tiny_mock.baixar_conta_receber_v3.call_args_list
+    assert len(chamadas) == 1  # o produto não é baixado de novo
+    assert chamadas[0].kwargs["valor_pago"] == Decimal("44.05")
+    assert chamadas[0].kwargs["categoria_id"] == 900000001
 
 
 def test_pack_id_indexado_e_fallback_ml_api():
@@ -981,8 +1142,47 @@ def test_nome_cliente_longo_vai_cortado_em_50_para_o_tiny():
     from app.tiny_client import TinyClient
 
     client = TinyClient(token="mock_token")
-    nome = "Instituto Vital Brazil Sa (centro de Pesquisas, Produtos Quimicos e Biologicos)"
+    nome = "Instituto Exemplo Sa (centro de Pesquisas)"
     with patch.object(TinyClient, "_fetch_paginated_v3_itens", return_value=[]) as fetch:
         client.list_contas_receber_v3("tok", nome_cliente=nome, estrito=True)
     enviado = fetch.call_args.args[2]["nomeCliente"]
     assert len(enviado) <= 50 and nome.startswith(enviado)
+
+
+def test_empresas_rodam_em_paralelo_e_o_log_sai_em_blocos(tmp_path):
+    """06/11/2026: em série, ~2h30 com uma empresa esperando a outra no Tiny (fila por conta)."""
+    import threading
+
+    juntas = threading.Barrier(2, timeout=5)
+
+    class _MPJuntas(_MP):
+        def liberacoes(self, de, ate, progresso=None):
+            juntas.wait()  # só passa se as duas empresas estiverem rodando ao mesmo tempo
+            return LIBERACOES
+
+    r = _rotina(tmp_path)
+    r.fabrica_mp = lambda e: _MPJuntas()
+    ex = r.executar("manual", ["norvia_campinas", "revesta"], date(2025, 9, 1), date(2025, 9, 2))
+    assert [ex["empresas"][e]["status"] for e in ("norvia_campinas", "revesta")] == ["ok", "ok"]
+    ordem = [l["empresa"] for l in ex["log"] if l["empresa"]]
+    assert ordem == sorted(ordem, key=lambda e: e != "Norvia Campinas"), "bloco de Campinas, depois Revesta"
+    assert ex["log"][-1]["mensagem"] == "Execução concluída (ok)."
+
+
+def test_paralelo_desligado_roda_uma_empresa_depois_da_outra(tmp_path, monkeypatch):
+    ativas, maximo = [0], [0]
+
+    class _MPConta(_MP):
+        def liberacoes(self, de, ate, progresso=None):
+            ativas[0] += 1
+            maximo[0] = max(maximo[0], ativas[0])
+            try:
+                return LIBERACOES
+            finally:
+                ativas[0] -= 1
+
+    r = _rotina(tmp_path)
+    r.fabrica_mp = lambda e: _MPConta()
+    monkeypatch.setattr(r.cfg, "ML_RECONCILIATION_PARALELO", False)
+    ex = r.executar("manual", ["norvia_campinas", "revesta"], date(2025, 9, 1), date(2025, 9, 2))
+    assert ex["status"] == "ok" and maximo[0] == 1

@@ -1,12 +1,10 @@
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
-import pytest
 
 from app.inter_client import InterTransacao
 from app.reconciliation import (
     MatchMethod,
-    ReconciliationMatch,
     _normalize_name,
     match_transactions,
     match_transactions_ja_baixadas,

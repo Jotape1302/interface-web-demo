@@ -31,3 +31,6 @@ pymysql>=1.1.1  # CVE-2024-36039
 
 # Planilhas (conciliação Mercado Livre)
 openpyxl>=3.1.2
+
+# Fuso America/Sao_Paulo (zoneinfo) em imagens slim sem tzdata do sistema
+tzdata>=2024.1

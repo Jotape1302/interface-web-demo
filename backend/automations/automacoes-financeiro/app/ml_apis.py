@@ -24,6 +24,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -31,11 +32,11 @@ from urllib.parse import urlparse
 import requests
 
 from app.config import Settings, settings
+from app.fuso import FUSO_SP
+from app.http_retry import METODOS_IDEMPOTENTES, MAX_TENTATIVAS, deve_repetir, espera_segundos, retry_after_segundos
 
 logger = logging.getLogger("automacao_nfe.ml_apis")
 
-# Brasil sem horário de verão desde 2019: o fuso de São Paulo é fixo em -03:00.
-FUSO_SP = timezone(timedelta(hours=-3))
 
 # Colunas pedidas no relatório de Liberações (chaves em inglês, estáveis para a leitura).
 COLUNAS_LIBERACOES = (
@@ -61,6 +62,8 @@ COLUNAS_LIBERACOES = (
     "BALANCE_AMOUNT",
 )
 COLUNAS_OBRIGATORIAS = ("DATE", "SOURCE_ID", "DESCRIPTION", "NET_CREDIT_AMOUNT", "NET_DEBIT_AMOUNT")
+# Status de relatório pronto. A listagem (/release_report/list) devolve os prontos como "enabled".
+STATUS_RELATORIO_PRONTO = ("processed", "ready", "available", "completed", "done", "finished", "ok", "success", "enabled")
 
 Progresso = Callable[[str], None]
 
@@ -544,7 +547,7 @@ def renovar_token_ml(conta_ml: str, cfg: Optional[Settings] = None, forcar: bool
                         if ref_token:
                             break
                     except Exception:
-                        pass
+                        logger.warning("Cache de tokens do ML ilegível em %s; ignorado", arq, exc_info=True)
 
             if ref_token:
                 dados_oauth = renovar_token_ml_oauth(conta_ml, ref_token, cfg)
@@ -744,15 +747,16 @@ class _ClienteHTTP:
 
     def _chamar(self, metodo: str, caminho: str, descricao: str, bruto: bool = False, **kwargs: Any) -> Any:
         renovacao_tentada = False
-        for tentativa in (1, 2, 3):
+        for tentativa in range(1, MAX_TENTATIVAS + 1):
             token_atual = self._token()
             headers = {"Authorization": f"Bearer {token_atual}", "Accept": "application/json"}
             try:
                 resp = self.http.request(metodo, f"{self.base_url}{caminho}", headers=headers, timeout=60, **kwargs)
             except requests.RequestException as e:
-                if tentativa == 3:
+                # Escrita (ex.: POST do release_report) não repete às cegas: o servidor pode ter recebido.
+                if tentativa == MAX_TENTATIVAS or metodo.upper() not in METODOS_IDEMPOTENTES:
                     raise APIMercadoError(f"{self.nome}: falha de rede ao {descricao}: {e}") from e
-                time.sleep(3 * tentativa)
+                time.sleep(espera_segundos(tentativa))
                 continue
             if resp.status_code == 401:
                 if not renovacao_tentada and self._renovar_token:
@@ -772,8 +776,9 @@ class _ClienteHTTP:
                 raise SemCredencial(
                     f"{self.nome}: token sem permissão (HTTP 403) ao {descricao}: {resp.text[:200]}", resp.status_code
                 )
-            if (resp.status_code == 429 or resp.status_code >= 500) and tentativa < 3:
-                time.sleep(5 * tentativa)
+            # 429 repete qualquer método; 5xx só leitura (escrita pode ter sido gravada).
+            if deve_repetir(metodo, resp.status_code) and tentativa < MAX_TENTATIVAS:
+                time.sleep(espera_segundos(tentativa, retry_after_segundos(resp)))
                 continue
             if not 200 <= resp.status_code < 300:
                 raise APIMercadoError(
@@ -839,6 +844,8 @@ class ClienteMercadoPago(_ClienteHTTP):
         self.cfg = cfg or settings
         self.empresa_id = empresa_id
         self._dormir = dormir
+        # Relatórios já pedidos por período: {(de, ate): {"id", "pedido_em", "arquivo"}}.
+        self._pedidos: Dict[Tuple[date, date], Dict[str, Any]] = {}
         renovador = renovar_token or (lambda: self._renovar_oauth())
         super().__init__(base_url or self.cfg.MP_API_URL, obter_token, http, renovar_token=renovador)
 
@@ -847,6 +854,100 @@ class ClienteMercadoPago(_ClienteHTTP):
             if k.startswith(f"{self.empresa_id}:"):
                 _MP_OAUTH_TOKEN_CACHE.pop(k, None)
         return self._obter_token()
+
+    def data_aprovacao(self, pagamento_id: str) -> Optional[str]:
+        """`date_approved` de um pagamento pelo ID (sem limite de período, ao contrário do
+        relatório de liberações): completa a data da venda de recebimentos antigos."""
+        try:
+            pagamento = self._chamar("GET", f"/v1/payments/{pagamento_id}", f"buscar o pagamento {pagamento_id}")
+        except APIMercadoError as e:
+            if e.status == 404:
+                return None
+            raise
+        pagamento = pagamento if isinstance(pagamento, dict) else {}
+        return pagamento.get("date_approved") or pagamento.get("date_created") or None
+
+    def pedido_do_pagamento(self, pagamento_id: str) -> str:
+        """Pedido do Mercado Livre ao qual o pagamento pertence (`order.id` do pagamento). Só
+        identifica a venda: os valores continuam os do relatório. Sem pedido ou inexistente = ""."""
+        try:
+            pagamento = self._chamar("GET", f"/v1/payments/{pagamento_id}", f"buscar o pedido do pagamento {pagamento_id}")
+        except APIMercadoError as e:
+            if e.status == 404:
+                return ""
+            raise
+        ordem = (pagamento.get("order") if isinstance(pagamento, dict) else None) or {}
+        oid = ordem.get("id")
+        if isinstance(oid, (int, float)) and not isinstance(oid, bool):
+            return str(int(oid))
+        return str(oid or "").strip()
+
+    def cupom_vendedor(self, pagamento_id: str) -> Decimal:
+        """Cupom pago pelo vendedor no pagamento (`fee_details` com type=coupon_fee e
+        fee_payer=collector). O relatório de liberações deixa COUPON_AMOUNT vazio e o valor sai
+        como "Diferença na liberação" (Revesta, 2026-11). Pagamento inexistente = 0."""
+        try:
+            pagamento = self._chamar("GET", f"/v1/payments/{pagamento_id}", f"buscar o cupom do pagamento {pagamento_id}")
+        except APIMercadoError as e:
+            if e.status == 404:
+                return Decimal("0")
+            raise
+        pagamento = pagamento if isinstance(pagamento, dict) else {}
+        total = Decimal("0")
+        for taxa in pagamento.get("fee_details") or []:
+            if (taxa or {}).get("type") == "coupon_fee" and (taxa or {}).get("fee_payer") == "collector":
+                try:
+                    total += abs(Decimal(str(taxa.get("amount") or 0)))
+                except (InvalidOperation, ValueError):
+                    continue
+        return total
+
+    def acrescimo_comprador(self, pagamento_id: str) -> Decimal:
+        """Acréscimo pago pelo comprador no parcelamento (`charges_details` com name=financing_transfer
+        e accounts.from=payer; original − refunded). Está dentro dos "Custos de parcelamento" do
+        relatório e o Tiny tem o preço sem ele (Campinas, 2026-11). Pagamento inexistente = 0."""
+        try:
+            pagamento = self._chamar("GET", f"/v1/payments/{pagamento_id}", f"buscar o acréscimo do pagamento {pagamento_id}")
+        except APIMercadoError as e:
+            if e.status == 404:
+                return Decimal("0")
+            raise
+        pagamento = pagamento if isinstance(pagamento, dict) else {}
+        total = Decimal("0")
+        for cobranca in pagamento.get("charges_details") or []:
+            cobranca = cobranca or {}
+            if cobranca.get("name") != "financing_transfer" or (cobranca.get("accounts") or {}).get("from") != "payer":
+                continue
+            valores = cobranca.get("amounts") or {}
+            try:
+                total += Decimal(str(valores.get("original") or 0)) - Decimal(str(valores.get("refunded") or 0))
+            except (InvalidOperation, ValueError):
+                continue
+        return total if total > 0 else Decimal("0")
+
+    def cobrancas_tarifa(self, pagamento_id: str) -> List[Tuple[str, Decimal]]:
+        """Cobranças do vendedor no pagamento (`charges_details` com type=fee e accounts.from=collector),
+        como (nome, original − refunded). Base da divisão da tarifa de venda nas partes que o Tiny
+        lança (12/11/2026). Pagamento inexistente = []."""
+        try:
+            pagamento = self._chamar("GET", f"/v1/payments/{pagamento_id}", f"buscar as tarifas do pagamento {pagamento_id}")
+        except APIMercadoError as e:
+            if e.status == 404:
+                return []
+            raise
+        pagamento = pagamento if isinstance(pagamento, dict) else {}
+        saida: List[Tuple[str, Decimal]] = []
+        for cobranca in pagamento.get("charges_details") or []:
+            cobranca = cobranca or {}
+            if cobranca.get("type") != "fee" or (cobranca.get("accounts") or {}).get("from") != "collector":
+                continue
+            valores = cobranca.get("amounts") or {}
+            try:
+                liquido = Decimal(str(valores.get("original") or 0)) - Decimal(str(valores.get("refunded") or 0))
+            except (InvalidOperation, ValueError):
+                continue
+            saida.append((str(cobranca.get("name") or ""), liquido))
+        return saida
 
     def garantir_configuracao(self) -> None:
         """
@@ -878,36 +979,61 @@ class ClienteMercadoPago(_ClienteHTTP):
         resposta = self._chamar("GET", "/v1/account/release_report/list", "listar os relatórios de liberações")
         return resposta if isinstance(resposta, list) else (resposta.get("results") or [])
 
-    def liberacoes(self, de: date, ate: date, progresso: Optional[Progresso] = None) -> List[Dict[str, str]]:
-        """Gera o relatório do período (datas de São Paulo), espera ficar pronto e devolve as linhas."""
+    def pedir_liberacoes(self, de: date, ate: date) -> None:
+        """
+        Pede o relatório do período sem esperar ficar pronto. A rotina pede o de todas as empresas
+        logo no início: o Mercado Pago chega a levar mais de 40 min, e o de uma empresa vai sendo
+        gerado enquanto a anterior é conciliada. Chamar de novo para o mesmo período não pede outro.
+        """
+        if (de, ate) in self._pedidos:
+            return
         self.garantir_configuracao()
         inicio, fim = limites_periodo(de, ate)
+        # Relatório do mesmo período já pronto (ex.: o de uma execução que desistiu de esperar e que o
+        # Mercado Pago terminou depois): não pede outro, que pode demorar de novo.
+        existente = self._achar_relatorio_existente(inicio, fim)
+        if existente:
+            logger.info(f"[CONCILIACAO_ML] [{self.empresa_id}] Reaproveitando relatório de liberações já pronto: {existente}")
+            self._pedidos[(de, ate)] = {"id": None, "pedido_em": None, "arquivo": existente}
+            return
         pedido_em = datetime.now(timezone.utc) - timedelta(minutes=2)
         criado = self._chamar(
             "POST", "/v1/account/release_report", "pedir o relatório de liberações",
             json={"begin_date": inicio, "end_date": fim},
         ) or {}
         relatorio_id = criado.get("id") if isinstance(criado, dict) else None
+        arquivo = None
 
         # Se a API já devolveu o arquivo pronto na criação
         if isinstance(criado, dict):
             nome_imediato = criado.get("file_name") or criado.get("fileName")
             status_imediato = str(criado.get("status") or "").lower()
             if nome_imediato and (
-                status_imediato in ("processed", "ready", "available", "completed", "done", "finished", "ok", "success")
+                status_imediato in STATUS_RELATORIO_PRONTO
                 or not status_imediato
             ):
                 logger.info(f"[CONCILIACAO_ML] [{self.empresa_id}] Relatório devolvido imediatamente no POST: {nome_imediato}")
-                resp = self._chamar(
-                    "GET", f"/v1/account/release_report/{nome_imediato}", "baixar o relatório de liberações", bruto=True
-                )
-                return ler_csv_liberacoes(resp.content)
+                arquivo = nome_imediato
+        self._pedidos[(de, ate)] = {"id": relatorio_id, "pedido_em": pedido_em, "arquivo": arquivo}
 
+    def liberacoes(self, de: date, ate: date, progresso: Optional[Progresso] = None) -> List[Dict[str, str]]:
+        """Gera o relatório do período (datas de São Paulo), espera ficar pronto e devolve as linhas."""
+        self.pedir_liberacoes(de, ate)
+        pedido = self._pedidos.pop((de, ate))
+        arquivo = pedido["arquivo"]
+        if arquivo:
+            resp = self._chamar("GET", f"/v1/account/release_report/{arquivo}", "baixar o relatório de liberações", bruto=True)
+            return ler_csv_liberacoes(resp.content)
+        relatorio_id = pedido["id"]
+        inicio, fim = limites_periodo(de, ate)
+
+        # O prazo conta a partir daqui, não do pedido: pedido no início da execução, o relatório
+        # de uma empresa ganha o tempo da conciliação das anteriores além da espera.
         limite = time.monotonic() + self.cfg.ML_RECONCILIATION_RELATORIO_TIMEOUT_SECONDS
         espera = 10.0
         inicio_espera = time.monotonic()
         while True:
-            arquivo = self._achar_arquivo(relatorio_id, inicio, fim, pedido_em)
+            arquivo = self._achar_arquivo(relatorio_id, inicio, fim, pedido["pedido_em"])
             if arquivo:
                 logger.info(f"[CONCILIACAO_ML] [{self.empresa_id}] Baixando relatório de liberações: {arquivo}")
                 resp = self._chamar(
@@ -930,16 +1056,20 @@ class ClienteMercadoPago(_ClienteHTTP):
             espera = min(espera * 1.5, 60.0)
 
     def _achar_relatorio_existente(self, inicio: str, fim: str) -> Optional[str]:
-        """Busca se já há um relatório concluído para o período gerado nas últimas 24 horas."""
+        """
+        Relatório pronto do mesmo período, gerado nas últimas 24 horas e depois do fim do período
+        (gerado antes, ficaria sem as liberações finais). Sem data de criação, não reaproveita.
+        """
         limite_recente = datetime.now(timezone.utc) - timedelta(hours=24)
+        fim_periodo = _parse_dt(fim)
         for item in self._listar():
             nome = item.get("file_name") or item.get("fileName") or item.get("name")
             status = str(item.get("status") or item.get("report_status") or "").lower()
-            if not nome or (status and status not in ("processed", "ready", "available", "completed", "done", "finished", "ok", "success")):
+            if not nome or (status and status not in STATUS_RELATORIO_PRONTO):
                 continue
             mesmo_periodo = _mesmo_instante(item.get("begin_date"), inicio) and _mesmo_instante(item.get("end_date"), fim)
             criado = _parse_dt(item.get("date_created") or item.get("generation_date"))
-            if mesmo_periodo and (criado is None or criado >= limite_recente):
+            if mesmo_periodo and criado is not None and criado >= limite_recente and fim_periodo and criado > fim_periodo:
                 return str(nome)
         return None
 
@@ -955,7 +1085,7 @@ class ClienteMercadoPago(_ClienteHTTP):
                 logger.info(f"[CONCILIACAO_ML] [{self.empresa_id}] Tarefa {task_id}: status='{status}', arquivo={nome}")
                 if status in ("error", "failed", "rejected"):
                     raise APIMercadoError(f"Mercado Pago: geração do relatório falhou na tarefa {task_id} (status: {status}).")
-                if nome and status in ("processed", "ready", "available", "completed", "done", "finished", "ok", "success", ""):
+                if nome and status in STATUS_RELATORIO_PRONTO + ("",):
                     return str(nome)
         except APIMercadoError:
             raise
@@ -984,7 +1114,7 @@ class ClienteMercadoPago(_ClienteHTTP):
                 if status in ("error", "failed", "rejected"):
                     raise APIMercadoError(f"Mercado Pago: o relatório {relatorio_id} falhou com status '{status}'.")
                 if nome and (
-                    status in ("processed", "ready", "available", "completed", "done", "finished", "ok", "success")
+                    status in STATUS_RELATORIO_PRONTO
                     or not status
                 ):
                     return str(nome)
@@ -992,7 +1122,7 @@ class ClienteMercadoPago(_ClienteHTTP):
             # Correspondência por período
             if not nome:
                 continue
-            if status and status not in ("processed", "ready", "available", "completed", "done", "finished", "ok", "success"):
+            if status and status not in STATUS_RELATORIO_PRONTO:
                 continue
             mesmo_periodo = _mesmo_instante(item.get("begin_date"), inicio) and _mesmo_instante(item.get("end_date"), fim)
             criado = _parse_dt(item.get("date_created") or item.get("generation_date"))
@@ -1083,6 +1213,13 @@ class ClienteMercadoLivre(_ClienteHTTP):
     def pedido(self, pedido_id: str) -> Optional[Dict[str, Any]]:
         try:
             return self._chamar("GET", f"/orders/{pedido_id}", f"buscar o pedido {pedido_id}")
+        except SemCredencial as e:
+            # 403 "not_owned_order": o pedido do relatório é de outro vendedor (ex.: compra feita pela
+            # própria conta). Não é token recusado: a venda segue pelo relatório do Mercado Pago.
+            if e.status == 403 and "not_owned_order" in str(e):
+                logger.info(f"[CONCILIACAO_ML] Pedido {pedido_id} não pertence à conta {self.conta_ml}; ignorado.")
+                return None
+            raise
         except APIMercadoError as e:
             if e.status == 404:
                 try:
@@ -1101,6 +1238,6 @@ class ClienteMercadoLivre(_ClienteHTTP):
                                     p_obj["pack_id"] = pedido_id
                                     return p_obj
                 except Exception:
-                    pass
+                    logger.debug("Falha ao resolver o pack %s pelos pedidos", pedido_id, exc_info=True)
                 return None
             raise

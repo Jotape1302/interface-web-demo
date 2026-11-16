@@ -4,7 +4,7 @@ import type { AuditService } from "../audit.js";
 import type { NotificationService } from "../notifications.js";
 import { createLoginThrottle } from "../login-throttle.js";
 import { PublicError } from "../errors.js";
-import { extractToken, parseJsonBody, requireSession, sendError, type RequestContext } from "../http.js";
+import { extractToken, parseJsonBody, requireSession, sendError, type RequestContext, parseJsonObject } from "../http.js";
 
 // Rotas de autenticação e do próprio perfil (/api/auth/*).
 export function createAuthRoutes(deps: { auth: AuthService; notifications?: NotificationService; audit?: AuditService }) {
@@ -25,7 +25,7 @@ export function createAuthRoutes(deps: { auth: AuthService; notifications?: Noti
 
     if (path === "/api/auth/register" && method === "POST") {
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         const { created, ...res } = await auth.register(body);
         // Mesma resposta para e-mail novo e repetido (não revela cadastro existente);
         // só o cadastro novo de fato avisa quem pode aprovar (admins + gestores com a ação).
@@ -46,7 +46,7 @@ export function createAuthRoutes(deps: { auth: AuthService; notifications?: Noti
     if (path === "/api/auth/login" && method === "POST") {
       let login = "";
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         login = typeof body.login === "string" ? body.login.trim().slice(0, 255) : "";
         const lockedFor = loginThrottle.check(login, ctx.ip);
         if (lockedFor > 0) {
@@ -128,7 +128,7 @@ export function createAuthRoutes(deps: { auth: AuthService; notifications?: Noti
       const session = await requireSession(ctx, auth);
       if (!session) return true;
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         const result = await auth.requestChangeUsername(session.user.id, body.novoUsername);
         void audit?.record({
           actor: session.user,
@@ -155,7 +155,7 @@ export function createAuthRoutes(deps: { auth: AuthService; notifications?: Noti
       const session = await requireSession(ctx, auth);
       if (!session) return true;
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         const result = await auth.requestChangeEmail(session.user.id, body.novoEmail);
         void audit?.record({
           actor: session.user,
@@ -182,7 +182,7 @@ export function createAuthRoutes(deps: { auth: AuthService; notifications?: Noti
       const session = await requireSession(ctx, auth);
       if (!session) return true;
       try {
-        const body = await parseJsonBody(request);
+        const body = await parseJsonObject(request);
         if (!session.sessionId) throw new PublicError(401, "Sessão inválida ou expirada");
         await auth.changePassword(session.user.id, body.senhaAtual, body.novaSenha, session.sessionId);
         void audit?.record({ actor: session.user, acao: "senha_alterada", ip: ctx.ip });
