@@ -1,7 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { ArrowRight, Ban, Barcode, Building2, CalendarDays, FileText, Link2, ShieldAlert } from "lucide-react";
+import { ArrowRight, Ban, Barcode, Building2, CalendarDays, Cpu, FileText, History, Link2, Pencil, ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -11,7 +11,7 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { money } from "@/lib/formatters";
 import { companyLabel } from "@/lib/reconciliation-helpers";
 import type { DdaBoleto, DdaCategoria } from "@/lib/dda-contracts";
-import { dataBR, documentoFormatado } from "@/lib/dda-helpers";
+import { dataBR, documentoFormatado, textoSugestaoCategoria } from "@/lib/dda-helpers";
 
 /** Cabeçalho comum: beneficiário, documento, empresa, vencimento, linha digitável e valor. */
 function CabecalhoBoleto({ boleto: b }: { boleto: DdaBoleto }) {
@@ -56,6 +56,27 @@ function ValorBoleto({ boleto: b }: { boleto: DdaBoleto }) {
       <p className="text-xs text-muted-foreground">Valor do boleto</p>
       <p className="font-mono font-bold tabular-nums text-foreground">{money(Number(b.valor))}</p>
     </div>
+  );
+}
+
+/** De onde veio a categoria do select: histórico do fornecedor, Qwen ou escolha à mão. */
+function OrigemCategoria({ boleto: b, categoria }: { boleto: DdaBoleto; categoria: string }) {
+  const s = b.sugestao_categoria;
+  if (!categoria) return null;
+  if (!s || s.categoria_id !== categoria) {
+    return (
+      <p className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Pencil size={11} className="shrink-0" /> Escolhida à mão{s ? " (diferente da sugestão)" : ""}.
+      </p>
+    );
+  }
+  const { icone, texto } = textoSugestaoCategoria(s);
+  const baixa = s.origem === "qwen" ? s.confianca === "baixa" : s.nivel === "tiny_fraco";
+  return (
+    <p className={`flex items-start gap-1 text-xs ${baixa ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
+      {icone === "qwen" ? <Cpu size={11} className="mt-0.5 shrink-0" /> : <History size={11} className="mt-0.5 shrink-0" />}
+      <span>{texto}</span>
+    </p>
   );
 }
 
@@ -144,6 +165,7 @@ export const SemContaCard = memo(function SemContaCard({
                 ))}
               </NativeSelect>
             )}
+            <OrigemCategoria boleto={b} categoria={categoria} />
           </div>
           <div className="space-y-1">
             <label htmlFor={`dda-hist-${b.id}`} className="text-xs font-medium text-muted-foreground">

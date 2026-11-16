@@ -20,6 +20,7 @@ import {
   aguardandoValidacao,
   aprovacoesTexto,
   boletoNoFiltro,
+  categoriaSugerida,
   historicoPadrao,
   situacaoMeta,
   contarPorFiltro,
@@ -137,8 +138,10 @@ export default function DdaView({ apiBaseUrl }: { apiBaseUrl?: string }) {
   const abrirLigar = useCallback((b: DdaBoleto) => setModal({ tipo: "escolher", boleto: b }), []);
   const abrirDescartar = useCallback((b: DdaBoleto) => setModal({ tipo: "descartar", boleto: b }), []);
 
+  // Escolha da pessoa, senão a sugestão (histórico do fornecedor ou Qwen) quando existe no catálogo.
+  const categoriaDe = (b: DdaBoleto) => categoriaPor[b.id] ?? categoriaSugerida(b, categoriasPor[b.empresa]);
   const selecionadosSem = semConta.filter((b) => selSem.has(b.id));
-  const semCategoria = selecionadosSem.filter((b) => !categoriaPor[b.id]);
+  const semCategoria = selecionadosSem.filter((b) => !categoriaDe(b));
   const selecionadosConf = conferir.filter((b) => selConf.has(b.id));
 
   async function criarLote() {
@@ -148,7 +151,7 @@ export default function DdaView({ apiBaseUrl }: { apiBaseUrl?: string }) {
     setProgressoLote("Enviando ao Tiny…");
     try {
       const r = await service.criarContas(
-        selecionadosSem.map((b) => ({ boleto_id: b.id, categoria_id: Number(categoriaPor[b.id]), historico: historicoPor[b.id] ?? historicoPadrao(b) })),
+        selecionadosSem.map((b) => ({ boleto_id: b.id, categoria_id: Number(categoriaDe(b)), historico: historicoPor[b.id] ?? historicoPadrao(b) })),
         (job) => setProgressoLote(job.total ? `Criando no Tiny: ${job.atual ?? 0} de ${job.total}` : "Criando no Tiny…"),
       );
       const falhas = Object.fromEntries(r.resultados.filter((x) => !x.ok).map((x) => [x.boleto_id, x.erro || "Falhou."]));
@@ -347,7 +350,7 @@ export default function DdaView({ apiBaseUrl }: { apiBaseUrl?: string }) {
                   key={b.id}
                   boleto={b}
                   selecionado={selSem.has(b.id)}
-                  categoria={categoriaPor[b.id] ?? ""}
+                  categoria={categoriaDe(b)}
                   historico={historicoPor[b.id] ?? historicoPadrao(b)}
                   categorias={categoriasPor[b.empresa] ?? null}
                   erroCategorias={erroCategoriasPor[b.empresa] ?? null}
@@ -683,6 +686,7 @@ function CriarContaModal({
   const [categorias, setCategorias] = useState<DdaCategoria[] | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [categoria, setCategoria] = useState("");
+  const [tocou, setTocou] = useState(false);
   const [historico, setHistorico] = useState(`Boleto DDA - ${boleto.beneficiario_nome}${boleto.documento ? ` - doc. ${boleto.documento}` : ""}`.slice(0, 500));
 
   useEffect(() => {
@@ -696,6 +700,7 @@ function CriarContaModal({
     };
   }, [service, boleto.empresa]);
 
+  const categoriaEscolhida = tocou ? categoria : categoriaSugerida(boleto, categorias);
   return (
     <Modal titulo="Criar conta a pagar no Tiny" id="dda-criar-titulo" onClose={onClose}>
       <ResumoBoleto boleto={boleto} />
@@ -709,7 +714,16 @@ function CriarContaModal({
         {erro ? (
           <p role="alert" className="text-xs text-destructive">{erro}</p>
         ) : (
-          <NativeSelect id="dda-categoria" value={categoria} onChange={(e) => setCategoria(e.target.value)} disabled={!categorias} className="w-full">
+          <NativeSelect
+            id="dda-categoria"
+            value={tocou ? categoria : categoriaSugerida(boleto, categorias)}
+            onChange={(e) => {
+              setTocou(true);
+              setCategoria(e.target.value);
+            }}
+            disabled={!categorias}
+            className="w-full"
+          >
             <NativeSelectOption value="">{categorias ? "Escolha a categoria" : "Carregando categorias…"}</NativeSelectOption>
             {(categorias ?? []).map((c) => (
               <NativeSelectOption key={c.id} value={c.id}>
@@ -729,7 +743,7 @@ function CriarContaModal({
         <Button variant="outline" onClick={onClose} disabled={ocupado}>
           Cancelar
         </Button>
-        <Button onClick={() => void onConfirmar(Number(categoria), historico)} disabled={ocupado || !categoria}>
+        <Button onClick={() => void onConfirmar(Number(categoriaEscolhida), historico)} disabled={ocupado || !categoriaEscolhida}>
           {ocupado ? "Criando…" : "Criar conta"}
         </Button>
       </div>

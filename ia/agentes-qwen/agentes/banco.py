@@ -205,6 +205,47 @@ class Banco:
                 criado_em TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_chamadas_financeiro_chave ON chamadas_financeiro (chave);
+            -- Classificador dos boletos DDA sem conta (boletos_fila.py, boletos.py). Mesmos estados da NF-e.
+            CREATE TABLE IF NOT EXISTS boletos_fila (
+                boleto_id TEXT PRIMARY KEY,
+                versao TEXT NOT NULL,
+                empresa TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'pendente',
+                resultado_json TEXT,
+                modelo TEXT,
+                tentativas INTEGER NOT NULL DEFAULT 0,
+                erro TEXT,
+                http_vps INTEGER,
+                recebido_em TEXT, classificado_em TEXT, entregue_em TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_boletos_fila_estado ON boletos_fila (estado, recebido_em);
+            -- Histórico de categoria da VPS (dda_categoria.py): saídas do Tiny (fonte tiny) e escolhas do
+            -- painel (fonte painel, com a sugestão da tela). Exemplos do few-shot e gabarito do fine-tuning.
+            CREATE TABLE IF NOT EXISTS historico_boletos (
+                chave TEXT PRIMARY KEY,
+                seq INTEGER, fonte TEXT NOT NULL, empresa TEXT NOT NULL,
+                fornecedor TEXT NOT NULL, fornecedor_cnpj TEXT, fornecedor_nome TEXT,
+                valor REAL, data TEXT,
+                categoria_id TEXT NOT NULL, categoria_nome TEXT, categoria_grupo TEXT,
+                boleto_id TEXT, documento TEXT, confirmado_em TEXT, acao TEXT,
+                sugestao_json TEXT, qwen_categoria_id TEXT, qwen_confianca TEXT, qwen_modelo TEXT,
+                palpite_categoria_id TEXT, palpite_confianca TEXT, palpite_motivo TEXT, palpite_modelo TEXT,
+                recebido_em TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_hist_bol_fornecedor ON historico_boletos (empresa, fornecedor, data);
+            -- Vetor bge-m3 do nome de cada fornecedor (exemplos de fornecedores parecidos).
+            CREATE TABLE IF NOT EXISTS fornecedores_boletos (
+                empresa TEXT NOT NULL, fornecedor TEXT NOT NULL, nome TEXT, vetor BLOB,
+                PRIMARY KEY (empresa, fornecedor)
+            );
+            CREATE TABLE IF NOT EXISTS boletos_estado (chave TEXT PRIMARY KEY, valor TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS chamadas_boletos (
+                id INTEGER PRIMARY KEY,
+                boleto_id TEXT NOT NULL, versao TEXT,
+                modelo TEXT, mensagens TEXT NOT NULL, resposta TEXT, valida INTEGER NOT NULL, erro TEXT, segundos REAL,
+                criado_em TEXT
+            );
             """
         )
         colunas = {c["name"] for c in self.db.execute("PRAGMA table_info(incidentes)")}

@@ -252,6 +252,38 @@ sudo setfacl -m u:$USER:r "$B"
 O blob muda de nome se o `qwen2.5:14b` for atualizado (`ollama pull`): repita o último `setfacl`.
 O log do servidor fica em `dados/llama-server.log`.
 
+## Classificador dos boletos DDA sem conta (aba Boletos DDA de Contas a Pagar)
+
+Mesmo pipeline da NF-e, com fila, dataset e adaptador próprios: boleto não tem itens nem NCM, então
+misturar as duas tarefas esconderia a piora de uma atrás da outra na hora de promover.
+
+- **Ponte**: o coletor da VPS chama `POST /financeiro/boletos/sincronizar` (receptor) com os boletos
+  sem conta ainda sem sugestão (`versao` = valor|vencimento|fornecedor), o catálogo do Tiny **de cada
+  empresa** e uma página do histórico de categoria; as prontas voltam para `/api/v1/dda/qwen/sugestoes`.
+- **Histórico** (`historico_boletos`): as saídas de caixa do Tiny de cada empresa, lidas pela
+  sincronização do Dashboard Financeiro (fornecedor pelo CNPJ do contato, senão pelo nome), e as
+  escolhas feitas no painel com o que a tela sugeria. Na VPS ele também decide sozinho a sugestão
+  quando é claro: escolha anterior no painel ou categoria com ≥ 80% dos lançamentos do fornecedor.
+- **Prompt** (`agentes/boletos.py`): catálogo da empresa, o boleto, a distribuição de categorias do
+  fornecedor (vezes, valor médio, último) e fornecedores parecidos pelo nome (bge-m3 do nome em
+  `fornecedores_boletos`). Uma chamada por boleto, schema preso ao catálogo (`financeiro.esquema`).
+- **Linha**: o `servir` roda NF-e e boletos na mesma linha (`financeiro.trabalhar` com `passos`),
+  então nunca sobem dois llama-server juntos.
+
+```bash
+python -m agentes classificar-boleto boleto.json   # um boleto de /api/v1/dda/qwen/pendentes, sem gravar
+python -m agentes avaliar-boletos                  # quanto o histórico sozinho acerta, fornecedores novos, concordância
+python -m agentes treino-boletos                   # dados/treino/boletos_{sft,validacao,dpo}.jsonl
+python -m agentes finetune-boletos [--force] [--dpo]   # = finetune-financeiro --tarefa boletos → qwen-boletos-lora/
+python -m agentes comparar-boletos [--promover]    # histórico sozinho × atual × candidato; promove se não piorar
+```
+
+O dataset não usa as milhares de saídas repetidas do Tiny inteiras: entram a primeira vez de cada
+fornecedor (fornecedor novo), as vezes em que a categoria fugiu da mais usada até ali (desempate por
+valor), até 2 repetidas por fornecedor e todas as escolhas do painel (corrigidas pela pessoa: 2× no
+SFT + par DPO). As pistas de cada exemplo só usam o que aconteceu antes dele. O adaptador promovido
+fica em `dados/modelos/boletos/promovido.gguf` (`ADAPTADOR_BOLETOS`).
+
 ## Registro de treino (fine-tuning)
 
 Toda conversa de um agente com o modelo fica na tabela `chamadas` (system, user, resposta crua, se o JSON

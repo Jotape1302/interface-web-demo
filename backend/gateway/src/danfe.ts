@@ -490,7 +490,9 @@ export function createDanfeService(
     historyAdapter: liveHistoryAdapter,
     async qwenRepasse(metodo, caminho, corpo) {
       const baseUrl = await resolvePythonUrl();
-      const res = await fetchFin(`${baseUrl}/api/v1/danfe/qwen/${caminho}`, {
+      // "boletos/..." é o classificador dos boletos DDA; o resto, o da revisão de NF-e.
+      const destino = caminho.startsWith("boletos/") ? `/api/v1/dda/qwen/${caminho.slice("boletos/".length)}` : `/api/v1/danfe/qwen/${caminho}`;
+      const res = await fetchFin(`${baseUrl}${destino}`, {
         method: metodo,
         headers: corpo === undefined ? undefined : { "Content-Type": "application/json" },
         body: corpo === undefined ? undefined : JSON.stringify(corpo),

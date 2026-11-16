@@ -35,6 +35,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from app import dda_categoria
 from app.boleto import parse_boleto
 from app.config import Settings, settings
 from app.fuso import agora_sp, hoje_sp
@@ -235,6 +236,7 @@ class RotinaDDA:
         tiny: Optional[TinyClient] = None,
         token_tiny: Optional[TokenTiny] = None,
         hoje: Optional[Callable[[], date]] = None,
+        historico: Optional[dda_categoria.HistoricoCategorias] = None,
     ) -> None:
         self.cfg = cfg or settings
         self.estado = estado or EstadoDDA(cfg=self.cfg)
@@ -244,6 +246,7 @@ class RotinaDDA:
         self._token_tiny = token_tiny or self._token_tiny_padrao
         self._hoje = hoje or hoje_sp
         self._execucao = threading.Lock()
+        self.historico = historico or dda_categoria.historico
 
     # --- tokens ----------------------------------------------------------------------------
 
@@ -602,7 +605,12 @@ class RotinaDDA:
         if em_uso:
             raise ValueError(f"Conta #{conta_id} já está ligada a outro boleto.")
         conta = {**conta, "id": int(conta_id)}
-        return self._salvar(boleto_id, lambda x: self._vincular(x, conta, "Conta escolhida no painel.", usuario))
+        sugestao = self.sugestao_categoria(b)
+        salvo = self._salvar(boleto_id, lambda x: self._vincular(x, conta, "Conta escolhida no painel.", usuario))
+        categoria = conta.get("categoria") if isinstance(conta.get("categoria"), dict) else {}
+        if categoria.get("id"):
+            self._registrar_escolha(b, {"id": str(categoria["id"]), "nome": categoria.get("descricao")}, "ligou", usuario, sugestao)
+        return salvo
 
     def criar_conta(self, boleto_id: str, categoria_id: int, historico: str, usuario: str) -> Dict[str, Any]:
         """Boleto sem conta: cria a conta a pagar no Tiny (fornecedor pelo CNPJ, nunca cria contato)."""
@@ -612,6 +620,7 @@ class RotinaDDA:
         if b.get("conta_criada_incerta"):
             raise ValueError("Uma tentativa anterior ficou sem confirmação do Tiny: confira as contas do fornecedor antes.")
         token = self.token_tiny(b["empresa"])
+        sugestao = self.sugestao_categoria(b)
         doc = b.get("beneficiario_cnpj") or b.get("sacador_cnpj")
         contatos = [c for c in self.tiny.buscar_contatos_v3(token, cpf_cnpj=doc) if _digitos(c.get("cpfCnpj")) == doc and c.get("id")]
         if len(contatos) != 1:
@@ -633,7 +642,14 @@ class RotinaDDA:
             raise
         conta = {"id": conta_id, "valor": b["valor"], "dataVencimento": b["vencimento"], "historico": historico,
                  "cliente": {"nome": contatos[0].get("nome"), "cpfCnpj": doc}}
-        return self._salvar(boleto_id, lambda x: self._vincular(x, conta, "Conta a pagar criada no Tiny pelo painel.", usuario))
+
+        def vincular(x: Dict[str, Any]) -> None:
+            self._vincular(x, conta, "Conta a pagar criada no Tiny pelo painel.", usuario)
+            x["categoria"] = {"id": str(categoria_id), "sugestao": {k: v for k, v in (sugestao or {}).items() if k != "distribuicao"} or None}
+
+        salvo = self._salvar(boleto_id, vincular)
+        self._registrar_escolha(b, self._categoria_do_catalogo(b["empresa"], str(categoria_id)), "criou", usuario, sugestao)
+        return salvo
 
     def validar(self, ids: List[str], usuario: str) -> Dict[str, Any]:
         """Validação humana dos casamentos automáticos: libera o agendamento no Inter."""
@@ -702,6 +718,79 @@ class RotinaDDA:
 
         return self._salvar(boleto_id, mudar)
 
+    # --- histórico de categoria e classificador Qwen (dda_categoria.py) --------------------
+
+    def sugestao_categoria(self, b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            return dda_categoria.sugestao_boleto(b, self.historico)
+        except Exception as e:  # sugestão é ajuda: nunca impede a criação da conta
+            logger.warning(f"[DDA] Sugestão de categoria de {_rotulo(b)} falhou: {e}")
+            return None
+
+    def _categoria_do_catalogo(self, empresa: str, categoria_id: str) -> Dict[str, str]:
+        try:
+            return next((c for c in self.categorias(empresa) if c["id"] == categoria_id), {"id": categoria_id})
+        except Exception:
+            return {"id": categoria_id}
+
+    def _registrar_escolha(self, b: Dict[str, Any], categoria: Dict[str, Any], acao: str, usuario: str,
+                           sugestao: Optional[Dict[str, Any]]) -> None:
+        try:
+            self.historico.registrar_escolha(b, categoria, acao, usuario, sugestao)
+        except Exception as e:
+            logger.warning(f"[DDA] Escolha de categoria de {_rotulo(b)} fora do histórico: {e}")
+
+    def catalogos(self, empresas: Optional[List[str]] = None) -> Dict[str, List[Dict[str, str]]]:
+        """Categorias do Tiny de cada empresa com token (cache de 30 min no cliente); as que falham ficam de fora."""
+        saida: Dict[str, List[Dict[str, str]]] = {}
+        for emp in empresas or list(INTER_EMPRESAS):
+            try:
+                cats = self.categorias(emp)
+            except Exception as e:
+                logger.debug(f"[DDA] Catálogo de categorias de '{emp}' indisponível: {e}")
+                continue
+            if cats:
+                saida[emp] = cats
+        return saida
+
+    def qwen_pendentes(self, limite: int) -> Dict[str, Any]:
+        """Boletos sem conta ainda sem classificação do Qwen na versão atual, mais antigos primeiro.
+        Os que o painel já decidiu com o mesmo fornecedor (nível painel) vão com classificar=false."""
+        boletos = []
+        for b in sorted(self.estado.ler()["boletos"].values(), key=lambda x: (x.get("atualizado_em") or "", x["id"])):
+            if b.get("situacao") != SIT_SEM_CONTA or b.get("fraude") or b.get("conta_criada_incerta"):
+                continue
+            if dda_categoria.qwen_do_boleto(b):
+                continue
+            hist = self.historico.historico_boleto(b)
+            if hist and hist["nivel"] == "painel":
+                continue
+            boletos.append({
+                "id": b["id"], "versao": dda_categoria.versao_boleto(b), "empresa": b["empresa"],
+                "empresa_nome": INTER_EMPRESAS.get(b["empresa"], {}).get("nome"),
+                **{c: b.get(c) for c in ("beneficiario_nome", "beneficiario_cnpj", "sacador_cnpj", "valor", "vencimento",
+                                          "emissao", "documento", "tipo_label")},
+                "historico": hist,
+            })
+        return {"total": len(boletos), "boletos": boletos[:limite], "categorias": self.catalogos()}
+
+    def gravar_qwen(self, boleto_id: str, versao: str, modelo: str, categoria_id: str, confianca: str, motivo: str) -> str:
+        """'gravado', 'nao_pendente' (saiu de sem conta), 'desatualizada' (versão mudou) ou 'fora_do_catalogo'."""
+        b = self.estado.ler()["boletos"].get(boleto_id)
+        if b is None or b.get("situacao") != SIT_SEM_CONTA:
+            return "nao_pendente"
+        if dda_categoria.versao_boleto(b) != versao:
+            return "desatualizada"
+        if categoria_id not in {c["id"] for c in self.categorias(b["empresa"])}:
+            return "fora_do_catalogo"
+
+        def gravar(x: Dict[str, Any]) -> None:
+            x["qwen"] = {"versao": versao, "modelo": modelo, "categoria_id": categoria_id, "confianca": confianca,
+                         "motivo": motivo.strip()[:dda_categoria.QWEN_MOTIVO_MAX], "em": agora()}
+
+        self._salvar(boleto_id, gravar)
+        return "gravado"
+
     # --- leitura ---------------------------------------------------------------------------
 
     def categorias(self, empresa: str) -> List[Dict[str, str]]:
@@ -741,10 +830,14 @@ class RotinaDDA:
             "por_situacao": por_situacao,
             "ultima_execucao": dados["execucoes"][-1] if dados["execucoes"] else None,
             "em_execucao": self._execucao.locked(),
+            "historico_categorias": self.historico.resumo(),
         }
 
     def boletos(self) -> List[Dict[str, Any]]:
-        itens = list(self.estado.ler()["boletos"].values())
+        itens = [
+            {**b, "sugestao_categoria": self.sugestao_categoria(b)} if b.get("situacao") == SIT_SEM_CONTA else b
+            for b in self.estado.ler()["boletos"].values()
+        ]
         return sorted(itens, key=lambda b: (b.get("situacao") in FINAIS, b.get("vencimento") or "", b.get("id")))
 
 

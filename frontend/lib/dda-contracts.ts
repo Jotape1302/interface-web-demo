@@ -29,6 +29,17 @@ export interface DdaEvento {
   usuario?: string;
 }
 
+export interface DdaSugestaoCategoria {
+  categoria_id: string;
+  origem: 'historico' | 'qwen';
+  /** painel = última escolha no painel; tiny = categoria dominante no Tiny; tiny_fraco = histórico dividido. */
+  nivel?: 'painel' | 'tiny' | 'tiny_fraco';
+  confianca?: 'alta' | 'media' | 'baixa';
+  motivo?: string | null;
+  vezes_tiny?: number;
+  distribuicao?: { categoria_id: string; vezes: number; valor_medio: number; ultima?: string }[];
+}
+
 export interface DdaBoleto {
   id: string;
   empresa: string;
@@ -50,6 +61,8 @@ export interface DdaBoleto {
   conta?: DdaContaResumo;
   candidatos?: DdaContaResumo[];
   conta_criada_incerta?: boolean;
+  /** Categoria pré-selecionada do boleto sem conta: histórico do fornecedor (Tiny/painel) ou Qwen. */
+  sugestao_categoria?: DdaSugestaoCategoria | null;
   /** Validação humana do casamento (obrigatória antes do agendamento no Inter). */
   validacao?: { por: string; em: string };
   inter?: {

@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app import dda_categoria
 from app.fuso import agora_sp_naive, hoje_sp
 from app.config import Settings, settings
 from app.json_store import erro_gravacao, save_json_state
@@ -271,6 +272,8 @@ def _sync_one_company(
     # afetar os totais (que já vêm da chamada geral acima).
     categorias_com_falha: List[str] = []
     falha_e_permissao = False
+    # Saídas com fornecedor e categoria: histórico de categoria dos boletos DDA (dda_categoria.py).
+    saidas_por_fornecedor: List[Dict[str, Any]] = []
     for categoria in categorias:
         if falha_e_permissao:
             # O circuito de proteção já confirmou bloqueio persistente (não é blip de rede
@@ -293,6 +296,11 @@ def _sync_one_company(
             logger.warning(f"[FINANCIAL_DASHBOARD] '{account_id}': /caixa (categoria '{categoria.nome}') falhou. Detalhe: {e}")
             continue
         e_transferencia = _e_transferencia_entre_empresas(categoria.nome)
+        if not e_transferencia:
+            for item in itens:
+                lanc = dda_categoria.coletar_lancamento(item, str(categoria.id), categoria.nome, categoria.grupo)
+                if lanc:
+                    saidas_por_fornecedor.append(lanc)
         for item in itens:
             tipo = item.get("tipo")
             dia = _day_key(item.get("data"))
@@ -309,6 +317,13 @@ def _sync_one_company(
                 despesas_por_dia[dia][categoria.id] += valor
             else:
                 receitas_por_dia[dia][categoria.id] += valor
+    if saidas_por_fornecedor:
+        empresa_dda = dda_categoria.empresa_do_cnpj(cnpj) or account_id
+        try:
+            novos = dda_categoria.historico.registrar_lancamentos_tiny(empresa_dda, saidas_por_fornecedor)
+            logger.info(f"[FINANCIAL_DASHBOARD] '{account_id}': histórico de categoria do DDA com {novos} saída(s) nova(s) ou alterada(s).")
+        except Exception as e:  # o histórico do DDA nunca derruba o dashboard
+            logger.warning(f"[FINANCIAL_DASHBOARD] '{account_id}': histórico de categoria do DDA não gravado: {e}")
     if categorias_com_falha:
         motivo = "falta de permissão/escopo OAuth" if falha_e_permissao else "rede instável ou limite de taxa"
         erros.append(

@@ -1,4 +1,4 @@
-import type { DdaBoleto, DdaSituacao } from './dda-contracts';
+import type { DdaBoleto, DdaCategoria, DdaSituacao, DdaSugestaoCategoria } from './dda-contracts';
 
 type Tom = 'success' | 'warning' | 'danger' | 'info' | 'secondary';
 
@@ -89,4 +89,24 @@ export function aprovacoesTexto(b: DdaBoleto): string | null {
   if (!nec) return null;
   const feitas = b.inter?.aprovacoes_realizadas ?? 0;
   return `${feitas} de ${nec} ${nec === 1 ? 'aprovação' : 'aprovações'}`;
+}
+
+/** Categoria sugerida do boleto, se ela existe no catálogo da empresa (senão o select fica vazio). */
+export function categoriaSugerida(b: DdaBoleto, categorias: DdaCategoria[] | null | undefined): string {
+  const id = b.sugestao_categoria?.categoria_id;
+  if (!id || !categorias) return '';
+  return categorias.some((c) => c.id === id) ? id : '';
+}
+
+/** De onde veio a categoria pré-selecionada (linha abaixo do select). */
+export function textoSugestaoCategoria(s: DdaSugestaoCategoria): { icone: 'historico' | 'qwen'; texto: string } {
+  if (s.origem === 'qwen') {
+    const conf = s.confianca === 'alta' ? 'alta' : s.confianca === 'media' ? 'média' : 'baixa';
+    return { icone: 'qwen', texto: `Sugerida pelo Qwen (confiança ${conf})${s.motivo ? `: ${s.motivo}` : ''}` };
+  }
+  if (s.nivel === 'painel') return { icone: 'historico', texto: 'Última categoria escolhida no painel para este fornecedor.' };
+  const vezes = s.distribuicao?.find((d) => d.categoria_id === s.categoria_id)?.vezes ?? 0;
+  const total = s.vezes_tiny ?? vezes;
+  if (s.nivel === 'tiny') return { icone: 'historico', texto: `Histórico do Tiny: ${vezes} de ${total} lançamento(s) deste fornecedor nesta categoria.` };
+  return { icone: 'historico', texto: `Histórico dividido no Tiny (${vezes} de ${total} lançamentos nesta categoria): confira.` };
 }

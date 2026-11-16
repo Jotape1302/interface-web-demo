@@ -27,12 +27,16 @@ const DEMO_STATUS: DdaStatus = {
     { empresa: 'revesta', nome: 'Revesta', ativo: true, status_label: 'Sucesso' },
     { empresa: 'norvia_campinas', nome: 'Norvia Campinas', ativo: true, status_label: 'Sucesso' },
   ],
-  por_situacao: { SEM_CONTA: 1, AGENDADO: 1, BAIXADO: 1 },
+  por_situacao: { SEM_CONTA: 2, CASADO: 1, AGENDADO: 1, BAIXADO: 1 },
   ultima_execucao: null,
 };
 const DEMO_BOLETOS: DdaBoleto[] = [
   { id: 'demo-1', empresa: 'revesta', situacao: 'SEM_CONTA', mensagem: 'Nenhuma conta a pagar em aberto no Tiny com o mesmo fornecedor, vencimento e valor.',
-    beneficiario_nome: 'Transportadora Exemplo Ltda', beneficiario_cnpj: '11222333000181', valor: '842.30', vencimento: '2026-11-25', documento: '4471' },
+    beneficiario_nome: 'Transportadora Exemplo Ltda', beneficiario_cnpj: '11222333000181', valor: '842.30', vencimento: '2026-11-25', documento: '4471',
+    sugestao_categoria: { categoria_id: '1', origem: 'historico', nivel: 'tiny', vezes_tiny: 14, distribuicao: [{ categoria_id: '1', vezes: 13, valor_medio: 790.5 }] } },
+  { id: 'demo-5', empresa: 'fabrilux', situacao: 'SEM_CONTA', mensagem: 'Nenhuma conta a pagar em aberto no Tiny com o mesmo fornecedor, vencimento e valor.',
+    beneficiario_nome: 'Companhia de Energia Exemplo', beneficiario_cnpj: '33444555000199', valor: '612.40', vencimento: '2026-11-27', documento: '0091',
+    sugestao_categoria: { categoria_id: '2', origem: 'qwen', confianca: 'media', motivo: 'Fornecedor novo; o nome indica conta de energia elétrica.' } },
   { id: 'demo-4', empresa: 'fabrilux', situacao: 'CASADO', mensagem: 'Casado com a conta a pagar do Tiny (fornecedor, vencimento e valor). Conta #789.',
     beneficiario_nome: 'Distribuidora Exemplo Ltda', beneficiario_cnpj: '22333444000155', valor: '1290.00', vencimento: '2026-11-28', documento: '1180/1',
     conta_id: 789, conta: { id: 789, fornecedor: 'DISTRIBUIDORA EXEMPLO LTDA', historico: 'NF 1180 - parcela 1/3', numero_documento: '1180/1', valor: '1290.00', vencimento: '2026-11-28' } },
@@ -90,7 +94,7 @@ export class DdaService {
   }
 
   async categorias(empresa: string): Promise<DdaCategoria[]> {
-    if (isDemoSession()) return demoDelay([{ id: '1', nome: 'Fretes', grupo: 'Despesas' }]);
+    if (isDemoSession()) return demoDelay([{ id: '1', nome: 'Fretes', grupo: 'Despesas' }, { id: '2', nome: 'Energia Elétrica', grupo: 'Despesas' }]);
     const q = new URLSearchParams({ empresa });
     return (await this.get<{ itens: DdaCategoria[] }>(`/api/dda/categorias?${q}`, 'Falha ao listar as categorias do Tiny')).itens;
   }

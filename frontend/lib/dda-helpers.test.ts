@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { DdaBoleto, DdaSituacao } from './dda-contracts';
-import { acoesDoBoleto, aguardandoValidacao, aprovacoesTexto, boletoNoFiltro, contarPorFiltro, dataBR, documentoFormatado, historicoPadrao, situacaoMeta } from './dda-helpers';
+import { acoesDoBoleto, aguardandoValidacao, aprovacoesTexto, boletoNoFiltro, categoriaSugerida, contarPorFiltro, dataBR, documentoFormatado, historicoPadrao, situacaoMeta, textoSugestaoCategoria } from './dda-helpers';
 
 const b = (situacao: DdaSituacao, extra: Partial<DdaBoleto> = {}): DdaBoleto => ({
   id: situacao, empresa: 'revesta', situacao, mensagem: '', beneficiario_nome: 'F', beneficiario_cnpj: '11222333000181',
@@ -46,4 +46,23 @@ void test('casado sem conferência pede ação até validar', () => {
 
 void test('histórico sugerido leva o beneficiário e o documento', () => {
   assert.equal(historicoPadrao(b('SEM_CONTA', { documento: '77' })), 'Boleto DDA - F - doc. 77');
+});
+
+void test('categoria sugerida só pré-seleciona se existe no catálogo da empresa', () => {
+  const cats = [{ id: '7', nome: 'Aluguel', grupo: 'Fixas' }];
+  const sem = b('SEM_CONTA', { sugestao_categoria: { categoria_id: '7', origem: 'historico', nivel: 'tiny' } });
+  assert.equal(categoriaSugerida(sem, cats), '7');
+  assert.equal(categoriaSugerida(sem, null), '');
+  assert.equal(categoriaSugerida(b('SEM_CONTA', { sugestao_categoria: { categoria_id: '9', origem: 'qwen' } }), cats), '');
+  assert.equal(categoriaSugerida(b('SEM_CONTA'), cats), '');
+});
+
+void test('origem da sugestão em texto: painel, Tiny dominante, dividido e Qwen', () => {
+  assert.match(textoSugestaoCategoria({ categoria_id: '7', origem: 'historico', nivel: 'painel' }).texto, /escolhida no painel/);
+  const dist = [{ categoria_id: '7', vezes: 9, valor_medio: 100 }];
+  assert.equal(textoSugestaoCategoria({ categoria_id: '7', origem: 'historico', nivel: 'tiny', vezes_tiny: 10, distribuicao: dist }).texto,
+    'Histórico do Tiny: 9 de 10 lançamento(s) deste fornecedor nesta categoria.');
+  assert.match(textoSugestaoCategoria({ categoria_id: '7', origem: 'historico', nivel: 'tiny_fraco', vezes_tiny: 16, distribuicao: dist }).texto, /dividido.*9 de 16/);
+  const q = textoSugestaoCategoria({ categoria_id: '7', origem: 'qwen', confianca: 'media', motivo: 'Conta de luz.' });
+  assert.deepEqual(q, { icone: 'qwen', texto: 'Sugerida pelo Qwen (confiança média): Conta de luz.' });
 });

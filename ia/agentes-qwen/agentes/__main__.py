@@ -21,6 +21,15 @@ Uso (com o venv do RAGs, que já tem torch/CUDA, sentence-transformers e chromad
                                            # QLoRA na GPU com o .venv-treino → adaptador candidato (GGUF)
   python -m agentes comparar-financeiro [--candidato arq.gguf] [--promover]
                                            # candidato × atual no llama-server; promove se não piorar
+  python -m agentes classificar-boleto <boleto.json>
+                                           # classifica um boleto DDA sem conta no terminal (sem gravar)
+  python -m agentes treino-boletos [--pasta dados/treino]
+                                           # datasets SFT, validação e DPO do classificador dos boletos DDA
+  python -m agentes avaliar-boletos        # o que o histórico sozinho acerta, concordância do Qwen, correções
+  python -m agentes finetune-boletos [--force] [--max-passos N] [--dpo]
+                                           # QLoRA do classificador dos boletos (adaptador próprio)
+  python -m agentes comparar-boletos [--candidato arq.gguf] [--promover]
+                                           # candidato × atual × histórico sozinho; promove se não piorar
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ import urllib.request
 
 from pathlib import Path
 
-from . import config, financeiro, financeiro_fila, pipeline, rag, treino, treino_financeiro
+from . import boletos, config, financeiro, financeiro_fila, pipeline, rag, treino, treino_boletos, treino_financeiro
 from .banco import Banco
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -59,9 +68,10 @@ def servir(banco: Banco) -> int:
     chegou, nota_chegou, parar = threading.Event(), threading.Event(), threading.Event()
     servidor = criar_servidor(banco, chegou, config.INCIDENTES_TOKEN, nota_chegou=nota_chegou)
     threading.Thread(target=servidor.serve_forever, daemon=True).start()
-    threading.Thread(target=financeiro.trabalhar, args=(banco, nota_chegou, parar), daemon=True).start()
+    passos = [("NF-e", financeiro.processar_fila), ("boletos DDA", boletos.processar_fila)]
+    threading.Thread(target=financeiro.trabalhar, args=(banco, nota_chegou, parar, passos), daemon=True).start()
     logger.info("Receptor em http://%s:%s/incidentes · modelo %s · num_ctx %s", config.HOST, config.PORTA, config.MODELO, config.NUM_CTX)
-    logger.info("Classificador de NF-e ligado · modelo %s", config.MODELO_FINANCEIRO)
+    logger.info("Classificadores de NF-e e de boletos DDA ligados · modelo %s", config.MODELO_FINANCEIRO)
     try:
         pipeline.trabalhar(banco, chegou, parar)
     except KeyboardInterrupt:
@@ -69,6 +79,26 @@ def servir(banco: Banco) -> int:
     finally:
         parar.set()
         servidor.shutdown()
+    return 0
+
+
+def _portao(placares: list, atual, candidato, args, destino: Path, comando: str) -> int:
+    """Imprime o placar e promove o candidato só se ele acertou algo, não teve mais inválidas e não piorou."""
+    print(f"{'modelo':<34} {'acurácia':>17}  {'por R$':>7}  {'s/nota':>8}  inválidas")
+    for p in placares:
+        print(p.linha())
+    if candidato.acertos == 0 or candidato.invalidas > atual.invalidas:
+        # 0 × 0 não é "empate": é motor ou adaptador quebrado (ex.: schema ignorado, tudo inválido).
+        print(f"\nCandidato sem acerto ou com mais respostas inválidas ({candidato.invalidas}): não promovido. Ver dados/llama-server.log.")
+        return 1
+    if candidato.acuracia < atual.acuracia:
+        print("\nCandidato pior que o atual: não promovido.")
+        return 1
+    if not args.promover:
+        print(f"\nCandidato não piorou. Para promover: {comando} --promover")
+        return 0
+    anterior = treino_financeiro.promover(args.candidato, destino)
+    print(f"\nPromovido: {destino} (o classificador usa a partir do próximo lote)." + (f" O anterior ficou em {anterior}." if anterior else ""))
     return 0
 
 
@@ -98,7 +128,17 @@ def main(argv=None) -> int:
     p.add_argument("--candidato", type=Path, default=config.CANDIDATO_FINANCEIRO)
     p.add_argument("--pasta", type=Path, default=config.DADOS_DIR / "treino")
     p.add_argument("--promover", action="store_true", help="vira o adaptador do classificador se a acurácia não cair")
+    sub.add_parser("classificar-boleto").add_argument("arquivo", type=Path)
+    sub.add_parser("treino-boletos").add_argument("--pasta", type=Path, default=config.DADOS_DIR / "treino")
+    sub.add_parser("avaliar-boletos")
+    sub.add_parser("finetune-boletos", add_help=False)
+    p = sub.add_parser("comparar-boletos")
+    p.add_argument("--candidato", type=Path, default=config.CANDIDATO_BOLETOS)
+    p.add_argument("--pasta", type=Path, default=config.DADOS_DIR / "treino")
+    p.add_argument("--promover", action="store_true", help="vira o adaptador dos boletos se a acurácia não cair")
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["finetune-boletos"]:
+        argv = ["finetune-financeiro", "--tarefa", "boletos", *argv[1:]]
     if argv[:1] == ["finetune-financeiro"]:
         # O treino roda no venv próprio (Unsloth não suporta o Python do RAGs): repassa os argumentos.
         python = config.RAIZ / ".venv-treino" / "bin" / "python"
@@ -200,23 +240,34 @@ def main(argv=None) -> int:
         # Outro processo: a trava da GPU do serviço não vale aqui, então o serviço para durante a medição.
         with finetune_financeiro.gpu_livre():
             atual, candidato = treino_financeiro.comparar(banco, args.candidato, args.pasta, promovido)
-        print(f"{'modelo':<34} {'acurácia':>17}  {'por R$':>7}  {'s/nota':>8}  inválidas")
-        print(atual.linha())
-        print(candidato.linha())
-        if candidato.acertos == 0 or candidato.invalidas > atual.invalidas:
-            # 0 × 0 não é "empate": é motor ou adaptador quebrado (ex.: schema ignorado, tudo inválido).
-            print(f"\nCandidato sem acerto ou com mais respostas inválidas ({candidato.invalidas}): não promovido. Ver dados/llama-server.log.")
-            return 1
-        if candidato.acuracia < atual.acuracia:
-            print("\nCandidato pior que o atual: não promovido.")
-            return 1
-        if not args.promover:
-            print("\nCandidato não piorou. Para promover: comparar-financeiro --promover")
-            return 0
-        anterior = treino_financeiro.promover(args.candidato, config.ADAPTADOR_FINANCEIRO)
-        print(f"\nPromovido: {config.ADAPTADOR_FINANCEIRO} (o classificador usa a partir do próximo lote)."
-              + (f" O anterior ficou em {anterior}." if anterior else ""))
+        return _portao([atual, candidato], atual, candidato, args, config.ADAPTADOR_FINANCEIRO, "comparar-financeiro")
+    if args.cmd == "classificar-boleto":
+        boleto = boletos.boleto_do_arquivo(args.arquivo)
+        categorias = boletos.catalogo_do_historico(banco, boleto["empresa"])
+        boletos.atualizar_vetores(banco)
+        nomes = {c["id"]: f"{c['grupo']} → {c['nome']}" for c in categorias}
+        r = boletos.classificar(banco, boleto, categorias)
+        print(f"{r['confianca']:<5}  {nomes.get(r['categoria_id'], r['categoria_id'])}\n      motivo: {r['motivo']}")
         return 0
+    if args.cmd == "treino-boletos":
+        contagem = treino_boletos.exportar(banco, args.pasta)
+        for nome, n in sorted(contagem.items()):
+            print(f"{nome:<24} {n:>6}")
+        print(f"arquivos boletos_*.jsonl em {args.pasta}")
+        return 0
+    if args.cmd == "avaliar-boletos":
+        print(treino_boletos.avaliar(banco))
+        return 0
+    if args.cmd == "comparar-boletos":
+        if not args.candidato.is_file():
+            print(f"Candidato {args.candidato} não existe: rode antes finetune-boletos.", file=sys.stderr)
+            return 2
+        promovido = config.ADAPTADOR_BOLETOS if config.ADAPTADOR_BOLETOS.is_file() else None
+        from . import finetune_financeiro
+
+        with finetune_financeiro.gpu_livre():
+            atual, candidato, base = treino_boletos.comparar(args.candidato, args.pasta, promovido)
+        return _portao([base, atual, candidato], atual, candidato, args, config.ADAPTADOR_BOLETOS, "comparar-boletos")
     if args.cmd == "treino":
         rotulos = set(args.rotulo.split(",")) if args.rotulo else {"certo", "errado", "incerto", "pendente"}
         contagem = treino.exportar(banco, args.saida, args.agente, rotulos)

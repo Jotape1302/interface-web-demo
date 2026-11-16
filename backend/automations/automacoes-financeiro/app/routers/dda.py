@@ -3,9 +3,9 @@ Boletos do DDA (Polp) → contas a pagar do Tiny → pagamento agendado no Inter
 Regras em app/dda_pagamentos.py. Separado de app/api.py (que monta o FastAPI e as rotinas de fundo).
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.dda_pagamentos import resumo_avisos, rotina
@@ -143,3 +143,54 @@ def dda_descartar(boleto_id: str, corpo: MotivoRequest, request: Request) -> Dic
 def dda_reabrir(boleto_id: str, request: Request) -> Dict[str, Any]:
     _boleto_ou_404(boleto_id)
     return _acao(rotina.reabrir, boleto_id, usuario_da_requisicao(request))
+
+
+# --- Classificador Qwen dos boletos (PC do TI) --------------------------------------------
+# Como /api/v1/danfe/qwen/*: só o coletor da VPS chama (pelo gateway, com a X-Internal-Key),
+# levando os boletos pelo túnel até o agentes-qwen e trazendo as sugestões de volta.
+
+
+class QwenBoletoSugestao(BaseModel):
+    boleto_id: str = Field(min_length=1, max_length=64)
+    versao: str = Field(min_length=1, max_length=200)
+    modelo: str = Field(min_length=1, max_length=100)
+    categoria_id: str = Field(min_length=1, max_length=30)
+    confianca: Literal["alta", "media", "baixa"]
+    motivo: str = Field(default="", max_length=2000)
+
+
+@router.get("/api/v1/dda/qwen/pendentes")
+def dda_qwen_pendentes(limit: int = Query(10, ge=1, le=100)) -> Dict[str, Any]:
+    """Boletos sem conta ainda sem classificação, com o histórico do fornecedor e o catálogo de
+    cada empresa (o PC monta o JSON Schema com ele: o Qwen nunca devolve um ID que a conta não tem)."""
+    return rotina.qwen_pendentes(limit)
+
+
+@router.post("/api/v1/dda/qwen/sugestoes")
+def dda_qwen_sugestoes(corpo: QwenBoletoSugestao) -> Dict[str, Any]:
+    """404: o boleto saiu de 'sem conta'; 409: mudou de valor/vencimento/fornecedor depois de ir ao
+    Qwen; 422: categoria fora do catálogo da empresa. Nos três o coletor descarta a sugestão."""
+    try:
+        r = rotina.gravar_qwen(corpo.boleto_id, corpo.versao, corpo.modelo, corpo.categoria_id, corpo.confianca, corpo.motivo)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if r == "nao_pendente":
+        raise HTTPException(status_code=404, detail=f"Boleto {corpo.boleto_id} não está mais sem conta.")
+    if r == "desatualizada":
+        raise HTTPException(status_code=409, detail="O boleto mudou depois da classificação; sugestão descartada.")
+    if r == "fora_do_catalogo":
+        raise HTTPException(status_code=422, detail=f"Categoria {corpo.categoria_id} fora do catálogo da empresa.")
+    logger.info(f"[QWEN] Sugestão de {corpo.modelo} gravada no boleto DDA {corpo.boleto_id}")
+    return {"boleto_id": corpo.boleto_id, "status": "gravado"}
+
+
+@router.get("/api/v1/dda/qwen/confirmadas-recentes")
+def dda_qwen_confirmadas(cursor: Optional[str] = None, limit: int = Query(200, ge=1, le=1000)) -> Dict[str, Any]:
+    """Histórico de categoria (saídas do Tiny e escolhas do painel) depois de `cursor` (o seq do
+    último registro recebido). Sem cursor, começa do início. `fim=false`: há mais páginas."""
+    try:
+        depois_de = int(cursor) if cursor else 0
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Cursor inválido: use o `cursor` devolvido pela chamada anterior.")
+    registros, ultimo, fim = rotina.historico.confirmadas(depois_de, limit)
+    return {"confirmadas": registros, "cursor": str(ultimo), "fim": fim}

@@ -52,6 +52,10 @@ LLAMA_SERVER_ESPERA = int(os.getenv("LLAMA_SERVER_ESPERA", "300"))  # segundos p
 MODELOS_FINANCEIRO_DIR = DADOS_DIR / "modelos" / "financeiro"
 ADAPTADOR_FINANCEIRO = Path(os.getenv("ADAPTADOR_FINANCEIRO", str(MODELOS_FINANCEIRO_DIR / "promovido.gguf")))
 CANDIDATO_FINANCEIRO = DADOS_DIR / "modelos" / "qwen-financeiro-lora" / "adapter.gguf"
+# Classificador dos boletos DDA sem conta (boletos.py): mesma base, adaptador e dataset próprios.
+MODELO_BOLETOS = os.getenv("MODELO_BOLETOS", MODELO_FINANCEIRO)
+ADAPTADOR_BOLETOS = Path(os.getenv("ADAPTADOR_BOLETOS", str(DADOS_DIR / "modelos" / "boletos" / "promovido.gguf")))
+CANDIDATO_BOLETOS = DADOS_DIR / "modelos" / "qwen-boletos-lora" / "adapter.gguf"
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "600"))
 TENTATIVAS_JSON = 3
 

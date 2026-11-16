@@ -302,6 +302,8 @@ class PonteFinanceiroTest(unittest.TestCase):
 
             def do_GET(self):
                 teste.chamadas.append(("GET", self.path, self.headers.get("Authorization"), None))
+                if self.path.startswith("/fin/boletos/pendentes"):
+                    return self._json(200, {"categorias": {"revesta": [{"id": "7"}]}, "boletos": [{"id": "B1", "versao": "v1"}]})
                 if self.path.startswith("/fin/pendentes"):
                     return self._json(200, {"categorias": [{"id": "1"}], "notas": [{"chave": "N1", "staged_at": "s1", "itens": []}]})
                 cursor = dict(p.split("=") for p in self.path.split("?")[1].split("&")).get("cursor")
@@ -310,6 +312,9 @@ class PonteFinanceiroTest(unittest.TestCase):
             def do_POST(self):
                 corpo = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 teste.chamadas.append(("POST", self.path, self.headers.get("Authorization"), corpo))
+                if self.path == "/financeiro/boletos/sincronizar":
+                    pronta = {"boleto_id": "B0", "versao": "v0", "modelo": "m", "categoria_id": "7", "confianca": "alta", "motivo": "x"}
+                    return self._json(teste.orquestrador_status, {"prontas": [pronta]})
                 if self.path == "/financeiro/sincronizar":
                     pronta = {"chave": "N0", "staged_at": "s0", "modelo": "qwen2.5:14b", "itens": [{"item_id": "1"}]}
                     return self._json(teste.orquestrador_status, {"prontas": [pronta]})
@@ -360,6 +365,21 @@ class PonteFinanceiroTest(unittest.TestCase):
         self.assertEqual(self.ciclo(pendentes), (pendentes, False))
         self.assertIsNone(self.fila.cursor_financeiro())
         self.assertFalse([c for c in self.chamadas if c[1] == "/fin/sugestoes"])
+
+    def test_ponte_dos_boletos_tem_cursor_proprio(self):
+        anteriores = [{"boleto_id": "X", "versao": "v", "status": "aplicado", "http": 200}]
+        resultados, mais = coletor.sincronizar_boletos(self.fila, f"{self.base}/fin", f"{self.base}/incidentes", "t" * 32, anteriores)
+        self.assertEqual(resultados, [{"boleto_id": "B0", "versao": "v0", "status": "aplicado", "http": 200}])
+        self.assertTrue(mais)
+        self.assertEqual((self.fila.cursor_nomeado("boletos"), self.fila.cursor_financeiro()), ("c1", None))
+        sync = [c for c in self.chamadas if c[1] == "/financeiro/boletos/sincronizar"][0]
+        self.assertEqual((sync[3]["pendentes"], sync[3]["categorias"], sync[3]["resultados"]),
+                         ([{"id": "B1", "versao": "v1"}], {"revesta": [{"id": "7"}]}, anteriores))
+        aplicada = [c for c in self.chamadas if c[1] == "/fin/boletos/sugestoes"][0][3]
+        self.assertEqual((aplicada["boleto_id"], aplicada["categoria_id"], aplicada["versao"]), ("B0", "7", "v0"))
+        self.sugestao_status = 422
+        self.assertEqual(coletor.sincronizar_boletos(self.fila, f"{self.base}/fin", f"{self.base}/incidentes", "t" * 32, [])[0][0]["status"],
+                         "descartado")
 
     def test_automacao_fora_do_ar_nao_levanta(self):
         r = coletor.sincronizar_financeiro(self.fila, "http://127.0.0.1:9/fin", f"{self.base}/incidentes", "t" * 32, [{"chave": "X"}])

@@ -2,7 +2,7 @@
 
 Roda no venv de treino (requirements-train.txt), não no do RAGs:
 
-  .venv-treino/bin/python -m agentes.finetune_financeiro [--force] [--max-passos N] [--dpo]
+  .venv-treino/bin/python -m agentes.finetune_financeiro [--tarefa financeiro|boletos] [--force] [--max-passos N] [--dpo]
 
 ou pelo atalho `../RAGs/.venv/bin/python -m agentes finetune-financeiro ...`, que chama este mesmo
 módulo com o .venv-treino. Só usa a biblioteca padrão fora das funções de treino.
@@ -20,6 +20,9 @@ Passos:
      convert_lora_to_gguf.py do llama.cpp (clone raso em dados/llama.cpp na primeira vez): o
      adapter.gguf é o CANDIDATO. Ele não vai para o Ollama (o 0.40 não aceita mais ADAPTER): roda no
      llama-server sobre o mesmo GGUF da base (agentes/llama_server.py).
+
+--tarefa boletos treina o classificador dos boletos DDA (boletos_*.jsonl, de `treino-boletos`) no
+adaptador próprio dados/modelos/qwen-boletos-lora/: mesma base e mesmo motor, outro dataset.
 
 A promoção NÃO é aqui: `python -m agentes comparar-financeiro` mede o candidato contra o modelo atual
 na validação e só promove (`--promover`) se a acurácia for maior ou igual.
@@ -181,8 +184,10 @@ def converter_gguf(adaptador: Path) -> Path:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="finetune-financeiro", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--pasta", type=Path, default=DADOS / "treino", help="onde estão os financeiro_*.jsonl")
-    p.add_argument("--saida", type=Path, default=DADOS / "modelos" / "qwen-financeiro-lora")
+    p.add_argument("--tarefa", choices=("financeiro", "boletos"), default="financeiro",
+                   help="financeiro = itens de NF-e; boletos = boletos DDA sem conta (dataset e adaptador próprios)")
+    p.add_argument("--pasta", type=Path, default=DADOS / "treino", help="onde estão os <tarefa>_*.jsonl")
+    p.add_argument("--saida", type=Path, default=None, help="padrão: dados/modelos/qwen-<tarefa>-lora")
     p.add_argument("--min-exemplos", type=int, default=100)
     p.add_argument("--force", action="store_true", help="treina mesmo abaixo de --min-exemplos (teste do caminho)")
     p.add_argument("--base", default=BASE_HF)
@@ -194,14 +199,16 @@ def main(argv=None) -> int:
     p.add_argument("--nao-parar-servico", action="store_true")
     p.add_argument("--sem-gguf", action="store_true", help="só treina e salva o adaptador em safetensors")
     args = p.parse_args(argv)
+    t = args.tarefa
+    args.saida = args.saida or DADOS / "modelos" / f"qwen-{t}-lora"
 
-    sft = ler_jsonl(args.pasta / "financeiro_sft.jsonl")
-    dpo = ler_jsonl(args.pasta / "financeiro_dpo.jsonl")
+    sft = ler_jsonl(args.pasta / f"{t}_sft.jsonl")
+    dpo = ler_jsonl(args.pasta / f"{t}_dpo.jsonl")
     if not sft:
-        print(f"Sem {args.pasta / 'financeiro_sft.jsonl'}: rode antes `python -m agentes treino-financeiro`.", file=sys.stderr)
+        print(f"Sem {args.pasta / f'{t}_sft.jsonl'}: rode antes `python -m agentes treino-{t}`.", file=sys.stderr)
         return 2
     if len(sft) < args.min_exemplos and not args.force:
-        print(f"Só {len(sft)} exemplo(s) de SFT (mínimo {args.min_exemplos}). Espere mais notas confirmadas ou use --force.", file=sys.stderr)
+        print(f"Só {len(sft)} exemplo(s) de SFT (mínimo {args.min_exemplos}). Espere mais confirmações ou use --force.", file=sys.stderr)
         return 2
     print(f"[*] SFT: {len(sft)} exemplo(s) · DPO: {len(dpo)} par(es){'' if args.dpo else ' (desligado)'}")
 
@@ -215,7 +222,7 @@ def main(argv=None) -> int:
         return 0
     gguf = converter_gguf(args.saida)
     print(f"[*] Candidato: {gguf}. Compare antes de promover:\n"
-          "    ../RAGs/.venv/bin/python -m agentes comparar-financeiro")
+          f"    ../RAGs/.venv/bin/python -m agentes comparar-{t}")
     return 0
 
 

@@ -317,6 +317,24 @@ export const ROUTE_RULES: readonly RouteRule[] = Object.freeze([
     sample: "/api/agentes-qwen/financeiro/confirmadas-recentes",
   },
   { method: "POST", path: "/api/agentes-qwen/financeiro/sugestoes", access: PUBLIC, sample: "/api/agentes-qwen/financeiro/sugestoes" },
+  {
+    method: "GET",
+    path: "/api/agentes-qwen/financeiro/boletos/pendentes",
+    access: PUBLIC,
+    sample: "/api/agentes-qwen/financeiro/boletos/pendentes",
+  },
+  {
+    method: "GET",
+    path: "/api/agentes-qwen/financeiro/boletos/confirmadas-recentes",
+    access: PUBLIC,
+    sample: "/api/agentes-qwen/financeiro/boletos/confirmadas-recentes",
+  },
+  {
+    method: "POST",
+    path: "/api/agentes-qwen/financeiro/boletos/sugestoes",
+    access: PUBLIC,
+    sample: "/api/agentes-qwen/financeiro/boletos/sugestoes",
+  },
 
   // ---- Livres para qualquer logado (fora do catálogo)
   { method: "GET", path: "/api/auth/me", access: FREE, sample: "/api/auth/me" },

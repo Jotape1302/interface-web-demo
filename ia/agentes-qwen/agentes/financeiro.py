@@ -329,14 +329,16 @@ _aviso_motor = threading.Event()
 
 
 @contextlib.contextmanager
-def motor():
+def motor(adaptador: Optional[Path] = None, modelo: str = ""):
     """
-    (gerar, nome do modelo) do lote: com o adaptador promovido (config.ADAPTADOR_FINANCEIRO), o
-    llama-server sobre a base do Ollama; sem ele, ou se o llama-server não subir, o Ollama puro.
+    (gerar, nome do modelo) do lote: com o adaptador promovido (config.ADAPTADOR_FINANCEIRO, ou o
+    `adaptador` de outra tarefa, como os boletos DDA), o llama-server sobre a base do Ollama; sem
+    ele, ou se o llama-server não subir, o Ollama puro.
     """
-    adaptador = config.ADAPTADOR_FINANCEIRO
+    adaptador = adaptador or config.ADAPTADOR_FINANCEIRO
+    modelo = modelo or config.MODELO_FINANCEIRO
     if not adaptador.is_file():
-        yield llm.gerar, config.MODELO_FINANCEIRO
+        yield llm.gerar, modelo
         return
     from . import llama_server
 
@@ -346,7 +348,7 @@ def motor():
         if not _aviso_motor.is_set():
             logger.warning("Adaptador promovido, mas o llama-server não subiu (%s): lote no Ollama sem adaptador", erro)
             _aviso_motor.set()
-        yield llm.gerar, config.MODELO_FINANCEIRO
+        yield llm.gerar, modelo
         return
     _aviso_motor.clear()
     try:
@@ -382,17 +384,27 @@ def _processar(banco: Banco, categorias: list[dict], limite: int, gerar: Callabl
     return feitas
 
 
-def trabalhar(banco: Banco, chegou: threading.Event, parar: threading.Event) -> None:
-    """Linha própria do classificador: uma nota não espera um incidente inteiro (executor + testes)."""
+def trabalhar(banco: Banco, chegou: threading.Event, parar: threading.Event,
+              passos: Optional[list[tuple[str, Callable[[Banco], int]]]] = None) -> None:
+    """
+    Linha própria dos classificadores: uma nota não espera um incidente inteiro (executor + testes).
+    `passos`: (nome, função da fila) rodados em sequência na mesma linha, para nunca subirem dois
+    llama-server juntos (padrão: só a NF-e; o servir junta os boletos DDA, boletos.processar_fila).
+    """
+    passos = passos or [("NF-e", processar_fila)]
     while not parar.is_set():
-        try:
-            feitas = processar_fila(banco)
-        except llm.OllamaFora as erro:
-            logger.warning("Classificador de NF-e: Ollama fora (%s); tenta de novo em %s s", erro, config.ESPERA_OLLAMA_FORA)
-            parar.wait(config.ESPERA_OLLAMA_FORA)
-            continue
-        except Exception:  # noqa: BLE001 — a linha do classificador nunca morre
-            logger.exception("Falha no classificador de NF-e")
+        feitas, esperar = 0, False
+        for nome, passo in passos:
+            try:
+                feitas += passo(banco)
+            except llm.OllamaFora as erro:
+                logger.warning("Classificador de %s: Ollama fora (%s); tenta de novo em %s s", nome, erro, config.ESPERA_OLLAMA_FORA)
+                esperar = True
+                break
+            except Exception:  # noqa: BLE001 — a linha do classificador nunca morre
+                logger.exception("Falha no classificador de %s", nome)
+                esperar = True
+        if esperar:
             parar.wait(config.ESPERA_OLLAMA_FORA)
             continue
         if not feitas:

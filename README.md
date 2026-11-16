@@ -48,6 +48,15 @@ nem em API paga. A VPS só conversa com eles por um túnel SSH reverso aberto pe
     → `importar-atividades`), e um **adaptador LoRA (QLoRA/Unsloth)** é treinado, comparado com o
     modelo atual num conjunto separado (`comparar-financeiro`) e só **promovido** se ganhar. Depois
     disso, o lote roda no `llama-server` com o adaptador.
+- **Classificador de categorias dos boletos DDA** — `ia/agentes-qwen/agentes/boletos*.py`,
+  `treino_boletos.py`; lado do painel em `automacoes-financeiro/app/dda_categoria.py`
+  (`/api/v1/dda/qwen/*`) e nos cards de *Contas a Pagar → Boletos DDA*.
+  - Boleto não tem itens: decide o **fornecedor**. O histórico vem das saídas de caixa do ERP de cada
+    empresa e das escolhas feitas no painel. Escolha anterior no painel, ou categoria com ≥ 80% dos
+    lançamentos do fornecedor, vence sozinha; fornecedor novo ou dividido entre categorias vai ao Qwen,
+    que vê a distribuição por valor e fornecedores parecidos (bge-m3).
+  - Mesmo pipeline da NF-e com **dataset e adaptador LoRA próprios** (`finetune-boletos`), e o portão
+    `comparar-boletos` mede também o "histórico sozinho" como linha de base.
 - **Agentes de incidentes de produção** — `ia/agentes-qwen/` + `scripts/coletor-incidentes/`, com a
   tela em *Admin → Agentes Qwen* e o botão **Reportar erro** em todas as telas.
   - Um coletor na VPS lê os logs dos contêineres, mascara dados sensíveis e manda cada erro ao PC.

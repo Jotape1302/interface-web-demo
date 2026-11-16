@@ -12,6 +12,7 @@ import { methodNotAllowed, parseJsonBody, type RequestContext } from "../http.js
 // /financeiro/* é a ponte do classificador Qwen da revisão de NF-e: o coletor roda no host e não
 // alcança a automação (porta 8000 só na rede do compose), então o gateway repassa com a chave
 // interna, com a mesma proteção do /estado. Status da automação (404/409/422) volta como veio.
+// /financeiro/boletos/* faz o mesmo para o classificador dos boletos DDA (rotas /api/v1/dda/qwen/*).
 const FINANCEIRO_PREFIXO = "/api/agentes-qwen/financeiro/";
 
 export function createAgentesQwenRoutes(deps: { agentesQwen?: AgentesQwenService; audit?: AuditService; danfe?: DanfeService }) {
@@ -40,11 +41,15 @@ export function createAgentesQwenRoutes(deps: { agentesQwen?: AgentesQwenService
       }
     }
 
+    // /financeiro/boletos/* é a mesma ponte para o classificador dos boletos DDA sem conta.
     if (
       (path === "/api/agentes-qwen/financeiro/pendentes" && method === "GET") ||
       (path === "/api/agentes-qwen/financeiro/confirmadas-recentes" && method === "GET") ||
+      (path === "/api/agentes-qwen/financeiro/boletos/pendentes" && method === "GET") ||
+      (path === "/api/agentes-qwen/financeiro/boletos/confirmadas-recentes" && method === "GET") ||
       // Gravação das sugestões prontas (resposta do PC):
-      (path === "/api/agentes-qwen/financeiro/sugestoes" && method === "POST")
+      (path === "/api/agentes-qwen/financeiro/sugestoes" && method === "POST") ||
+      (path === "/api/agentes-qwen/financeiro/boletos/sugestoes" && method === "POST")
     ) {
       if (request.headers["x-forwarded-for"] || !agentesQwen.tokenValido(request.headers.authorization)) {
         return send(401, { error: "Não autorizado" });

@@ -27,7 +27,8 @@ Fluxo:
      não tem porta no host) as notas sem classificação e uma página das confirmadas, entrega em
      POST /financeiro/sincronizar do orquestrador e aplica as classificações prontas que voltam
      (POST .../financeiro/sugestoes). O que aconteceu com cada uma vai no ciclo seguinte; sem isso
-     o orquestrador manda de novo.
+     o orquestrador manda de novo. No mesmo ciclo, a ponte dos boletos DDA sem conta faz o mesmo
+     com .../financeiro/boletos/* e POST /financeiro/boletos/sincronizar (cursor próprio).
 
 O orquestrador é alcançado em 127.0.0.1:<porta> da VPS, a ponta do túnel SSH reverso aberto pelo
 PC. O Ollama nunca fica exposto.
@@ -280,6 +281,7 @@ class Fila:
             CREATE TABLE IF NOT EXISTS fila (id INTEGER PRIMARY KEY, payload TEXT, tentativas INTEGER DEFAULT 0, proxima REAL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS cursor (id INTEGER PRIMARY KEY CHECK (id = 1), ts TEXT);
             CREATE TABLE IF NOT EXISTS cursor_financeiro (id INTEGER PRIMARY KEY CHECK (id = 1), valor TEXT);
+            CREATE TABLE IF NOT EXISTS cursores (nome TEXT PRIMARY KEY, valor TEXT);
             """
         )
 
@@ -331,6 +333,14 @@ class Fila:
     def salvar_cursor_financeiro(self, valor: str) -> None:
         with self.trava:
             self.db.execute("INSERT INTO cursor_financeiro VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET valor=excluded.valor", (valor,))
+
+    def cursor_nomeado(self, nome: str) -> Optional[str]:
+        linha = self.db.execute("SELECT valor FROM cursores WHERE nome=?", (nome,)).fetchone()
+        return linha[0] if linha else None
+
+    def salvar_cursor_nomeado(self, nome: str, valor: str) -> None:
+        with self.trava:
+            self.db.execute("INSERT INTO cursores VALUES (?, ?) ON CONFLICT(nome) DO UPDATE SET valor=excluded.valor", (nome, valor))
 
 
 def enviar_pendentes(fila: Fila, url: str, token: str, parar: threading.Event, compose_dir: Path) -> None:
@@ -476,15 +486,80 @@ def sincronizar_financeiro(
     return novos, bool(corpo["confirmadas"]) and not pagina.get("fim", True)
 
 
+def _aplicar_sugestao_boleto(fin_url: str, token: str, pronta: dict) -> Optional[dict]:
+    """Grava a classificação de um boleto DDA. None: falha passageira, o orquestrador manda de novo."""
+    corpo = {c: pronta.get(c) for c in ("boleto_id", "versao", "modelo", "categoria_id", "confianca", "motivo")}
+    base = {"boleto_id": pronta.get("boleto_id"), "versao": pronta.get("versao")}
+    try:
+        _json(f"{fin_url}/boletos/sugestoes", {"Authorization": f"Bearer {token}"}, corpo)
+        return {**base, "status": "aplicado", "http": 200}
+    except urllib.error.HTTPError as erro:
+        if erro.code in (404, 409, 422):
+            logger.info("Sugestão do Qwen para o boleto %s descartada pela automação (HTTP %s)", pronta.get("boleto_id"), erro.code)
+            return {**base, "status": "descartado", "http": erro.code}
+        logger.warning("Automação financeira recusou a sugestão do boleto %s: HTTP %s", pronta.get("boleto_id"), erro.code)
+    except (urllib.error.URLError, OSError, ValueError) as erro:
+        logger.debug("Sugestão do boleto %s não aplicada: %s", pronta.get("boleto_id"), erro)
+    return None
+
+
+def sincronizar_boletos(
+    fila: Fila, fin_url: str, url: str, token: str, resultados: List[dict]
+) -> Tuple[List[dict], bool]:
+    """Um ciclo da ponte dos boletos DDA sem conta (mesmo desenho de sincronizar_financeiro)."""
+    vps = {"Authorization": f"Bearer {token}"}
+    cursor = fila.cursor_nomeado("boletos")
+    try:
+        pendentes = _json(f"{fin_url}/boletos/pendentes?limit={FINANCEIRO_PENDENTES}", vps)
+        consulta = urlencode({"limit": FINANCEIRO_CONFIRMADAS, **({"cursor": cursor} if cursor else {})})
+        pagina = _json(f"{fin_url}/boletos/confirmadas-recentes?{consulta}", vps)
+    except urllib.error.HTTPError as erro:
+        nivel = logging.DEBUG if erro.code in (502, 503) else logging.WARNING
+        logger.log(nivel, "Ponte dos boletos: gateway respondeu HTTP %s em %s", erro.code, erro.url)
+        return resultados, False
+    except (urllib.error.URLError, OSError, ValueError) as erro:
+        logger.debug("Ponte dos boletos: automação financeira fora do ar (%s)", erro)
+        return resultados, False
+
+    corpo = {
+        "categorias": pendentes.get("categorias") or {},
+        "pendentes": pendentes.get("boletos") or [],
+        "confirmadas": pagina.get("confirmadas") or [],
+        "resultados": resultados,
+    }
+    destino = re.sub(r"/incidentes$", "/financeiro/boletos/sincronizar", url)
+    try:
+        resposta = _json(destino, vps, corpo, timeout=60)
+    except urllib.error.HTTPError as erro:
+        logger.warning("Ponte dos boletos: orquestrador respondeu HTTP %s", erro.code)
+        return resultados, False
+    except (urllib.error.URLError, OSError, ValueError) as erro:
+        logger.debug("Ponte dos boletos: orquestrador fora do ar (%s)", erro)
+        return resultados, False
+
+    if pagina.get("cursor") and pagina["cursor"] != cursor:
+        fila.salvar_cursor_nomeado("boletos", pagina["cursor"])
+    novos = [r for r in (_aplicar_sugestao_boleto(fin_url, token, p) for p in resposta.get("prontas") or []) if r]
+    aplicados = sum(1 for r in novos if r["status"] == "aplicado")
+    if aplicados:
+        logger.info("Ponte dos boletos: %s sugestão(ões) do Qwen aplicada(s) nos boletos DDA", aplicados)
+    return novos, bool(corpo["confirmadas"]) and not pagina.get("fim", True)
+
+
 def sincronizar_financeiro_sempre(fila: Fila, fin_url: str, url: str, token: str, parar: threading.Event) -> None:
     resultados: List[dict] = []
+    resultados_boletos: List[dict] = []
     while not parar.is_set():
-        mais = False
+        mais = mais_boletos = False
         try:
             resultados, mais = sincronizar_financeiro(fila, fin_url, url, token, resultados)
         except Exception:  # noqa: BLE001 — a ponte nunca derruba o coletor
             logger.exception("Falha na ponte do classificador")
-        parar.wait(FINANCEIRO_PAGINA_SEGUINTE if mais else FINANCEIRO_INTERVALO)
+        try:
+            resultados_boletos, mais_boletos = sincronizar_boletos(fila, fin_url, url, token, resultados_boletos)
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha na ponte dos boletos")
+        parar.wait(FINANCEIRO_PAGINA_SEGUINTE if mais or mais_boletos else FINANCEIRO_INTERVALO)
 
 
 def commit_atual(compose_dir: Path) -> str:

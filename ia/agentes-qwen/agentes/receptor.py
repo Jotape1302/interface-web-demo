@@ -5,7 +5,8 @@ POST /incidentes, POST /execucoes (contagem por rota, para o monitor) e GET /pai
 aba "Agentes Qwen" do painel, que o coletor repassa ao gateway) exigem
 `Authorization: Bearer <INCIDENTES_TOKEN>`. POST /comandos traz o que o TI pediu na aba (hoje só
 {"acao": "resolver", "incidente", "nota", "por"}), repassado pelo coletor. POST /financeiro/sincronizar
-é a ponte do classificador de NF-e (financeiro_fila.py), com limite de corpo próprio.
+é a ponte do classificador de NF-e (financeiro_fila.py), com limite de corpo próprio; POST
+/financeiro/boletos/sincronizar, a dos boletos DDA sem conta (boletos_fila.py).
 GET /saude responde sem token.
 """
 
@@ -18,7 +19,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-from . import config, financeiro_fila, painel
+from . import boletos_fila, config, financeiro_fila, painel
 from .banco import Banco
 
 logger = logging.getLogger("agentes.receptor")
@@ -59,12 +60,12 @@ def criar_servidor(
                 self._responder(404, {"erro": "não encontrado"})
 
         def do_POST(self) -> None:
-            if self.path not in ("/incidentes", "/execucoes", "/comandos", "/financeiro/sincronizar"):
+            if self.path not in ("/incidentes", "/execucoes", "/comandos", "/financeiro/sincronizar", "/financeiro/boletos/sincronizar"):
                 return self._responder(404, {"erro": "não encontrado"})
             if not self._autorizado():
                 return None
             tamanho = int(self.headers.get("Content-Length") or 0)
-            limite = config.CORPO_MAX_FINANCEIRO if self.path == "/financeiro/sincronizar" else config.CORPO_MAX
+            limite = config.CORPO_MAX_FINANCEIRO if self.path.startswith("/financeiro/") else config.CORPO_MAX
             if not 0 < tamanho <= limite:
                 return self._responder(413, {"erro": "corpo vazio ou grande demais"})
             try:
@@ -78,6 +79,15 @@ def criar_servidor(
                 resposta = financeiro_fila.sincronizar(banco, inc)
                 if resposta["pendentes_novas"]:
                     logger.info("Financeiro: %s nota(s) nova(s) para classificar", resposta["pendentes_novas"])
+                    (nota_chegou or chegou).set()
+                return self._responder(200, resposta)
+            if self.path == "/financeiro/boletos/sincronizar":
+                erro = boletos_fila.validar(inc)
+                if erro:
+                    return self._responder(400, {"erro": erro})
+                resposta = boletos_fila.sincronizar(banco, inc)
+                if resposta["pendentes_novas"]:
+                    logger.info("Boletos DDA: %s boleto(s) novo(s) para classificar", resposta["pendentes_novas"])
                     (nota_chegou or chegou).set()
                 return self._responder(200, resposta)
             if self.path == "/comandos" and isinstance(inc, dict) and inc.get("acao") == "reportar":

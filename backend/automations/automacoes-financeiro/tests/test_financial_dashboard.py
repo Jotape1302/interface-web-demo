@@ -693,3 +693,31 @@ def test_dados_desatualizados_aponta_fonte_com_dado_velho():
     assert resp["dados_desatualizados"] == [
         {"account_id": "fabrilux", "label": "Fabrilux", "fonte": "caixa", "synced_at": "2026-09-19T06:05:00"}
     ]
+
+
+class _StubClientSaidasComFornecedor(_StubClientOwnCategoryCatalog):
+    """Saídas de /caixa por categoria com o contato: viram histórico de categoria dos boletos DDA."""
+
+    ALUGUEL_ID = "777"
+
+    def list_categorias_receita_despesa_v3(self, token):
+        return [{"id": self.ALUGUEL_ID, "descricao": "Aluguel", "grupo": "Fixas"},
+                {"id": "888", "descricao": "Transferência entre Empresas", "grupo": "Transferências"}]
+
+    def list_caixa_v3(self, token, id_categoria=None, data_inicial=None, data_final=None, max_pages=None):
+        contato = {"nome": "Imobiliária X", "cpfCnpj": "11.222.333/0001-81"}
+        if id_categoria in (None, self.ALUGUEL_ID):
+            return [{"id": 41, "tipo": "D", "data": "2026-09-10", "valor": 3000.0, "contato": contato}]
+        if id_categoria == "888":
+            return [{"id": 42, "tipo": "D", "data": "2026-09-11", "valor": 9000.0, "contato": contato}]
+        return []
+
+
+def test_sync_one_company_grava_saidas_no_historico_do_dda():
+    from app import dda_categoria
+
+    _sync_one_company(_StubClientSaidasComFornecedor(), "27184930000107", "norvia_campinas", "2026-09-01", "2026-09-21")
+    registros = dda_categoria.historico.ler()["registros"]
+    assert list(registros) == ["tiny:norvia_campinas:41"]  # transferência entre empresas fica de fora
+    r = registros["tiny:norvia_campinas:41"]
+    assert (r["fornecedor"], r["categoria_id"], r["categoria_nome"], r["valor"]) == ("11222333000181", "777", "Aluguel", 3000.0)

@@ -189,9 +189,22 @@ test("rotas /financeiro: ponte do coletor até a automação, com o token do rep
   });
   assert.equal(sug.status, 409);
   assert.deepEqual(await sug.json(), { detail: "nota mudou" });
+  // Boletos DDA: mesma ponte, recurso com o prefixo "boletos/" (a automação manda para /api/v1/dda/qwen/*).
+  assert.equal((await fetch(`${base}/boletos/pendentes`)).status, 401);
+  assert.equal((await fetch(`${base}/boletos/pendentes?limit=5`, { headers: auth })).status, 200);
+  assert.equal((await fetch(`${base}/boletos/confirmadas-recentes?cursor=12`, { headers: auth })).status, 200);
+  const sugBoleto = await fetch(`${base}/boletos/sugestoes`, {
+    method: "POST",
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ boleto_id: "b1" }),
+  });
+  assert.equal(sugBoleto.status, 200);
   assert.deepEqual(chamadas, [
     { metodo: "GET", caminho: "pendentes?limit=10", corpo: undefined },
     { metodo: "GET", caminho: "confirmadas-recentes?limit=100&cursor=2026-11-03T10%3A00%3A00%7Cabc", corpo: undefined },
     { metodo: "POST", caminho: "sugestoes", corpo: { chave: "k" } },
+    { metodo: "GET", caminho: "boletos/pendentes?limit=5", corpo: undefined },
+    { metodo: "GET", caminho: "boletos/confirmadas-recentes?cursor=12", corpo: undefined },
+    { metodo: "POST", caminho: "boletos/sugestoes", corpo: { boleto_id: "b1" } },
   ]);
 });
