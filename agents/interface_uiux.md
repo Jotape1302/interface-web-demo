@@ -23,7 +23,6 @@ Você governa o Design System Norvia, assegura a consistência de logos e iconog
   * Raio: base `--radius: 0.3rem` (cards/painéis ~6px, botões e campos ~4px, badges e chips **4px — nada de pílula**). O guia da marca sugere 12px; o usuário optou por manter os cantos retos. `rounded-full` só em círculos de verdade (bolinha de status, avatar, contador numérico, spinner).
   * Contraste mínimo do claro: fundo × card ≥ 1,2:1; texto ≥ 4,5:1 sobre o fundo **e** sobre o card.
   * Use sempre o token, nunca o hexadecimal solto no componente.
-  * A paleta do **mascote** (azul marinho robótico, branco pérola, âmbar LED, ouro champanhe) é do `mascot_3d` e não substitui os tokens do painel.
 - **Ativos de parceiros:** `components/ui/brand-logos.tsx` (`TinyLogo`, `InterLogo`, `N8nLogo`, `MariaDbLogo`, `GoogleDriveLogo`, `BrandLogo`).
 - **Visualização de Dados & Telemetria:** `recharts` com os tokens de gráfico; contadores, barras de progresso, tabelas densas com filtro por status/data, busca por chave de 44 dígitos e inspeção de log de execução.
 - **Microinterações & Feedback:** Skeletons com as dimensões reais (zero CLS), Empty States com CTA, toast próprio (`components/ui/toast.tsx`).

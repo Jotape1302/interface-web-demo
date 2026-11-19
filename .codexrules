@@ -18,11 +18,10 @@
    Cada agente possui um domínio de atuação rigorosamente delimitado e catalogado em `registry.json`:
    * `orchestrator.md`: Triagem de complexidade, execução direta das demandas simples (no papel e nas fronteiras do agente dono) e, no loop de agentes, planejamento, sequenciamento de dependências, controle de estado e síntese de entregas.
    * `agents/interface_uiux.md`: Design System Norvia, hierarquia visual, ergonomia de dashboards fiscais, padronização de logos de parceiros e acessibilidade WCAG. Proibido de implementar lógicas de backend ou alterar regras de negócio.
-   * `agents/frontend.md`: Aplicação web administrativa em `frontend/` (vinext/Vite com convenções de rota do App Router, React 19, TypeScript, Tailwind CSS v4, export estático e consumo de `contracts.ts`; o Canvas WebGL do mascote com React Three Fiber é handoff futuro, ainda não implementado). Proibido de criar DDL de banco de dados ou orquestrar pipelines de dados no servidor.
+   * `agents/frontend.md`: Aplicação web administrativa em `frontend/` (vinext/Vite com convenções de rota do App Router, React 19, TypeScript, Tailwind CSS v4, export estático e consumo de `contracts.ts`). Proibido de criar DDL de banco de dados ou orquestrar pipelines de dados no servidor.
    * `agents/gateway.md`: API Gateway central Node.js/TypeScript (servidor HTTP nativo, sem framework) em `backend/gateway/` (porta 3100), roteamento, autenticação de sessão, agregação `/api/overview` e health checks de terceiros (n8n, Tiny ERP, Banco Inter). Proibido de alterar lógicas internas de automações ou gerar componentes de UI.
    * `agents/backend.md`: APIs de negócio (FastAPI/Node.js), persistência MariaDB com SQL puro (sem ORM), transações idempotentes, suítes de teste (`pytest` / `tsx --test`). Proibido de gerar interfaces gráficas ou manipular código de frontend.
    * `agents/automation_engineer.md`: Motores autônomos em `backend/automations/<slug>/` (RPA Python, OCR de DANFEs, código de barras, envelopes SOAP SEFAZ mTLS A1 e conectores ERP). Proibido de alterar o roteamento central do Gateway ou componentes visuais de frontend.
-   * `agents/mascot_3d.md`: Automação 3D em Blender CLI (`bpy`/`bmesh`), rigging mecânico modular, materiais PBR (esmalte pérola, azul robótico, ouro champanhe), iluminação LED emissiva real, máscaras geométricas de superfície e exportação GLTF/Draco otimizada para WebGL. Proibido de alterar código de infraestrutura ou regras de banco de dados.
    * `agents/devops.md`: Governança do monorepo, Dockerfiles, Docker rootless (volumes com ACL), snippets de compose para o usuário, CI de segurança, backup, gestão de portas e proteção de segredos. Proibido de alterar regras de negócio de automações ou regras visuais de UI.
    * `agents/security_auditor.md`: Auditoria de segurança somente leitura (código, dependências, segredos no histórico git, infraestrutura), com severidade calibrada ao modelo de ameaça da intranet e handoff das correções ao agente dono. Proibido de alterar código, configuração ou histórico git e de ler arquivos protegidos pelo `.gitignore`.
    * `agents/technical_writer.md`: Documentação fiel ao código (READMEs, `docs/`, `.env.example`, `registry.json`, `orchestrator.md`, `.codexrules`, `agents/`). Proibido de alterar código de produção, testes ou configuração executável e de documentar segredos reais.
@@ -53,14 +52,10 @@
    - Uma DANFE só é considerada lançada **se e somente se o processamento for concluído com 100% de sucesso** no ERP (Tiny) e no banco de dados.
    - Caso ocorra QUALQUER falha de validação, erro de OCR, rejeição SEFAZ (inclusive bloqueio por rate limit, `cStat 656`) ou inconsistência contábil, a nota permanece em revisão pendente, com registro do erro.
 
-3. REGRA DE OURO DO MASCOTE 3D (MÁSCARAS GEOMÉTRICAS):
-   - É terminantemente PROIBIDO tentar apagar ou pintar logos antigos editando pixels diretamente em atlas de texturas UVs ou no mapa de normais (`texture_pbr_20250901_normal`). Isso destrói o espaço tangente Mikktspace e gera facetamento poligonal feio.
-   - A substituição de logos no peitoral e orelhas deve ser realizada via MÁSCARAS GEOMÉTRICAS (backing plates conformadas à curvatura da superfície, com offset de ~0.5mm e material Azul Marinho Royal `Mat_Robot_Navy`), sobre as quais são aplicados os novos monogramas 3D oficiais da Norvia.
-
-4. REGRA DE RESILIÊNCIA NO GATEWAY:
+3. REGRA DE RESILIÊNCIA NO GATEWAY:
    - O Gateway protege os upstreams (SEFAZ, Tiny ERP, Banco Inter e automações Python) com um Circuit Breaker próprio (`backend/gateway/src/circuit-breaker.ts`, estados CLOSED/OPEN/HALF_OPEN), sem biblioteca externa. Qualquer falha de conector deve degradar com mensagem clara no `/api/overview` (`connected: false`), nunca travar o painel nem lançar exceção não tratada. Novas dependências externas de resiliência só com alinhamento prévio.
 
-5. REGRA DE PADRONIZAÇÃO VISUAL E ERGONOMIA NA INTERFACE:
+4. REGRA DE PADRONIZAÇÃO VISUAL E ERGONOMIA NA INTERFACE:
    - Padronização de logos de parceiros (MariaDB, n8n, Tiny ERP, Banco Inter, Google Drive): cantos arredondados suaves, proporções equilibradas e fundo padronizado (evitando conflitos de fundo preto/branco e artefatos de borda).
    - Tela de login com identidade visual alinhada ao painel, logotipo oficial visível e textboxes limpas (`placeholder="Username/E-mail"`), sem credenciais padrão pré-preenchidas.
    - Histórico de execuções: telas de controle de automação (esteira de tokens, processador NFe) DEVEM exibir a tabela/painel com o histórico das últimas execuções em tempo real.
@@ -78,4 +73,3 @@
      * Dependências e artefatos de build (`node_modules/`, `dist/`, `.next/`, `.vinext/`, `.wrangler/`, `*.tsbuildinfo`).
      * Caches e logs (`*.log`, `__pycache__/`, `.pytest_cache/`, `.venv/`).
    - Consultar apenas arquivos rastreados publicamente e modelos de configuração (como `.env.example`).
-   - Exceção única: `artifacts/norvia-mascot/` (ignorado por ser binário grande, não por sigilo) pode ser lido e escrito pelo `agents/mascot_3d.md`, sem nunca ser commitado.

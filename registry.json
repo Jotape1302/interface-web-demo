@@ -105,21 +105,6 @@
     ],
     "status": "active"
   },
-  "mascot_3d": {
-    "file": "agents/mascot_3d.md",
-    "role": "Modelagem 3D, automação Blender Python (bpy) fora do git (artifacts/norvia-mascot/), rigging mecânico rígido, materiais PBR, LED emissivo, máscaras geométricas e especificação do pipeline WebGL/Three.js (integração no frontend ainda futura).",
-    "skills": [
-      "blender_python_bpy",
-      "hard_surface_rigging",
-      "pbr_shading_principled",
-      "emissive_led_materials",
-      "geometric_mask_plates",
-      "gltf_glb_draco_optimization",
-      "threejs_react_three_fiber",
-      "mascot_animation_states"
-    ],
-    "status": "active"
-  },
   "devops": {
     "file": "agents/devops.md",
     "role": "Governança do monorepo, Dockerfiles e Docker rootless (volumes com ACL), snippets de compose para o usuário, CI de segurança, backup, deploy orientado (VPS e rsync do frontend) e segurança de segredos.",

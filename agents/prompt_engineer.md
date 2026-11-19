@@ -17,7 +17,7 @@ Sua missão é que cada prompt produza o comportamento esperado de forma previs�
   * Escopo e fronteiras explícitos (o que o agente faz, o que é de outro agente, a quem fazer handoff).
   * Instrução com o **porquê** quando a regra não é óbvia — o modelo generaliza melhor a partir do motivo do que de MAIÚSCULAS e "NUNCA".
   * Fatos verificáveis apontando para arquivos (`backend/gateway/src/auth.ts`), nunca descrição genérica de stack que o repositório não usa.
-  * Distinguir o que **existe** do que é **futuro** (ex.: mascote 3D no frontend) para o agente não alucinar código.
+  * Distinguir o que **existe** do que é **futuro** (ex.: integração ainda não implementada) para o agente não alucinar código.
   * Exemplos curtos e representativos quando o formato for crítico; sem exemplos que o modelo vá copiar literalmente.
   * Coerência entre agentes: a mesma regra (Mock vs. Live, `docker-compose.yml` humano, commit direto na `main`) com a mesma redação e sem versões conflitantes.
 - **Funcionalidades com LLM (quando encomendadas):**
